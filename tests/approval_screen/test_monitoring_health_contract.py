@@ -125,6 +125,11 @@ def health_response_full() -> dict:
                 "configured": True,
                 "active": False,
                 "enabled": False,
+                "mode": "no_permission",
+                # 真源：SessionManager 两阶段策略（/health 用 **status 摊平，一定带这两个键）
+                "idle_warning_seconds": 600,
+                "idle_grace_seconds": 1200,
+                # 遗留展示值：不再决定撤销时机
                 "configured_idle_timeout_seconds": 300,
             },
         },
@@ -300,6 +305,12 @@ def test_no_alias_fallback_in_field_reads(monitoring_panel, health_response_full
     assert screen_card._field_labels["emergency"].text() != "—", "emergency_stopped 字段未读到值"
     assert screen_card._field_labels["confirm"].text() != "—", "require_confirm_default 字段未读到值"
     assert screen_card._field_labels["skip_cache"].text() != "—", "auto_skip_cache_size 字段未读到值"
+
+    # 空闲撤销时长必须显示两阶段之和（600+1200），不能退回遗留的 300 秒
+    # （遗留 takeover_idle_timeout_seconds 已不决定撤销时机，把它显示成"空闲超时"
+    #  就是 2026-09-30 那批"文档说 300 秒、代码是 30 分钟"失真的同一处根源）
+    timeout_text = screen_card._field_labels["authorization_timeout"].text()
+    assert timeout_text == "1800 秒", f"authorization_timeout 应显示 idle 两阶段之和: {timeout_text!r}"
 
     memory_card = monitoring_panel._cards["memory"]
     assert memory_card._field_labels["db_size"].text() != "—", "db_size_mb 字段未读到值"

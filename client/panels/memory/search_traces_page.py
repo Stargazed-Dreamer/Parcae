@@ -14,6 +14,10 @@ Ticket 08：替换 Ticket 03 占位页，接入真实功能：
 
 业务术语中文化：本页无业务术语（只读 + 清理），技术术语保留英文无括注
 （trace_id / query / candidates / final_results / score / latency_ms / days）
+
+unknown-outcome-evidence T15：本页多一个数据源切换「上下文投影」。
+检索追踪回答"召回了什么"，投影回答"召回之后真正上了上下文的是什么、被砍了哪些、
+顺序被谁改过、内容指纹是什么"。两段合在一个视图里对照看，不新建面板。
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import json
 from typing import Any
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -49,6 +54,8 @@ class SearchTracesPage(QWidget):
         self._workers: set = set()
         self._all_rows: list[dict] = []
         self._current_trace_id: int | None = None
+        # 数据源："traces"（检索过程）| "projections"（进入上下文那一段）
+        self._source = "traces"
         self._build_ui()
 
     # —— UI 构建 ——
@@ -59,13 +66,24 @@ class SearchTracesPage(QWidget):
                                    tokens.SPACE_LG, tokens.SPACE_LG)
         layout.setSpacing(tokens.SPACE_MD)
 
-        title = QLabel("检索追踪")
-        set_text_role(title, "heading")
-        layout.addWidget(title)
+        self._title = QLabel("检索追踪")
+        set_text_role(self._title, "heading")
+        layout.addWidget(self._title)
 
         # 筛选条
         filter_row = QHBoxLayout()
         filter_row.setSpacing(tokens.SPACE_SM)
+
+        filter_row.addWidget(self._label("看"))
+        self._source_combo = QComboBox()
+        self._source_combo.addItem("检索过程（为什么被召回）", "traces")
+        self._source_combo.addItem("上下文投影（召回后上了什么）", "projections")
+        self._source_combo.currentIndexChanged.connect(self._on_source_changed)
+        self._source_combo.setToolTip(
+            "检索 trace 到「召回返回」为止；投影 trace 记的是召回之后：\n"
+            "入选/丢弃/顺序被谁改过/内容指纹/有效性标记"
+        )
+        filter_row.addWidget(self._source_combo)
 
         filter_row.addWidget(self._label("数量"))
         self._limit_spin = QSpinBox()
@@ -88,13 +106,7 @@ class SearchTracesPage(QWidget):
 
         # 表格 + 详情
         self._table = TableWithDetail()
-        self._table.set_columns([
-            {"key": "id", "label": "trace_id", "width": 80},
-            {"key": "query_trunc", "label": "查询", "width": 260},
-            {"key": "ts", "label": "时间", "width": 160},
-            {"key": "final_count", "label": "命中数", "width": 80},
-            {"key": "latency_label", "label": "耗时", "width": 100},
-        ])
+        self._apply_source_columns()
         self._table.row_activated.connect(self._on_row_activated)
         layout.addWidget(self._table, 1)
 
@@ -128,6 +140,39 @@ class SearchTracesPage(QWidget):
         set_text_role(lbl, "secondary")
         return lbl
 
+    # —— 数据源切换（T15：检索过程 / 上下文投影） ——
+
+    def _apply_source_columns(self) -> None:
+        if self._source == "projections":
+            self._table.set_columns([
+                {"key": "id", "label": "proj_id", "width": 70},
+                {"key": "surface", "label": "注入面", "width": 170},
+                {"key": "task_type", "label": "场景", "width": 150},
+                {"key": "selected_label", "label": "上屏", "width": 90},
+                {"key": "ts", "label": "时间", "width": 160},
+                {"key": "digest_label", "label": "内容指纹", "width": 120},
+            ])
+        else:
+            self._table.set_columns([
+                {"key": "id", "label": "trace_id", "width": 80},
+                {"key": "query_trunc", "label": "查询", "width": 260},
+                {"key": "ts", "label": "时间", "width": 160},
+                {"key": "final_count", "label": "命中数", "width": 80},
+                {"key": "latency_label", "label": "耗时", "width": 100},
+            ])
+
+    def _on_source_changed(self, _index: int) -> None:
+        self._source = self._source_combo.currentData() or "traces"
+        self._title.setText(
+            "上下文投影（召回之后上了什么）" if self._source == "projections"
+            else "检索追踪"
+        )
+        # 清理只针对检索 trace；投影没有清理入口（保留策略由维护器统一管）
+        self._cleanup_btn.setEnabled(self._source == "traces")
+        self._cleanup_days_spin.setEnabled(self._source == "traces")
+        self._apply_source_columns()
+        self.refresh()
+
     def _on_reset(self) -> None:
         self._limit_spin.setValue(20)
         self._cleanup_days_spin.setValue(0)
@@ -143,16 +188,22 @@ class SearchTracesPage(QWidget):
     # —— 公共 API ——
 
     def refresh(self) -> None:
-        """触发 GET /memory/search/traces?limit=N（异步 HttpWorker）"""
+        """按当前数据源拉列表：GET /memory/search/traces 或 /memory/projections"""
         params: dict[str, Any] = {"limit": self._limit_spin.value()}
-        worker = HttpWorker("get", "/memory/search/traces",
-                            params=params, http_client=self._http)
+        path = (
+            "/memory/projections" if self._source == "projections"
+            else "/memory/search/traces"
+        )
+        worker = HttpWorker("get", path, params=params, http_client=self._http)
         self._workers.add(worker)
         worker.finished.connect(lambda _=None, w=worker: self._workers.discard(w))
         worker.done.connect(self._on_list_done)
         worker.failed.connect(self._on_list_failed)
         worker.start()
-        self._status_label.setText("正在查询检索追踪 ...")
+        self._status_label.setText(
+            "正在查询上下文投影 ..." if self._source == "projections"
+            else "正在查询检索追踪 ..."
+        )
 
     def apply_jump_params(self, params: dict) -> None:
         """接收 overview 跳转参数（如有 limit 覆盖）"""
@@ -172,6 +223,29 @@ class SearchTracesPage(QWidget):
         if not isinstance(data, dict):
             self._status_label.setText("返回数据格式异常")
             return
+        if self._source == "projections":
+            rows_raw = data.get("projections") or []
+            if not isinstance(rows_raw, list):
+                self._status_label.setText("返回数据格式异常")
+                return
+            self._all_rows = []
+            for p in rows_raw:
+                if not isinstance(p, dict):
+                    continue
+                selected = p.get("selected_keys")
+                # 列表端点不返回 JSON 明细，用 injected_chars 粗算条数即可
+                self._all_rows.append({
+                    **p,
+                    "task_type": p.get("task_type") or "-",
+                    "selected_label": str(
+                        len(selected) if isinstance(selected, list) else ""
+                    ) or "-",
+                    "digest_label": _truncate(str(p.get("injected_text_digest") or ""), 12),
+                })
+            self._status_label.setText(f"已加载 {len(self._all_rows)} 条投影记录")
+            self._table.set_rows(self._all_rows)
+            return
+
         traces = data.get("traces") or []
         if not isinstance(traces, list):
             self._status_label.setText("返回数据格式异常")
@@ -193,20 +267,21 @@ class SearchTracesPage(QWidget):
         self._table.clear()
 
     def _on_row_activated(self, row: dict) -> None:
-        """行点击 → 异步拉 GET /memory/search/traces/{trace_id} 详情 + 渲染"""
-        trace_id = row.get("id") if isinstance(row, dict) else None
+        """行点击 → 按数据源拉详情（trace 或 projection）+ 渲染"""
+        record_id = row.get("id") if isinstance(row, dict) else None
         try:
-            self._current_trace_id = int(trace_id) if trace_id is not None else None
+            self._current_trace_id = int(record_id) if record_id is not None else None
         except (ValueError, TypeError):
             self._current_trace_id = None
         if self._current_trace_id is None:
             self._table.set_detail_markdown("")
             return
-        worker = HttpWorker(
-            "get",
-            f"/memory/search/traces/{self._current_trace_id}",
-            http_client=self._http,
+        path = (
+            f"/memory/projections/{self._current_trace_id}"
+            if self._source == "projections"
+            else f"/memory/search/traces/{self._current_trace_id}"
         )
+        worker = HttpWorker("get", path, http_client=self._http)
         self._workers.add(worker)
         worker.finished.connect(lambda _=None, w=worker: self._workers.discard(w))
         worker.done.connect(self._on_detail_done)
@@ -216,6 +291,9 @@ class SearchTracesPage(QWidget):
     def _on_detail_done(self, data: Any) -> None:
         if not isinstance(data, dict):
             self._table.set_detail_markdown("*详情数据格式异常*")
+            return
+        if self._source == "projections":
+            self._table.set_detail_markdown(_render_projection_detail_md(data))
             return
         md = _render_trace_detail_md(data)
         self._table.set_detail_markdown(md)
@@ -291,6 +369,68 @@ def _format_latency(ms: Any) -> str:
         return f"{v / 1000:.2f} s"
     except (ValueError, TypeError):
         return str(ms)
+
+
+def _render_projection_detail_md(detail: dict) -> str:
+    """渲染单条上下文投影记录，回答"这次到底上了什么、谁改了顺序"。
+
+    Args:
+        detail: GET /memory/projections/{id} 返回的 dict
+    """
+    lines: list[str] = []
+    proj_id = detail.get("id")
+    lines.append(f"### 投影 #{proj_id}　{detail.get('ts', '')}")
+    lines.append(f"- 注入面：`{detail.get('surface', '-')}`")
+    lines.append(f"- 消费场景：`{detail.get('task_type') or '-'}`")
+    trace_id = detail.get("trace_id")
+    lines.append(
+        f"- 关联检索 trace：`{trace_id if trace_id is not None else '（无：定向召回不产生检索 trace）'}`"
+    )
+    lines.append(
+        f"- 注入文本：{detail.get('injected_chars', 0)} 字符　"
+        f"digest `{'-' if not detail.get('injected_text_digest') else str(detail['injected_text_digest'])[:16]}`"
+    )
+
+    selected = detail.get("selected_keys") or []
+    dropped = detail.get("dropped_keys") or []
+    rank_before = detail.get("rank_before") or []
+    rank_after = detail.get("rank_after") or []
+    flags = detail.get("validation_flags") or {}
+
+    lines.append("\n**上屏顺序（这就是模型实际看到的顺序）**")
+    if isinstance(selected, list) and selected:
+        for i, key in enumerate(selected, 1):
+            doubt = flags.get(str(key)) if isinstance(flags, dict) else None
+            lines.append(f"{i}. `{key}`" + (f"　⚠ {doubt}" if doubt else ""))
+    else:
+        lines.append("_（无）_")
+
+    if isinstance(dropped, list) and dropped:
+        lines.append("\n**被上限砍掉（召回到了但没上屏）**")
+        for key in dropped:
+            lines.append(f"- `{key}`")
+
+    if isinstance(rank_before, list) and rank_before:
+        same = [str(k) for k in rank_before[: len(selected)]] == [str(k) for k in selected]
+        lines.append("\n**上游召回顺序**")
+        lines.append("_与上屏顺序一致（下游没有重排）_" if same else "_与上屏顺序不同：注入面按业务档位重排过_")
+        for i, key in enumerate(rank_before, 1):
+            lines.append(f"{i}. `{key}`")
+
+    if isinstance(rank_after, list) and rank_after and rank_after != selected:
+        lines.append("\n**投影时记录的上屏顺序**")
+        for i, key in enumerate(rank_after, 1):
+            lines.append(f"{i}. `{key}`")
+
+    if isinstance(flags, dict) and flags:
+        lines.append("\n**有效性存疑项**")
+        for key, reason in flags.items():
+            lines.append(f"- `{key}`：{reason}")
+
+    note = detail.get("note")
+    if note:
+        lines.append(f"\n_备注：{note}_")
+    return "\n".join(lines)
 
 
 def _render_trace_detail_md(detail: dict) -> str:

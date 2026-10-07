@@ -10,6 +10,7 @@ SDD: temp/sdd/vl-provider-fallback/spec.md
 """
 
 import datetime
+import logging
 import time
 
 import pytest
@@ -173,6 +174,28 @@ class TestProviderExhaustedMark:
         vl_client._mark_provider_exhausted("ms", long_reason, kind="quota_exhausted", source="modelscope")
         assert len(vl_client._provider_exhausted["ms"]["reason"]) == 300
 
+    def test_trigger_model_is_recorded_and_named_in_log(self, vl_client, caplog):
+        """ADR 0044 第 5 条：连坐是接受的代价，代价必须看得见。
+
+        冷却按 key 级 ⇒ 同 key 其余 model 一起停。日志若只说"provider 额度耗尽"，
+        读日志的人查不到是哪个 model 把它拖停的，只能猜。
+        """
+        with caplog.at_level(logging.WARNING, logger="localagent.remote_vl"):
+            vl_client._mark_provider_exhausted(
+                "ms", "HTTP Error 503", kind="upstream_overload",
+                source="modelscope", model="qwen3-vl")
+
+        assert vl_client._provider_exhausted["ms"]["trigger_model"] == "qwen3-vl"
+        msgs = [r.getMessage() for r in caplog.records if "额度耗尽" in r.getMessage()]
+        assert len(msgs) == 1, msgs
+        assert "触发 model=qwen3-vl" in msgs[0]
+        assert "同 key 其余 model 一并不可选" in msgs[0]
+
+    def test_trigger_model_defaults_to_unknown_when_not_given(self, vl_client):
+        """model 是可选入参：不传也不能缺键，否则 status 侧要按两种形状读。"""
+        vl_client._mark_provider_exhausted("ms", "r", kind="quota_exhausted", source="modelscope")
+        assert vl_client._provider_exhausted["ms"]["trigger_model"] == "unknown"
+
 
 # ==================== Ticket 02: _call_with_failover provider 级 fallback ====================
 
@@ -182,7 +205,7 @@ class TestSingleExhaustedFallback:
     def test_modelscope_exhausted_fallback_to_ice(self, vl_client, monkeypatch):
         """modelscope 非并发 429 → 标记 provider 耗尽 → fallback 到 ice 成功"""
         candidates = [MODELSCOPE_KEY(), ICE_KEY()]
-        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc: candidates)
+        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc, **kw: candidates)
         vl_client._all_vl_candidates = lambda: candidates
 
         call_log = []
@@ -216,7 +239,7 @@ class TestSingleExhaustedFallback:
         # 预先标记 modelscope 耗尽
         vl_client._mark_provider_exhausted("ms", "prev 429", kind="quota_exhausted", source="modelscope")
         candidates = [MODELSCOPE_KEY(), ICE_KEY()]
-        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc: candidates)
+        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc, **kw: candidates)
         vl_client._all_vl_candidates = lambda: candidates
 
         call_log = []
@@ -241,7 +264,7 @@ class TestAllExhausted:
     def test_all_providers_exhausted_marks_global(self, vl_client, monkeypatch):
         """两个 provider 都非并发 429 → 返回 daily_exhausted + vl_quota.mark_daily_exhausted 被调"""
         candidates = [MODELSCOPE_KEY(), ICE_KEY()]
-        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc: candidates)
+        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc, **kw: candidates)
         vl_client._all_vl_candidates = lambda: candidates
 
         def _mock_call_chat(rk, messages, timeout=None):
@@ -277,7 +300,7 @@ class TestAllExhausted:
         """modelscope 已耗尽 → 只试 ice → ice 也 429 → 标记全局"""
         vl_client._mark_provider_exhausted("ms", "prev 429", kind="quota_exhausted", source="modelscope")
         candidates = [MODELSCOPE_KEY(), ICE_KEY()]
-        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc: candidates)
+        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc, **kw: candidates)
         vl_client._all_vl_candidates = lambda: candidates
 
         call_log = []
@@ -312,7 +335,7 @@ class TestServerErrorExhausted:
     def test_503_below_threshold_marks_cooldown_not_exhausted(self, vl_client, monkeypatch):
         """503 连续 < max_consecutive 次 → 只 mark_cooldown，不标记 exhausted"""
         candidates = [ICE_KEY()]
-        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc: candidates)
+        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc, **kw: candidates)
         vl_client._all_vl_candidates = lambda: candidates
 
         call_count = [0]
@@ -337,7 +360,7 @@ class TestServerErrorExhausted:
     def test_503_consecutive_marks_provider_exhausted(self, vl_client, monkeypatch):
         """503 连续 >= max_consecutive 次 → 标记 provider exhausted"""
         candidates = [MODELSCOPE_KEY(), ICE_KEY()]
-        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc: candidates)
+        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc, **kw: candidates)
         vl_client._all_vl_candidates = lambda: candidates
         # 降低阈值让 2 次 503 就标记（默认 max_attempts=3 不够 3 次 503）
         vl_client._provider_exhausted_max_consecutive = 2
@@ -362,11 +385,14 @@ class TestServerErrorExhausted:
         # ice 被 503 连续 2 次标记
         assert "ice" in vl_client._provider_exhausted
         assert vl_client._provider_exhausted["ice"]["kind"] == "upstream_overload"
+        # 调用点必须把触发的 model 传进去（不是只在那条直接调函数的用例里才有的字段）
+        assert vl_client._provider_exhausted["ice"]["trigger_model"] == "gpt-5.6-luna"
+        assert vl_client._provider_exhausted["ms"]["trigger_model"] == "qwen3-vl"
 
     def test_503_success_resets_consecutive_count(self, vl_client, monkeypatch):
         """503 后成功 → consecutive_server_errors 清零"""
         candidates = [ICE_KEY()]
-        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc: candidates)
+        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc, **kw: candidates)
         vl_client._all_vl_candidates = lambda: candidates
 
         call_count = [0]
@@ -417,7 +443,7 @@ class TestHealthStatus:
 
     def test_status_includes_provider_exhausted_field(self, vl_client, monkeypatch):
         """status() 包含 provider_exhausted 字段"""
-        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc: [])
+        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc, **kw: [])
         vl_client._all_vl_candidates = lambda: []
         status = vl_client.status()
         assert "provider_exhausted" in status
@@ -426,7 +452,7 @@ class TestHealthStatus:
     def test_status_shows_exhausted_provider(self, vl_client, monkeypatch):
         """status() 展示已耗尽 provider 的详细信息"""
         vl_client._mark_provider_exhausted("ms", "quota exceeded", kind="quota_exhausted", source="modelscope")
-        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc: [])
+        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc, **kw: [])
         vl_client._all_vl_candidates = lambda: []
         status = vl_client.status()
         pex = status["provider_exhausted"]
@@ -440,7 +466,7 @@ class TestHealthStatus:
 
     def test_status_preserves_global_daily_exhausted(self, vl_client, monkeypatch):
         """status() 保留全局 daily_exhausted 字段（向后兼容）"""
-        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc: [])
+        monkeypatch.setattr("server.llm_pool.key_store.resolve_keys", lambda uc, **kw: [])
         vl_client._all_vl_candidates = lambda: []
         vl_client._daily_exhausted = True
         vl_client._daily_exhausted_at = "2026-08-01T10:00:00"

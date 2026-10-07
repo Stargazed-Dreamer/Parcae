@@ -46,6 +46,46 @@ _DEFAULT_RETRY_BACKOFFS = (2, 4, 8, 16, 32, 60)
 _DEFAULT_RATE_LIMIT_COOLDOWN = 60.0
 # 每次重试最长等待（冷却中的 provider 最多等这么久就尝试重新调用）。
 _MAX_WAIT_PER_RETRY = 30.0
+# 失败响应体进日志的截断长度（与文本池 pool.py 的 resp.text[:150] 同口径）
+_MAX_ERROR_BODY_CHARS = 150
+# 按状态码判"这个模型当前不可用"：400 上游常以 Bad Request 掩盖 model not found，
+# 404/422 也是同族（模型 ID 下架、参数被拒）。这类错误重试同一个模型不会变好，
+# 与 429（限流）/5xx（上游过载）必须分开——后者要退避、前者要立刻换模型。
+_PERMANENT_MODEL_ERROR_CODES = (400, 404, 422)
+# 响应体里明确指向"模型本身不存在/已下架"的措辞（ModelScope 与 OpenAI 兼容层常见形态）
+_DEAD_MODEL_HINTS = (
+    "not found", "does not exist", "no such model", "unsupported model",
+    "invalid model", "model is not available", "已下架", "不存在",
+)
+
+
+class VLHTTPError(RuntimeError):
+    """VL 调用收到的 HTTP 错误，带状态码与响应体截断。
+
+    旧实现只把 `str(urllib.error.HTTPError)` 往下传（形如 `HTTP Error 400: Bad Request`），
+    于是分类只能靠子串猜、上游真正写的 `model not found` 被整坨丢掉——排查时既不知道
+    为什么 400，也不知道该不该换模型。
+    """
+
+    def __init__(self, code: int, reason: str, body: str, url: str):
+        super().__init__(f"HTTP Error {code}: {reason}" + (f" | body: {body}" if body else ""))
+        self.code = code
+        self.reason = reason
+        self.body = body
+        self.url = url
+
+
+def classify_permanent_model_error(code: int | None, msg: str, body: str = "") -> bool:
+    """这次失败是不是"重试同一个模型也不会变好"？
+
+    有状态码就按码判（400/404/422），不再靠子串猜——429 与 5xx 是限流/过载，
+    该走退避冷却而不是换模型，所以永远不落到这里。没状态码（非 VLHTTPError 的
+    异常、旧调用方）才退回消息形态。
+    """
+    if code is not None:
+        return int(code) in _PERMANENT_MODEL_ERROR_CODES
+    text = f"{msg} {body}".lower()
+    return any(hint in text for hint in _DEAD_MODEL_HINTS) or "bad request" in text
 
 
 @dataclass
@@ -113,6 +153,11 @@ class RemoteVLClient:
         # 单个 provider 非并发 429 时标记，冷却该 provider（不阻止其他 provider）
         # consecutive_count 达 max_consecutive 时 cooldown_until 设为次日 00:00（当日不再试）
         self._provider_exhausted: dict[str, dict] = {}
+        # (key_id, model) 级"今日永久失效"标记：上游当天已下架的模型 ID 判过一次就不再
+        # 为它烧第二趟退避，00:00 由 _check_daily_exhausted_reset 解除，给它一次重新证明
+        # 的机会。与 _provider_exhausted（key 级、额度/429 语义）是两回事，不要合并。
+        self._dead_models_today: dict[str, set[str]] = {}
+        self._dead_models_date: str = ""
         # Provider 级耗尽配置（从 [vision] 段读取）
         self._provider_exhausted_cooldown_seconds: int = 3600  # 单 provider 耗尽冷却时长（1 小时）
         self._provider_exhausted_max_consecutive: int = 3      # 连续耗尽上限，达此值当日不再试
@@ -175,9 +220,32 @@ class RemoteVLClient:
                 )
                 for k in stale_keys:
                     del self._provider_exhausted[k]
+        # 检查 (key_id, model) 今日失效标记跨日：整表作废，让上游当天补回的模型 ID 重新入选
+        if self._dead_models_today and self._dead_models_date != today:
+            logger.info(
+                "VL 今日失效标记跨日解除：清空 %d 个 key 上的 %d 个模型（登记日 %s → 今日 %s）",
+                len(self._dead_models_today),
+                sum(len(v) for v in self._dead_models_today.values()),
+                self._dead_models_date or "(未登记)",
+                today,
+            )
+            self._dead_models_today = {}
+            self._dead_models_date = ""
+
+    def _mark_model_dead_today(self, key_id: str, model: str) -> None:
+        """登记 (key_id, model) 今日永久失效；同日重复登记幂等。
+
+        标记只在**当天**有效：次日由 _check_daily_exhausted_reset 整表解除。
+        """
+        today = time.strftime("%Y%m%d")
+        if self._dead_models_date != today:
+            # 日期与表必须同时换血，否则昨天的集合会顶着今天的日期继续排除候选
+            self._dead_models_today = {}
+            self._dead_models_date = today
+        self._dead_models_today.setdefault(key_id, set()).add(model)
 
     def is_daily_exhausted(self) -> bool:
-        """今日是否已耗尽（ModelScope 非并发 429 触发）"""
+        """今日 VL 是否整体停用（聚合标记；成因见 _mark_daily_exhausted 的 kind）"""
         self._ensure_loaded()
         return self._daily_exhausted
 
@@ -192,6 +260,8 @@ class RemoteVLClient:
             kind: 耗尽类型，见 vl_quota.mark_daily_exhausted 文档：
                 - "quota_exhausted"：配额真用完（body 明示 quota exceeded / daily limit）
                 - "upstream_overload"：上游临时过载（body 提示 rate_limited / concurrency）
+                - "model_unavailable"：候选模型的 ID 上游都不认了（400/404/422 永久失败，
+                  整条 key 的 VL 模型当日全部判死）。不是配额问题，别按"下调配额"读
                 默认 "upstream_overload"，因为 ModelScope 多数 429 都是临时过载而非真耗尽
             source: 429 来源 provider（如 "ModelScope"），用于 vl_quota 来源细分
         """
@@ -212,7 +282,8 @@ class RemoteVLClient:
 
     def _mark_provider_exhausted(self, key_id: str, reason: str,
                                  kind: str = "upstream_overload",
-                                 source: str | None = None) -> None:
+                                 source: str | None = None,
+                                 model: str | None = None) -> None:
         """标记单个 provider 额度耗尽（不阻止其他 provider）
 
         provider 级耗尽追踪：累加 consecutive_count，达 max_consecutive 时 cooldown_until
@@ -223,6 +294,9 @@ class RemoteVLClient:
             reason: 429 错误消息（截断 300 字符）
             kind: "quota_exhausted" | "upstream_overload"
             source: provider 主域名（如 "modelscope"）
+            model: 触发本次标记的模型名。冷却按 key 连坐是 ADR 0044 第 5 条的裁决，
+                   代价必须由日志看得见——否则读日志的人只能看到"整条 key 停了"，
+                   查不到是同 key 哪一个 model 把它拖停的。
         """
         today = time.strftime("%Y%m%d")
         existing = self._provider_exhausted.get(key_id, {})
@@ -230,6 +304,7 @@ class RemoteVLClient:
         consecutive = 0 if existing.get("date") != today else existing.get("consecutive_count", 0)
         consecutive += 1
         now = time.time()
+        trigger = model or "unknown"
         if consecutive >= self._provider_exhausted_max_consecutive:
             # 达止损上限：cooldown 到次日 00:00（当日不再试）
             import datetime as _dt
@@ -238,15 +313,19 @@ class RemoteVLClient:
             )
             cooldown_until = tomorrow_midnight.timestamp()
             logger.warning(
-                "VL provider '%s' 连续 %d 次额度耗尽，当日不再试（cooldown 到次日 00:00）: %s",
-                key_id, consecutive, reason[:200],
+                "VL provider '%s' 连续 %d 次额度耗尽，当日不再试（cooldown 到次日 00:00；"
+                "触发 model=%s，同 key 其余 model 一并不可选）: %s",
+                key_id, consecutive, trigger, reason[:200],
             )
         else:
             cooldown_until = now + self._provider_exhausted_cooldown_seconds
             logger.warning(
-                "VL provider '%s' 额度耗尽 (%d/%d)，冷却 %ds: %s",
+                "VL provider '%s' 额度耗尽 (%d/%d)，冷却 %ds 到 %s（触发 model=%s，"
+                "同 key 其余 model 一并不可选）: %s",
                 key_id, consecutive, self._provider_exhausted_max_consecutive,
-                self._provider_exhausted_cooldown_seconds, reason[:200],
+                self._provider_exhausted_cooldown_seconds,
+                time.strftime("%m-%d %H:%M", time.localtime(cooldown_until)),
+                trigger, reason[:200],
             )
         self._provider_exhausted[key_id] = {
             "cooldown_until": cooldown_until,
@@ -254,6 +333,7 @@ class RemoteVLClient:
             "kind": kind,
             "source": source or "unknown",
             "consecutive_count": consecutive,
+            "trigger_model": trigger,
             "date": today,
         }
 
@@ -263,6 +343,81 @@ class RemoteVLClient:
         if not pex:
             return False
         return time.time() < pex["cooldown_until"]
+
+    def _all_models_dead_today(self, rk) -> bool:
+        """该 key 的 VL 候选模型是否**全部**在"今日判死"名单里。
+
+        判据用 rk.models（_all_vl_candidates 已覆盖成 vl scope 子集）。models 为空
+        时返回 False：宁可继续按"key 可用"处理，也不要把"我读不到模型清单"
+        误判成"它一个模型都不剩"——后者会连锁触发 daily_exhausted 停掉整条 VL。
+        """
+        models = list(getattr(rk, "models", None) or [])
+        if not models:
+            return False
+        dead = self._dead_models_today.get(rk.key_id, set())
+        if not dead:
+            return False
+        return all(m in dead for m in models)
+
+    def _key_unavailable_today(self, rk) -> bool:
+        """当日这个候选 key 还能不能用（两种成因并列，见 ADR 0044）
+
+        - key 级额度/5xx 冷却：_provider_exhausted（_is_provider_exhausted）
+        - 模型级今日判死：该 key 的 VL 模型全在 _dead_models_today
+        """
+        return self._is_provider_exhausted(rk.key_id) or self._all_models_dead_today(rk)
+
+    def reset_daily_state(self) -> dict:
+        """手动解除当日累积的 VL 不可用标记（POST /vision/reset 的实现）。
+
+        清三处，各归各位：
+          - `_dead_models_today` + `_dead_models_date`：模型级"今日判死"名单
+          - `_provider_exhausted`：key 级额度/5xx 冷却
+          - `_daily_exhausted`（含 vl_quota 侧）：聚合标志
+
+        不动的东西也是判据的一部分：
+          - `ProviderRuntimeState.cooldown_until`：限流冷却是秒级自愈的量，
+            复位它等于把"刚刚还在被限流"的证据一起擦掉。
+          - vl_quota 的 `used_today` 计数：那是真实消耗，复位不该抹。
+        """
+        self._ensure_loaded()
+        with self._lock:
+            dead_pairs = sum(len(v) for v in self._dead_models_today.values())
+            dead_keys = len(self._dead_models_today)
+            exhausted_keys = list(self._provider_exhausted)
+            was_daily = self._daily_exhausted
+            self._dead_models_today = {}
+            self._dead_models_date = ""
+            self._provider_exhausted = {}
+            self._daily_exhausted = False
+            self._daily_exhausted_date = ""
+            self._daily_exhausted_at = ""
+            self._daily_exhausted_reason = ""
+
+        quota_cleared = False
+        try:
+            quota = self._vl_quota_override
+            if quota is None:
+                from server.activity_tracker.vl_quota import vl_quota
+                quota = vl_quota
+            quota_cleared = bool(quota.clear_daily_exhausted())
+        except Exception:
+            # 配额侧不可用不影响内存复位，但必须留一行——否则复位"看起来全清了"
+            # 而 should_call 仍在 deny_exhausted。
+            logger.warning("VL reset: 配额侧耗尽标记清除失败（内存标记已清）", exc_info=True)
+
+        logger.warning(
+            "VL 手动复位：清空 %d 个 key 的 %d 条今日判死模型、%d 个 provider 冷却"
+            "（原 daily_exhausted=%s，配额侧=%s）",
+            dead_keys, dead_pairs, len(exhausted_keys), was_daily, quota_cleared,
+        )
+        return {
+            "dead_models_cleared": dead_pairs,
+            "dead_model_keys_cleared": dead_keys,
+            "provider_exhausted_cleared": len(exhausted_keys),
+            "daily_exhausted_cleared": was_daily,
+            "quota_daily_exhausted_cleared": quota_cleared,
+        }
 
     def _log_429(self, key_id: str, base_url: str, model: str, error_msg: str, is_concurrent: bool) -> None:
         """持久化 429 日志到 vl_429_log.jsonl（供 smart_limit 分析）
@@ -316,7 +471,12 @@ class RemoteVLClient:
         if not self._enabled:
             return False
         # 检查是否有任何 VL key 可用（不在冷却中 + 并发未满）
-        return self._pick_provider(use_case="vl_ocr") is not None
+        # 排除集传"今日判死模型"：否则一条 key 的模型全被下架时这里仍返回 True，
+        # /vision/understand 的 503 前置检查就拦不住注定失败的调用（Ticket 04）。
+        return self._pick_provider(
+            use_case="vl_ocr",
+            exclude_models=dict(self._dead_models_today) or None,
+        ) is not None
 
     # ---------- runtime state management ----------
 
@@ -347,7 +507,8 @@ class RemoteVLClient:
 
     # ---------- provider selection ----------
 
-    def _pick_provider(self, use_case: str | None = None) -> tuple | None:
+    def _pick_provider(self, use_case: str | None = None,
+                       exclude_models: dict[str, set[str]] | None = None) -> tuple | None:
         """Pick the next available (ResolvedKey, ProviderRuntimeState) pair.
 
         v9: 通过 key_store.resolve_keys(use_case) 获取候选 key 列表，
@@ -357,6 +518,9 @@ class RemoteVLClient:
             use_case: VL use_case（vl_ocr/vl_vision/vl_activity_tracker）
                       resolve_keys 会按 use_case.sensitive 过滤 privacy_warning，
                       按 use_case.default_tier 范围过滤 tier，按 allowed_uses 过滤白名单
+            exclude_models: key_id → 本轮已确认永久失败的模型名。传入后同一 key 会
+                      解析出**下一个**模型（同 key 模型级 fallback）；该 key 的候选
+                      全被排除时 resolve_keys 直接跳过它。
 
         Returns:
             (ResolvedKey, ProviderRuntimeState) 或 None（无可用 key）
@@ -369,7 +533,7 @@ class RemoteVLClient:
         if not use_case:
             use_case = "vl_ocr"  # 默认 use_case
 
-        candidates = resolve_keys(use_case)
+        candidates = resolve_keys(use_case, exclude_models=exclude_models)
         if not candidates:
             return None
 
@@ -414,6 +578,11 @@ class RemoteVLClient:
             vl_models.sort(key=lambda m: int(m.get("tier", 3)))
             chosen_model = vl_models[0]["name"]
             rk = resolved_key_from_record(rec, chosen_model)
+            # 展示视图按 model 展开（Ticket 04）：_to_resolved_key 给的 models[] 是该 key
+            # 全部启用模型（含非 vl scope），这里覆盖成 vl scope 子集并按 tier 升序排，
+            # 于是 models[0] 恒等于 chosen_model——选路顺序和展示顺序同一份真源。
+            # 覆盖后 consumers 只有 status() 与聚合判据，两者要的都是 VL 可候选集。
+            rk.models = [m["name"] for m in vl_models]
             candidates.append(rk)
         return candidates
 
@@ -443,6 +612,7 @@ class RemoteVLClient:
             timeout: 覆盖 vision_params.timeout 的可选超时
         """
         import json as _json
+        import urllib.error
         import urllib.request
 
         url = f"{rk.base_url}/chat/completions"
@@ -462,8 +632,17 @@ class RemoteVLClient:
             method="POST",
         )
         t_out = timeout or rk.vision_params.get("timeout", 60)
-        with urllib.request.urlopen(req, timeout=t_out) as resp:
-            payload = resp.read().decode("utf-8")
+        try:
+            with urllib.request.urlopen(req, timeout=t_out) as resp:
+                payload = resp.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            # 上游真正的失败原因写在响应体里（model not found / 参数被拒），
+            # 只留 str(e) 就等于把证据丢掉；截 150 字与文本池同口径。
+            try:
+                body = e.read().decode("utf-8", "replace").strip()[:_MAX_ERROR_BODY_CHARS]
+            except Exception:
+                body = ""
+            raise VLHTTPError(int(e.code), str(e.reason), body, url) from e
         return _json.loads(payload)
 
     def _call_with_failover(self, image: Image.Image, text_prompt: str,
@@ -490,11 +669,26 @@ class RemoteVLClient:
         }]
 
         attempted: set[str] = set()
+        # 本轮内已判"永久不可用"的模型（key_id → model 名），传给 _pick_provider
+        # 做同 key 模型级 fallback。起点是**跨调用**的今日失效标记：今天已经判死过的
+        # 模型不再重新烧一遍退避；本轮新判死的也写回该标记（见 _mark_model_dead_today），
+        # 次日 00:00 自动解除，给上游补回同名 ID 一次重新证明的机会。
+        failed_models: dict[str, set[str]] = {
+            key_id: set(models) for key_id, models in self._dead_models_today.items()
+        }
         last_detail = "无可用 provider"
         backoffs = self._retry_backoffs
         max_attempts = len(backoffs)
         for attempt_idx, backoff in enumerate(backoffs):
-            picked = self._pick_provider(use_case=use_case)
+            picked = self._pick_provider(use_case=use_case,
+                                         exclude_models=failed_models or None)
+            if picked is None and failed_models:
+                # 排除后一个候选都不剩：继续退避重试毫无意义（排除集只会变大），
+                # 直接带原因退出，别让调用方等完 6 档退避才拿到一句"并发已满"。
+                n_excluded = sum(len(v) for v in failed_models.values())
+                last_detail = f"[no usable model] 已排除 {n_excluded} 个永久失败模型后无候选: {last_detail}"
+                logger.warning("VL 排除永久失败模型后无候选，停止重试: %s", last_detail)
+                break
             if picked is None:
                 # 所有 provider 不可用（冷却中或并发已满）：等待后重试，不直接返回错误。
                 # 用户要求：失败后不返回错误，而是指数退避重试指定次数再报错或成功。
@@ -532,6 +726,21 @@ class RemoteVLClient:
                     result = self._call_chat(rk, messages, timeout=timeout)
                 except Exception as e:
                     msg = str(e)[:300]
+                    err_code = getattr(e, "code", None)
+                    err_body = getattr(e, "body", "") or ""
+                    if classify_permanent_model_error(err_code, msg, err_body):
+                        # 永久失败：不退避、不冷却整个 key、不计连续服务端错误——
+                        # 重试同一个模型 ID 不会变好，正确动作是把它排除后换下一个候选
+                        # （同一 key 的其它模型，或其它 key）。
+                        failed_models.setdefault(rk.key_id, set()).add(rk.model)
+                        self._mark_model_dead_today(rk.key_id, rk.model)
+                        state.last_error = msg
+                        last_detail = f"[permanent {err_code or '?'}] {rk.key_id}/{rk.model}: {msg}"
+                        logger.warning(
+                            "VL key '%s' 模型 '%s' 判为永久不可用（HTTP %s），本轮排除后换候选 (%d/%d): %s",
+                            rk.key_id, rk.model, err_code, attempt_idx + 1, max_attempts, msg,
+                        )
+                        continue
                     # Distinguish rate-limit / server errors from network errors.
                     is_rate_limit = "429" in msg or "Too Many Requests" in msg.lower() or "rate" in msg.lower()
                     is_server_error = any(code in msg for code in ("500", "502", "503", "504"))
@@ -592,7 +801,8 @@ class RemoteVLClient:
                             kind = "upstream_overload"
                         # 推断 source：从 base_url 提取主域名（如 api.modelscope.cn → modelscope）
                         source = rk.base_url.split("//")[-1].split("/")[0].split(":")[0] if rk.base_url else "unknown"
-                        self._mark_provider_exhausted(rk.key_id, msg, kind=kind, source=source)
+                        self._mark_provider_exhausted(rk.key_id, msg, kind=kind, source=source,
+                                                      model=rk.model)
                         self._log_429(rk.key_id, rk.base_url, rk.model, msg, is_concurrent=False)
                         last_detail = f"[provider exhausted] {rk.key_id}: {msg}"
                         logger.warning(
@@ -615,6 +825,7 @@ class RemoteVLClient:
                                 rk.key_id, msg,
                                 kind="upstream_overload",
                                 source=source,
+                                model=rk.model,
                             )
                             last_detail = f"[provider exhausted after {state.consecutive_server_errors} server errors] {rk.key_id}: {msg}"
                             logger.warning(
@@ -670,27 +881,49 @@ class RemoteVLClient:
                 # 保留全局 _last_call_finished_ts 向后兼容（status 等可能引用）
                 self._last_call_finished_ts = time.time()
 
-        # 所有重试用完仍未成功：检查是否所有候选 provider 都在额度耗尽冷却中
+        # 所有重试用完仍未成功：检查是否所有候选 provider 当日都不可用
+        # 两种成因并列（Ticket 04）：key 级额度耗尽冷却，以及该 key 的 VL 模型全被
+        # 判为"今日永久失效"。只判前者的话，"所有模型都被上游下架"这一档永远翻不起
+        # daily_exhausted——loop_actions 因此拿不到 OCR 兜底的入口。
         # 若是 → 标记全局 _daily_exhausted（聚合状态）+ 同步 vl_quota + 返回 daily_exhausted error
         # 若否（如并发限流/网络错误）→ 返回普通错误
         all_candidates = self._all_vl_candidates()
         if all_candidates:
-            all_exhausted = all(
-                self._is_provider_exhausted(rk.key_id) for rk in all_candidates
+            all_unavailable = all(
+                self._key_unavailable_today(rk) for rk in all_candidates
             )
-            if all_exhausted and not self._daily_exhausted:
-                exhausted_reasons = "; ".join(
-                    f"{rk.key_id}: {self._provider_exhausted[rk.key_id]['reason'][:100]}"
-                    for rk in all_candidates
-                    if rk.key_id in self._provider_exhausted
+            if all_unavailable and not self._daily_exhausted:
+                has_key_level = any(
+                    self._is_provider_exhausted(rk.key_id) for rk in all_candidates
                 )
+                # 成因文案分开：只有 key 级冷却时保持原措辞（下游按"额度"读），
+                # 纯模型级判死时说"模型当日全部判死"，别把它写成额度耗尽。
+                if has_key_level:
+                    prefix = "所有 VL provider 额度耗尽"
+                    kind = "quota_exhausted"
+                else:
+                    prefix = "所有 VL 模型当日判死"
+                    kind = "model_unavailable"
+                parts: list[str] = []
+                seen_keys: set[str] = set()
+                for rk in all_candidates:
+                    if rk.key_id in seen_keys:
+                        continue  # 同一 key 只报一次，避免理由串重复
+                    seen_keys.add(rk.key_id)
+                    if self._is_provider_exhausted(rk.key_id):
+                        pex = self._provider_exhausted[rk.key_id]
+                        parts.append(f"{rk.key_id}: {pex['reason'][:100]}")
+                    elif self._all_models_dead_today(rk):
+                        dead = sorted(self._dead_models_today.get(rk.key_id, set()))
+                        parts.append(f"{rk.key_id}: VL 模型当日全部判死 {dead}")
+                exhausted_reasons = "; ".join(parts)
                 self._mark_daily_exhausted(
-                    f"所有 VL provider 额度耗尽: {exhausted_reasons}",
-                    kind="quota_exhausted",
+                    f"{prefix}: {exhausted_reasons}",
+                    kind=kind,
                 )
                 return {
                     "status": "error",
-                    "detail": f"所有 VL provider 额度已耗尽: {exhausted_reasons}",
+                    "detail": f"{prefix}: {exhausted_reasons}，当日不再调用 VL",
                     "daily_exhausted": True,
                 }
         return {
@@ -858,6 +1091,10 @@ class RemoteVLClient:
 
         v9: provider 信息从 key_store.load_keys() 过滤 vl scope + _runtime_state 组合。
         不再有 default_provider 概念（use_case 驱动选 key）。
+
+        Ticket 04 起的两级视图：providers[] 一行一个 key（key 级冷却/并发字段），
+        其下 models[] 一行一个 VL 模型（当日判死标记 + current）。判死是 (key_id, model)
+        粒度、冷却是 key 粒度（ADR 0044），只看其中一级都会读错现状。
         """
         self._ensure_loaded()
         # 获取所有 VL 候选 key（不过滤 cooldown/active_count，用于展示）
@@ -866,11 +1103,32 @@ class RemoteVLClient:
         for rk in candidates:
             state = self._get_runtime_state(rk.key_id)
             max_conc = rk.vision_params.get("max_concurrency", 1)
+            # models[] 按 model 展开（Ticket 04）：选路是 (key_id, model) 粒度，
+            # 而 provider 行只有一个 model 位。魔搭下架某个 ID 时，同 key 的其余
+            # 模型仍可用——不展开就看不出"这条 key 还剩几个能用的"。
+            dead = self._dead_models_today.get(rk.key_id, set())
             available = (not state.in_cooldown) and state.active_count < max_conc
+            if self._all_models_dead_today(rk):
+                # 一个能用的模型都不剩 = 这条 key 当日不可用。判据用
+                # _all_models_dead_today（与聚合 daily_exhausted 同一个谓词），
+                # 别让面板说"可用"而选路已经取不到候选。
+                available = False
+            # 展示的代表模型：优先取当日没判死的那个，全死才退回 tier 首。
+            # 直接报 rk.model（tier 最低）会把已下架的 ID 指成"当前在用"。
+            shown_model = next((m for m in rk.models if m not in dead), rk.model)
+            models_info = [
+                {
+                    "name": name,
+                    "current": name == shown_model,
+                    "dead_today": name in dead,
+                }
+                for name in rk.models
+            ]
             providers_info.append({
                 "key_id": rk.key_id,
                 "label": rk.label,
-                "model": rk.model,
+                "model": shown_model,
+                "models": models_info,
                 "base_url": rk.base_url,
                 "available": available,
                 "cooldown_remaining": round(state.cooldown_remaining, 1),
@@ -894,7 +1152,13 @@ class RemoteVLClient:
         sensitive_usable = False
         if self._enabled and candidates:
             # 用 _pick_provider 检查（它会走 resolve_keys 的 sensitive 过滤）
-            sensitive_usable = self._pick_provider(use_case="vl_ocr") is not None
+            # 与 available 同一排除口径：模型全判死的 key 不算"可用"，
+            # 否则 /health 一边说 vl_available、一边说 usable_for_sensitive，
+            # 而真去调用取不到任何候选。
+            sensitive_usable = self._pick_provider(
+                use_case="vl_ocr",
+                exclude_models=dict(self._dead_models_today) or None,
+            ) is not None
         # 构建 provider_exhausted 状态 dict（每个耗尽 provider 的详细信息）
         now = time.time()
         provider_exhausted = {}
@@ -905,6 +1169,9 @@ class RemoteVLClient:
                 "reason": pex["reason"],
                 "kind": pex["kind"],
                 "source": pex["source"],
+                # 触发 model 与冷却原因分开记账（Ticket 04）：连坐范围是 key，
+                # 但把 key 拖停的是具体某个 model 的 429/5xx，面板要能回答"是哪个"。
+                "trigger_model": pex.get("trigger_model", "unknown"),
                 "consecutive_count": pex["consecutive_count"],
             }
         return {

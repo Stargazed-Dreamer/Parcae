@@ -139,6 +139,14 @@ core_files_exclude = [
   # 个人系统重建内容（个人路径密集，2026-07-18 决策起即排除；2026-09-12
   # triage 核对确认仍有 100+ 行本机路径残留）
   "workspace/disk_manager/system_rebuild/**",
+
+  # 磁盘清理的个人待删决策台账（2026-09-28 决策起排除）。manifest 用
+  #   `workspace/disk_manager/**` 全拿，会把这份一并带进包；实测内容含真机盘符
+  #   目录、逐条目体积、"等到学期末再清"这类生活语境与反问话术原话，以及一条
+  #   带 Windows 账号名的沙箱路径。对外没有任何价值（接收人没有这些盘），
+  #   纯个人数据——按"排除比脱敏更省事也更可靠"处理。
+  #   脱敏引擎仍在包里：SKILL.md / loop_actions.py / manifest.toml 照常发布。
+  "workspace/disk_manager/pending_decisions.md",
 ]
 
 [audience.gates]
@@ -155,7 +163,7 @@ static = [
 # 构建期 gates（build_release 跑，失败 .failed.zip 留 staging）
 # 基础 4 个 + public 专属 1 个 = 5 个
 build_time = [
-  "no-key-startup",
+  "compile-check",
   "activity-task-safe-stop",
   "focused-tests",
   "archive-verification",

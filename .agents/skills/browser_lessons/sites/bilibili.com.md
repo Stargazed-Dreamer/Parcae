@@ -1,7 +1,7 @@
 # Bilibili (bilibili.com)
 
 ---
-aliases: [<data_drive>:\<bilibili_videos>, bilibili, space.bilibili.com, t.bilibili.com]
+aliases: [<data_drive>:/<bilibili_videos>, bilibili, space.bilibili.com, t.bilibili.com]
 ---
 
 ## 元信息

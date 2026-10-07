@@ -59,7 +59,14 @@ class TestFreshDbV3:
         conn = init_db(tmp_db)
         cur = conn.execute("SELECT value FROM schema_info WHERE key='version'")
         assert int(cur.fetchone()[0]) == SCHEMA_VERSION
-        assert SCHEMA_VERSION == 3
+        # 版本号写死在这里会随迁移漂（文档防过时规范第 1 条）。上一行已经断言
+        # "落库版本 == schema.SCHEMA_VERSION 真源"，这里只补版本必须带来的表。
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "context_projections" in tables
         conn.close()
 
     def test_fresh_db_has_facts_new_columns(self, tmp_db):
@@ -203,7 +210,7 @@ class TestV2ToV3Migration:
         assert int(cur.fetchone()[0]) == 2
         migrate_db(conn)
         cur = conn.execute("SELECT value FROM schema_info WHERE key='version'")
-        assert int(cur.fetchone()[0]) == 3
+        assert int(cur.fetchone()[0]) == SCHEMA_VERSION
         conn.close()
 
     def test_v2_to_v3_preserves_old_data(self, tmp_db):
@@ -250,7 +257,7 @@ class TestMigrationIdempotent:
         # 第一次迁移（已是 v3，应 noop）
         migrate_db(conn)
         cur = conn.execute("SELECT value FROM schema_info WHERE key='version'")
-        assert int(cur.fetchone()[0]) == 3
+        assert int(cur.fetchone()[0]) == SCHEMA_VERSION
 
         # 表和列都还在
         assert _has_table(conn, "evidence_ledger")
@@ -264,7 +271,7 @@ class TestMigrationIdempotent:
         migrate_db(conn)  # v2 → v3
         migrate_db(conn)  # 再跑一次，应 noop
         cur = conn.execute("SELECT value FROM schema_info WHERE key='version'")
-        assert int(cur.fetchone()[0]) == 3
+        assert int(cur.fetchone()[0]) == SCHEMA_VERSION
         # 所有表和列都还在
         assert _has_table(conn, "evidence_ledger")
         assert _has_column(conn, "facts", "fact_type")
@@ -282,7 +289,7 @@ class TestInitDbIntegration:
         # 用 init_db 打开
         conn2 = init_db(tmp_db)
         cur = conn2.execute("SELECT value FROM schema_info WHERE key='version'")
-        assert int(cur.fetchone()[0]) == 3
+        assert int(cur.fetchone()[0]) == SCHEMA_VERSION
         assert _has_column(conn2, "facts", "fact_type")
         assert _has_table(conn2, "evidence_ledger")
         # 旧数据保留

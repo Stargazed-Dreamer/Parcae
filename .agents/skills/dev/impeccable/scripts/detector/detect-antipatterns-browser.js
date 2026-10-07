@@ -3917,9 +3917,9 @@ if (IS_BROWSER) {
       const tag = current.tagName?.toLowerCase();
       const currentStyle = getComputedStyle(current);
       const bgImage = currentStyle.backgroundImage || '';
-      const is<data_drive>:\Documentsurface = tag === 'body' || tag === 'html';
+      const isDocumentSurface = tag === 'body' || tag === 'html';
 
-      if (!is<data_drive>:\Documentsurface && bgImage && bgImage !== 'none') {
+      if (!isDocumentSurface && bgImage && bgImage !== 'none') {
         if (/url\s*\(/i.test(bgImage)) reasons.add('image background');
         if (/gradient/i.test(bgImage)) reasons.add('gradient background');
       }

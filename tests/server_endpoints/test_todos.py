@@ -199,6 +199,151 @@ class TestWipCRUD:
         assert task["extra_data"] == {}
 
 
+class TestWipListSummaryMode:
+    """wip_list 默认轻量模式 + 已完结条目压缩 + 批量查详情"""
+
+    def test_summary_is_default(self, store):
+        """store 层默认即轻量：不返回 goal/next_steps/current_state 等大字段"""
+        store.create_wip({"title": "任务", "goal": "很长的目标说明", "next_steps": ["a", "b"]})
+        tasks = store.list_wip()
+        assert len(tasks) == 1
+        assert set(tasks[0]) == {
+            "id", "title", "status", "priority", "progress", "updated_at",
+        }
+
+    def test_full_mode_returns_heavy_fields(self, store):
+        store.create_wip({"title": "任务", "goal": "目标", "next_steps": ["a"]})
+        tasks = store.list_wip(summary=False)
+        assert tasks[0]["goal"] == "目标"
+        assert tasks[0]["next_steps"] == ["a"]
+
+    def test_closed_entries_are_compacted(self, store):
+        """已完结条目压成 id/title/status/updated_at + closed=True"""
+        t = store.create_wip({"title": "已完结任务", "goal": "g"})
+        store.update_wip(t["id"], {"status": "completed", "progress": 100})
+        row = store.list_wip()[0]
+        assert row["closed"] is True
+        assert set(row) == {"id", "title", "status", "updated_at", "closed"}
+
+    def test_closed_title_truncated(self, store):
+        long_title = "这是一个非常长的已完成任务标题" * 4
+        t = store.create_wip({"title": long_title, "goal": "g"})
+        store.update_wip(t["id"], {"status": "completed"})
+        row = store.list_wip()[0]
+        assert row["title"].endswith("…")
+        assert len(row["title"]) <= 25
+
+    def test_active_entry_not_compacted(self, store):
+        """未完结条目保留 priority/progress，且不带 closed 标记"""
+        store.create_wip({"title": "活跃任务", "goal": "g", "priority": "high"})
+        row = store.list_wip()[0]
+        assert "closed" not in row
+        assert row["priority"] == "high"
+        assert "progress" in row
+
+    def test_summary_mode_with_status_filter(self, store):
+        store.create_wip({"title": "活跃", "goal": "g"})
+        t2 = store.create_wip({"title": "已完成", "goal": "g"})
+        store.update_wip(t2["id"], {"status": "completed"})
+        assert len(store.list_wip(status="active")) == 1
+        assert len(store.list_wip(status="completed")) == 1
+
+
+class TestWipGetMany:
+    """批量取详情（wip_list 默认轻量后的配套入口）"""
+
+    def test_returns_full_detail(self, store):
+        t = store.create_wip({"title": "任务", "goal": "目标说明", "next_steps": ["步骤"]})
+        res = store.get_wip_many([t["id"]])
+        assert res["missing"] == []
+        assert res["tasks"][0]["goal"] == "目标说明"
+        assert res["tasks"][0]["next_steps"] == ["步骤"]
+
+    def test_preserves_input_order(self, store):
+        a = store.create_wip({"title": "A", "goal": "g"})
+        b = store.create_wip({"title": "B", "goal": "g"})
+        c = store.create_wip({"title": "C", "goal": "g"})
+        ids = [c["id"], a["id"], b["id"]]
+        assert [t["id"] for t in store.get_wip_many(ids)["tasks"]] == ids
+
+    def test_dedupes_ids(self, store):
+        a = store.create_wip({"title": "A", "goal": "g"})
+        res = store.get_wip_many([a["id"], a["id"]])
+        assert len(res["tasks"]) == 1
+        assert res["missing"] == []
+
+    def test_missing_ids_reported(self, store):
+        a = store.create_wip({"title": "A", "goal": "g"})
+        res = store.get_wip_many([a["id"], "wip_not_exist"])
+        assert [t["id"] for t in res["tasks"]] == [a["id"]]
+        assert res["missing"] == ["wip_not_exist"]
+
+    def test_empty_input(self, store):
+        assert store.get_wip_many([]) == {"tasks": [], "missing": []}
+
+
+class TestWipListEndpoint:
+    """端点层：默认轻量 + 响应首字段指引（store 行为见 TestWipListSummaryMode）"""
+
+    @pytest.fixture
+    def seeded(self, client):
+        """在隔离的测试库上播种 WIP（一活跃一完结），结束时清理。
+
+        conftest 已把 memory DB 重定向到临时文件，这里不会碰到生产库。
+        """
+        active = client.post("/wip", json={"title": "端点测试-活跃", "goal": "目标"}).json()
+        closed = client.post("/wip", json={"title": "端点测试-已完结", "goal": "目标"}).json()
+        client.put(f"/wip/{closed['id']}", json={"status": "completed"})
+        yield active, closed
+        for t in (active, closed):
+            client.delete(f"/wip/{t['id']}")
+
+    def test_guidance_is_first_field_and_default_is_summary(self, client):
+        resp = client.get("/wip")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert list(body)[0] == "guidance", "指引必须是响应第一个字段"
+        assert body["summary"] is True, "summary 默认应为 true"
+        assert "wip_get_many" in body["guidance"]
+        assert "status_counts" in body
+
+    def test_summary_rows_are_lightweight(self, client, seeded):
+        active, closed = seeded
+        rows = {t["id"]: t for t in client.get("/wip").json()["tasks"]}
+        assert "goal" not in rows[active["id"]] and "next_steps" not in rows[active["id"]]
+        assert rows[closed["id"]]["closed"] is True
+        assert set(rows[closed["id"]]) == {"id", "title", "status", "updated_at", "closed"}
+
+    def test_full_mode_uses_different_guidance(self, client):
+        full = client.get("/wip", params={"summary": "false"}).json()
+        assert full["summary"] is False
+        assert full["guidance"] != client.get("/wip").json()["guidance"]
+
+    def test_full_mode_keeps_heavy_fields(self, client, seeded):
+        active, _ = seeded
+        rows = {t["id"]: t for t in client.get("/wip", params={"summary": "false"}).json()["tasks"]}
+        assert rows[active["id"]]["goal"] == "目标"
+
+    def test_batch_endpoint_roundtrip(self, client, seeded):
+        active, closed = seeded
+        ids = [closed["id"], active["id"]]  # 刻意乱序，验证保序
+        resp = client.post("/wip/batch", json={"ids": ids})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [t["id"] for t in body["tasks"]] == ids
+        assert body["missing"] == []
+        assert body["tasks"][0]["goal"] == "目标", "批量查必须返回完整字段"
+
+    def test_batch_reports_missing_ids(self, client, seeded):
+        active, _ = seeded
+        body = client.post("/wip/batch", json={"ids": [active["id"], "wip_nope"]}).json()
+        assert [t["id"] for t in body["tasks"]] == [active["id"]]
+        assert body["missing"] == ["wip_nope"]
+
+    def test_batch_rejects_empty_ids(self, client):
+        assert client.post("/wip/batch", json={"ids": []}).status_code == 422
+
+
 class TestGetStats:
     def test_stats_returns_counts(self, store):
         store.create_todo({"title": "t1", "frequency": "daily"})

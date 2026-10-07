@@ -30,8 +30,8 @@ def _disable_sensitive_privacy_override(monkeypatch):
 
 
 class TestUseCaseRegistry:
-    def test_registry_has_18_entries(self):
-        """验证 18 个 use_case 全部存在。"""
+    def test_registry_has_19_entries(self):
+        """验证 19 个 use_case 全部存在（2026-09-23 起 ue_learning_copilot 注册 ue_copilot_answer）。"""
         expected = {
             "agent_chat", "community_summarize", "memory_compress",
             "memory_validate", "hourly_summarize", "download_watcher",
@@ -40,16 +40,19 @@ class TestUseCaseRegistry:
             "aigc_image_gen", "aigc_image_edit", "aigc_video_gen",
             "stock_advisor_opening", "stock_advisor_closing",
             "stock_advisor_evening", "stock_advisor_query",
+            "ue_copilot_answer",
         }
         assert set(USE_CASE_REGISTRY.keys()) == expected
-        assert len(USE_CASE_REGISTRY) == 18
+        assert len(USE_CASE_REGISTRY) == 19
 
     def test_sensitive_flags_are_correct(self):
-        """验证 sensitive 标志：memory_compress/validate/download_watcher + VL 3 个 = 6 个 sensitive"""
+        """验证 sensitive 标志：memory_compress/validate/download_watcher + VL 3 个
+        + ue_copilot_answer（证据块出机前剥本地路径，仍按敏感对待，排除带 privacy_warning 的 key）= 7 个"""
         sensitive_cases = {name for name, uc in USE_CASE_REGISTRY.items() if uc.sensitive}
         expected_sensitive = {
             "memory_compress", "memory_validate", "download_watcher",
             "vl_ocr", "vl_vision", "vl_activity_tracker",
+            "ue_copilot_answer",
         }
         assert sensitive_cases == expected_sensitive
 

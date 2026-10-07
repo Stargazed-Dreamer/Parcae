@@ -18,6 +18,7 @@ from client.core.agent.builtin_tools._web_anti_crawl import (
 )
 from client.core.agent.builtin_tools.base import BuiltinTool
 from client.core.agent.types import ToolCall, ToolResult
+from lib.agent_identity import AGENT_CALLER_HEADER_VALUE
 
 
 class WebSearchTool(BuiltinTool):
@@ -57,7 +58,7 @@ class WebSearchTool(BuiltinTool):
                     f"{self._base_url}/web/search",
                     params={"query": query, "num": num},
                     timeout=15,
-                    headers={"X-Agent-Caller": "v6-lite-agent"},
+                    headers={"X-Agent-Caller": AGENT_CALLER_HEADER_VALUE},
                 )
                 if resp.status_code == 200:
                     return self._success(tool_call, resp.text)

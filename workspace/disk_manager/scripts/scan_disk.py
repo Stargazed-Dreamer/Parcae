@@ -19,12 +19,30 @@ resume 子命令跳过 complete=true 子树，只重扫 partial 子树。
 
 import os
 import sys
+import io
 import time
 import json
 import argparse
 import re
 from pathlib import Path
 from datetime import datetime
+
+# 本工具所有子命令都 print(json.dumps(..., ensure_ascii=False))，而中文 Windows 控制台
+# 默认 cp936：路径里的中文名会被写成 GBK 字节，消费方（测试、agent 按 utf-8 读输出）
+# 再按 utf-8 解就得到 ?Ć? 这种半截乱码（2026-09-28 发版全跑抓到 test_interop_files）。
+# 与 tools/bump_version.py、tools/x_video_dl.py 同一收口，但**只在 __main__ 里包**：
+# 在 import 期换掉 sys.stdout 会把 pytest 装的捕获流一起 GC 掉，实测整批用例
+# "I/O operation on closed file / no tests ran"。
+def force_utf8_streams() -> None:
+    """把 stdout/stderr 包成 utf-8（已 utf-8 或无 buffer 时跳过，可重复调用）。"""
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None or not hasattr(stream, "buffer"):
+            continue
+        if str(getattr(stream, "encoding", "")).lower().replace("-", "").startswith("utf8"):
+            continue
+        setattr(sys, name, io.TextIOWrapper(stream.buffer, encoding="utf-8", errors="replace"))
+
 
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
@@ -734,4 +752,5 @@ def main():
 
 
 if __name__ == "__main__":
+    force_utf8_streams()
     main()

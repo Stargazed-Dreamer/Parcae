@@ -33,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 
 CDP_PORT = 9222
 

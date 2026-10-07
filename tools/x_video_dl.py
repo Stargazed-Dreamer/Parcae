@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import re
 import sys
@@ -29,6 +30,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+
+# 输出含 ✅/❌/⏭ 等符号，Windows 控制台默认 cp936 会在第一条 print 就 UnicodeEncodeError
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 API = 'https://savetwitter.net/api/ajaxSearch'
 REFERER = 'https://savetwitter.net/en4'
@@ -134,7 +139,11 @@ def verify_mp4(path: Path) -> bool:
 def process(session: requests.Session, raw_url: str, dest_dir: Path,
             seq: int, prefix: str, max_res: int | None) -> tuple[str, str, dict | None]:
     """下载单条。返回 (status, 摘要, 成功时的账本附加信息)。"""
-    handle, tid = parse_tweet(raw_url)
+    try:
+        handle, tid = parse_tweet(raw_url)
+    except ValueError as e:  # 链接本身不合法，重试无意义，只判这一条失败
+        print(f'\n[{seq:02d}] ❌ {type(e).__name__}: {e}', flush=True)
+        return 'fail', f'{type(e).__name__}: {e}', None
     tweet_url = f'https://x.com/{handle}/status/{tid}'
     tag = safe_filename(f'{seq:02d}_{prefix}_{handle}') if prefix \
         else safe_filename(f'{seq:02d}_{handle}')
@@ -171,7 +180,7 @@ def main() -> int:
         description='x.com(Twitter) 视频下载（savetwitter.net 免梯子链路）')
     parser.add_argument('urls', nargs='+', help='x.com/twitter 状态链接，可多个')
     parser.add_argument('--out', default='',
-                        help='输出目录（默认 ~/<data_drive>:/Downloads/x_videos_<当天日期>）')
+                        help='输出目录（默认 ~/Downloads/x_videos_<当天日期>）')
     parser.add_argument('--seq-start', type=int, default=1, help='序号起始（默认 1）')
     parser.add_argument('--prefix', default='', help='文件名附加标记（如 追加/群名），冒号等非法字符自动清除')
     parser.add_argument('--max-res', type=int, default=None,
@@ -183,7 +192,7 @@ def main() -> int:
     args = parser.parse_args()
 
     out_dir = (Path(args.out) if args.out else
-               Path.home() / '<data_drive>:/Downloads' / f'x_videos_{time.strftime("%Y%m%d")}')
+               Path.home() / 'Downloads' / f'x_videos_{time.strftime("%Y%m%d")}')
     out_dir.mkdir(parents=True, exist_ok=True)
 
     session = build_session()

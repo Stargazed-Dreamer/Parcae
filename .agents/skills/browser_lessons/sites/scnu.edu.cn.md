@@ -12,7 +12,7 @@
 | **登录态要求** | 需登录（统一身份认证 SSO + OAuth 三连跳） |
 | **抓取频次** | 周期（每次取作业要求/看截止） |
 | **文件创建日期** | 2026-09-10 |
-| **最后更新** | 2026-09-19 |
+| **最后更新** | 2026-09-30 |
 
 ## 网站概况
 
@@ -37,8 +37,11 @@
 | 旧版 `.doc`（WPS 生成）模板抽取 | 想用 python-docx 读 → 不是 zip，直接失败；也别说"必须装 Word/LibreOffice" | 文件头 `d0cf11e0` 即 OLE2 旧格式；本机无 LibreOffice、pywin32+Word 虽在但杀鸡用牛刀——先用 UTF-16LE 连续段粗扫拿段落标题（够用且零依赖），要版式时再按同结构重建 .docx | 2026-09-19 |
 | 截图给 VLM 读 | 用 browser_screenshot 返回的服务端路径喂 understand_image → 400/不存在 | 截图存在 localAgent 侧，IDE 不可读；提取内容走 DOM，别绕截图 | 2026-09-10 |
 | 用"URL 里没有 login"判已登录 → 假绿灯 | `if "login" not in url and "sso.scnu" not in url: 已登录`；未登录访问 `/my/` 实际 302 到 `https://moodle.scnu.edu.cn/?redirect=0`，**URL 里既无 login 也无 sso**，于是脚本宣布"already logged in"，后面每页都取到"访客不能访问此课程"的空正文，误判成"该课没有作业" | **唯一判据 = URL 里真的含 `/my/`**（平台文档 §0 早写了"能进到 /my/ 才算登录"）；再兜一层：断言正文不含「访客不能访问此课程」 | 2026-09-20 |
-| 重启调试浏览器 = 登录态必丢 | 以为 `chrome_debug/` 存了登录态，重启 Chrome 后直接抓页面 | Moodle 的 `PHPSESSID` 是**会话 cookie**，进程一退就没了（本轮 `page.close()` 关掉最后一个标签 → Chrome 进程退出 → 下次连上全是访客页）。跨脚本复用登录态时，**先按上一条判据复核 `/my/`，不通就走 §1 四步重登**；脚本里别关最后一个标签页 | 2026-09-20 |
+| 重启调试浏览器 = 登录态必丢 | 以为 `chrome_debug/` 存了登录态，重启 Chrome 后直接抓页面 | Moodle 的会话 cookie（2026-09-30 CDP 实测名 = **`MoodleSession`**，本表旧版误写 `PHPSESSID`）是**会话 cookie**，进程一退就没了（本轮 `page.close()` 关掉最后一个标签 → Chrome 进程退出 → 下次连上全是访客页）。跨脚本复用登录态时，**先按上一条判据复核 `/my/`，不通就走 §1 重登**；脚本里别关最后一个标签页 | 2026-09-20 |
+| 首页「登录」链接有**隐藏副本**，`.first` 抓到错的那个 | `page.locator("text=登录").first` → `scroll_into_view_if_needed` 8 秒超时，四步登录全挂，最终落在 `/?redirect=0`。首页 DOM 里其实有**两个** `登录` → `/login/index.php` 的 `<a>`，一个可见一个 `offsetWidth=0`，Playwright 按 DOM 序返回，`.first` 命中隐藏那个 | **别点首页链接**：直接 `goto /login/index.php` 跳过它；其余每一步都用 `:visible` 过滤（`#ssobtn:visible` / `#btn-password-login:visible` / `.card-footer .login-check-comfirm:visible`）。诊断姿势：`[...document.querySelectorAll('a')].filter(a=>/登录/.test(a.innerText)).map(a=>({vis:!!(a.offsetWidth\|\|a.offsetHeight)}))` | 2026-09-22 |
 | OAuth 页脚「确定登录」点完 URL 立刻读仍是 auth.html | `click()` 后 `sleep(2)` 读 `page.url`，还在 `openapi/auth.html` → 判 LOGIN FAILED 退出（**实际授权已成功**，下一轮新页访问 `/my/` 直接通过） | 跳转类操作不以"点完立刻看 URL"为准：**回落地页二次访问**再判定；另外 goto 偶发 `net::ERR_ABORTED`（被上一跳导航抢占），重试一次即可 | 2026-09-20 |
+
+| 脚本自带 playwright 连接把调试 Chrome 整体带走（2026-09-30 实测） | 在 temp 脚本里 `connect_over_cdp("http://127.0.0.1:9222")` 抓表，脚本退出后 9222 ECONNREFUSED、`MoodleSession` 一起没，下轮全访客页 | 抓 Moodle 走**后端 `/browser/*` REST 常驻会话**（sessions→navigate→evaluate）；浏览器由后端进程持有。⚠ evaluate 表达式只能是纯表达式，含 `function (` 会被写操作拦截判 `UNSUPPORTED_ACTION`。完整姿势见 `workspace/homework/platforms/moodle-scnu.md` §2.3（本文件不复述，避免两处漂） | 2026-09-30 |
 
 ## URL 规则与重定向
 
@@ -66,3 +69,5 @@
 | 2026-09-19 | 确认重复文件 `scnu-edu-cn.md` 无独有内容（唯一 1 行坑与本文件同坑）后删除；配套修 write_lesson 写前查重 |
 | 2026-09-19 | T06 自主抓大作业要求：补「分组限定活动无锚点会被整批漏」（`li.activity id="module-<cmid>"` 取法，同步 moodle-scnu.md §2.4）、choicegroup 302 坑（自重复文件并入）、跨进程拿错标签页、`#region-main` 可能不存在、旧 .doc 粗扫法；记重复文件 `scnu-edu-cn.md` 待裁决。SSO 自动填充本轮复验成功 |
 | 2026-09-20 | 全量重扫 + 数图建档：补 3 条登录态坑（**"URL 不含 login"是假绿灯，唯一判据是 URL 含 `/my/`**；**Moodle PHPSESSID 是会话 cookie，调试浏览器进程一退必丢登录**，而 `page.close()` 关掉最后一个标签会连带让 Chrome 退出；**OAuth 页脚「确定登录」点完立刻读 URL 仍停在 auth.html**，须回落地页二次访问判定，goto 偶发 `net::ERR_ABORTED` 重试即可）。SSO 自动填充第 3 次复验成功（脚本只读输入框长度） |
+| 2026-09-22 | 重扫时 §1 首页点击法实测失效：补「首页有两个『登录』链接，`.first` 抓到隐藏那个 → scroll_into_view 永远超时」；可行姿势改为直接 goto 登录页 + 全程 `:visible`。同步修 `workspace/homework/platforms/moodle-scnu.md` §1 |
+| 2026-09-30 | 补一条通道级坑：agent 自己的 playwright `connect_over_cdp` 脚本退出会把调试 Chrome 整个带走（9222 拒连 + 会话 cookie 丢），改走后端 `/browser/*` REST 常驻会话；并记 `/browser/evaluate` 的写操作正则误杀 `function (` 表达式。细节真源写在 `workspace/homework/platforms/moodle-scnu.md` §2.3。另订正会话 cookie 名：CDP `Network.getCookies` 实测本站发的是 `MoodleSession`，本文件与平台文档旧版一律误写 `PHPSESSID`（行为结论不变，仅名字订正；历史条目里的旧写法不回改） |

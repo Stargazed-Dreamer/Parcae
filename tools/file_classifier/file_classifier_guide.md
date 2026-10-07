@@ -28,7 +28,7 @@
 
 4. **审核并移动**：点"审核并移动"打开审核对话框，可逐个修改预测分类或跳过文件。确认后按分类配置中的真实目录路径移动文件。冲突时可选覆盖/跳过/重命名（文件夹支持合并）。
 
-5. **完成**：文件移动到分类目标目录，分类结果自动标记"已处理"写入 state.json，后端 <data_drive>:/DownloadscanAction 扫描时跳过已处理条目。
+5. **完成**：文件移动到分类目标目录，分类结果自动标记"已处理"写入 state.json，后端 DownloadScanAction 扫描时跳过已处理条目。
 
 ## 按钮说明
 
@@ -163,11 +163,11 @@
 
 ## 状态持久化
 
-`tools/file_classifier/state.json` 记录以下信息，GUI 和后端 <data_drive>:/DownloadscanAction 共享：
+`tools/file_classifier/state.json` 记录以下信息，GUI 和后端 DownloadScanAction 共享：
 
 ### 分类即已处理
 
-文件/文件夹被分类并移动后，自动调 `state_manager.mark_classified(path, category)` 标记已处理。后端 <data_drive>:/DownloadscanAction 每 5 分钟扫描下载文件夹时，读取 state.json 跳过已处理条目，避免重复推送。
+文件/文件夹被分类并移动后，自动调 `state_manager.mark_classified(path, category)` 标记已处理。后端 DownloadScanAction 每 5 分钟扫描下载文件夹时，读取 state.json 跳过已处理条目，避免重复推送。
 
 ### 暂存分类
 
@@ -203,8 +203,8 @@
 ```json
 {
   "categories": [
-    {"name": "文档", "path": "<data_drive>:\<data_drive>:\Documents", "extensions": [".pdf", ".doc", ".docx", ".txt", ".md"]},
-    {"name": "图片", "path": "<data_drive>:\<data_drive>:\Pictures", "extensions": [".jpg", ".png", ".gif", ".bmp", ".webp"]},
+    {"name": "文档", "path": "<data_drive>:<data_drive>:\Documents", "extensions": [".pdf", ".doc", ".docx", ".txt", ".md"]},
+    {"name": "图片", "path": "<data_drive>:<data_drive>:\Pictures", "extensions": [".jpg", ".png", ".gif", ".bmp", ".webp"]},
     {"name": "暂存", "path": "", "extensions": []}
   ]
 }
@@ -216,7 +216,7 @@
 
 ## 后端监控循环
 
-后端 <data_drive>:/DownloadscanAction 每 5 分钟扫描下载文件夹（`config.toml` `[loops.download_watcher]`）：
+后端 DownloadScanAction 每 5 分钟扫描下载文件夹（`config.toml` `[loops.download_watcher]`）：
 
 1. 扫描顶层条目（文件+文件夹）
 2. 读取 state.json 跳过已处理条目

@@ -9,6 +9,8 @@
   F. config.example.toml ↔ data/config_descriptions.json 双向对账
   G. workspace/*/manifest.toml 声明的 file/entries_var/class/glob 存在性
   H. docs/api-reference.md ↔ OpenAPI 路由双向对账
+  I. config.example.toml 键 ↔ server/config.py 字面量读取（僵尸配置）
+  J. .agents/skills/_index.md 组件段 ↔ tools/generate_index.py 输出（生成器没人跑的漂移）
 
 用法: uv run python tools/audit/drift_detector.py
 输出: 控制台摘要 + temp/audit/drift_report.md（可再生产物，故仍写 temp/）
@@ -16,6 +18,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import re
@@ -132,16 +135,55 @@ def check_tools_manifest() -> None:
 
 # ---------------------------------------------------------------- D. GUIDE_REGISTRY
 def import_module_from_path(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
+    """加载组件入口模块 —— 以**父包身份**导入，不能只按文件路径加载。
+
+    ⛔ 为什么不用 `spec_from_file_location`：那种方式没有父包上下文，模块里只要有
+    相对导入（`from .email_client import x`）就必然
+    `ImportError: attempted relative import with no known parent package`
+    —— 这不是真实断链，是加载方式本身的问题。2026-09-23 实测：
+    `workspace/email_source/loop_actions.py` 因此报假 HIGH，并且连带把它的
+    `GUIDE_REGISTRY_ENTRIES` 检查也打成假 HIGH（一个 bug 报两条）。
+
+    做法：把组件目录的父目录（即 `workspace/`）临时加入 `sys.path`，
+    模块名走 `组件目录名.文件名`（如 `email_source.loop_actions`）。
+    实测 30 个组件目录名全是合法 Python 标识符，可直接作包名。
+
+    `name` 参数保留仅为兼容调用点，真实模块名由路径推出。
+    """
+    if not path.is_file():
+        emit("D", "HIGH", f"模块文件不存在 → {path}")
         return None
-    mod = importlib.util.module_from_spec(spec)
+
+    pkg_dir = path.parent
+    mod_name = f"{pkg_dir.name}.{path.stem}"
+    search_root = str(pkg_dir.parent)
+    added = search_root not in sys.path
+    if added:
+        sys.path.insert(0, search_root)
     try:
-        spec.loader.exec_module(mod)
+        importlib.invalidate_caches()
+        return importlib.import_module(mod_name)
+    except ImportError as e:
+        if "attempted relative import" in str(e):
+            # 父包上下文没生效（修复后不该出现）⇒ 是加载方式问题，不是断链
+            emit(
+                "D",
+                "LOW",
+                f"模块加载失败（疑似导入方式问题，非真实断链）{path.relative_to(ROOT)}: {e!r}",
+            )
+        else:
+            # ModuleNotFoundError 等 ⇒ 组件 import 了不存在的东西，这是真实断链，必须 HIGH
+            emit("D", "HIGH", f"模块加载失败（真实断链）{path.relative_to(ROOT)}: {e!r}")
+        return None
     except Exception as e:  # noqa: BLE001
         emit("D", "HIGH", f"模块加载失败 {path.relative_to(ROOT)}: {e!r}")
         return None
-    return mod
+    finally:
+        if added:
+            try:
+                sys.path.remove(search_root)
+            except ValueError:
+                pass
 
 
 def check_guide_registry(opids: set[str]) -> dict[str, dict]:
@@ -412,6 +454,57 @@ def check_config_code_reads() -> None:
                 )
 
 
+# ---------------------------------------------------------------- J. _index.md 组件段 ↔ 生成器
+def check_skill_index_sync() -> None:
+    """J 节：`.agents/skills/_index.md` 的「组件化模块」段是否等于生成器的当前输出。
+
+    该段是 `tools/generate_index.py` 的产物（文件头自己写着"勿手工编辑"），但没有任何
+    东西强制谁去跑它：实测 chat_digest / task_room / x_link_harvest 三个组件落地时都没同步，
+    索引连着缺行好几轮。把它做成机检项，缺谁的名字就报谁。
+    """
+    REPORT_LINES.append("\n### J. _index.md 组件段 ↔ tools/generate_index.py 输出\n")
+    try:
+        from tools import generate_index as gi
+    except ImportError as e:
+        emit("J", "MEDIUM", f"无法导入 tools.generate_index，跳过检查: {e}")
+        return
+
+    index_file = ROOT / ".agents" / "skills" / "_index.md"
+    if not index_file.exists():
+        emit("J", "MEDIUM", f"_index.md 不存在 → {index_file.relative_to(ROOT)}")
+        return
+
+    content = index_file.read_text(encoding="utf-8")
+    found = re.search(
+        re.escape(gi.COMPONENT_SECTION_HEADER) + r".*?" + re.escape(gi.COMPONENT_SECTION_END),
+        content,
+        re.DOTALL,
+    )
+    if found is None:
+        emit("J", "MEDIUM", "_index.md 里没有「组件化模块」段 → 跑 `uv run python -m tools.generate_index`")
+        return
+
+    expected = gi._format_component_section(gi._collect_component_entries())
+    if found.group(0).strip() == expected.strip():
+        return
+
+    cur = set(re.findall(r"^### (\S+)", found.group(0), re.MULTILINE))
+    exp = set(re.findall(r"^### (\S+)", expected, re.MULTILINE))
+    detail: list[str] = []
+    if exp - cur:
+        detail.append(f"索引缺条目 {sorted(exp - cur)}")
+    if cur - exp:
+        detail.append(f"索引有条目但 manifest 已不声明 {sorted(cur - exp)}")
+    if not detail:
+        detail.append("条目齐但描述/task_type 文本已与 manifest 不一致")
+    emit(
+        "J",
+        "MEDIUM",
+        "_index.md 组件段与生成器输出不一致（改完 manifest/SKILL 忘了跑生成器）→ "
+        "`uv run python -m tools.generate_index`；" + "；".join(detail),
+    )
+
+
 def main() -> None:
     print("== 加载运行时 OpenAPI（import server.main）...")
     try:
@@ -433,6 +526,7 @@ def main() -> None:
     entries_by_comp: dict[str, list[str]] = {}
     check_workspace_manifests(entries_by_comp)
     check_api_docs(routes)
+    check_skill_index_sync()
 
     # 汇总
     total = sum(len(v) for v in FINDINGS.values())

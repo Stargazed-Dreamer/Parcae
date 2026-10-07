@@ -33,12 +33,14 @@ import requests
 from client.core.agent.l0_artifact_store import L0ArtifactStore
 from client.core.agent.tool_registry import ToolRegistry
 from client.core.agent.types import ToolCall, ToolResult, ToolResultVariant
+from lib.agent_identity import AGENT_CALLER_HEADER_VALUE
 
 logger = logging.getLogger("localagent.agent.http_tool_executor")
 
 # X-Agent-Caller 头标识：让 server http_guard 知道这是 agent 调用（区别于 GUI 用户调用）
 # server 的 http_guard 会按 operation_id + safety 决定是否走审批链
-AGENT_CALLER_HEADER_VALUE = "v6-lite-agent"
+# 值与判据真源都在 lib.agent_identity（服务端按"有值即 agent"识别，这里再写一遍会漂）
+# （AGENT_CALLER_HEADER_VALUE 的 import 已上移到 import 块，满足 E402）
 
 # T06b: 审批挑战处理端点（server/command_guard.py 的 request_approval 端点）
 # 请求体: {approval_id, agent_reason}
@@ -200,6 +202,9 @@ class HttpClientToolExecutor:
                 content=f"Tool '{tool_call.name}' timed out after {self.timeout}s",
                 variant=ToolResultVariant.TIMEOUT,
                 timeout_seconds=self.timeout,
+                # unknown-outcome-evidence T03：请求已发出但响应没回来——
+                # 后端可能已经执行完。这是"不知道"，不是"失败"。
+                outcome_unknown=True,
                 created_at=started,
             )
         except Exception as e:
@@ -451,6 +456,8 @@ class HttpClientToolExecutor:
                 content=f"Approved retry timed out after {self.timeout}s",
                 variant=ToolResultVariant.TIMEOUT,
                 timeout_seconds=self.timeout,
+                # 已获批准的请求超时同属"不知道成没成"
+                outcome_unknown=True,
                 created_at=started,
             )
         except Exception as e:

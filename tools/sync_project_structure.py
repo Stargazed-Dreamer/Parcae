@@ -17,9 +17,18 @@
 """
 
 import argparse
+import io
 import json
 import sys
 from pathlib import Path
+
+# 中文 Windows 控制台默认 cp936，而本脚本的摘要行含 ⚠️/✅：print 就能抛 UnicodeEncodeError
+# （2026-10-03 实跑 --verify 撞在"检测到漂移"那一行，发版第 7 步直接断在半路）。
+# 与 tools/bump_version.py 同一写法：先把 stdout/stderr 包一层 utf-8/replace。
+for _name in ("stdout", "stderr"):
+    _stream = getattr(sys, _name, None)
+    if _stream is not None and hasattr(_stream, "buffer"):
+        setattr(sys, _name, io.TextIOWrapper(_stream.buffer, encoding="utf-8", errors="replace"))
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))

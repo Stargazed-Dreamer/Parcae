@@ -18,7 +18,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 import toml
 
 from tools.release.engine.models import (
@@ -329,10 +328,10 @@ def _setup_publish_env(tmp_path: Path, plan: PreparedRelease, files: dict[str, s
 
 
 def _publish_args(plan: PreparedRelease, **kwargs) -> SimpleNamespace:
-    defaults = dict(
-        plan=plan.plan_digest, dry_run=False, repo_dir=None,
-        tag=None, version="0.45.0", no_history=False,
-    )
+    defaults = {
+        "plan": plan.plan_digest, "dry_run": False, "repo_dir": None,
+        "tag": None, "version": "0.45.0", "no_history": False,
+    }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 

@@ -23,7 +23,7 @@ from server.model_manager.config import (
     is_restore_preload,
     set_model_override,
 )
-from server.model_manager.monitor import PressureMonitor
+from server.model_manager.monitor import FAIL_TRANSIENT, PressureMonitor
 from server.model_manager.registry import ModelRegistry
 from server.model_manager.types import (
     ModelDriver,
@@ -80,21 +80,36 @@ class ModelLifecycleManager:
         if not self.enabled:
             logger.info("ModelLifecycleManager enabled=false，纯透传模式（不做自动监控）")
             return
+        # 采样 owner 只有一个：先起常驻中枢（内部会同步采满一轮首样本），管理器只消费
+        await self._resolve_hub().ensure_started()
         # 启动即时采样：首样本必须先于任何准入判定存在
         for monitor in self.monitors.values():
             if not monitor.cfg.enabled:
                 continue
-            sample = await monitor.sample()
-            if sample is None:
-                monitor.on_probe_failure()
-            else:
-                monitor.observe(monitor.ratio or 0.0)
+            await self._refresh(monitor)
         self._stopped = False
         self._loop_task = asyncio.create_task(self._run_loop())
         logger.info(
             f"ModelLifecycleManager 已启动: 注册模型={len(self.registry)}, "
             f"gpu={self.monitors['gpu'].state.value}, cpu={self.monitors['cpu'].state.value}"
         )
+
+    def _resolve_hub(self):
+        from server.resource_probe import get_resource_hub
+
+        return get_resource_hub()
+
+    async def _refresh(self, monitor: PressureMonitor) -> None:
+        """取一个新样本推进状态机；只有瞬时失败才计入探测连击"""
+        sample = await monitor.sample()
+        if sample is not None:
+            monitor.observe(monitor.ratio or 0.0)
+        elif monitor.last_failure == FAIL_TRANSIENT:
+            monitor.on_probe_failure()
+        # probe_absent（本机没有该数据源）与 no_new_sample（中枢还没出新值）
+        # 都不算失败：前者走"判无卡放行"，后者下个周期自然补上
+        if monitor.eviction_active():
+            await self._maybe_evict(monitor)
 
     async def stop(self) -> None:
         self._stopped = True
@@ -119,13 +134,7 @@ class ModelLifecycleManager:
         for monitor in self.monitors.values():
             if not monitor.cfg.enabled:
                 continue
-            sample = await monitor.sample()
-            if sample is None:
-                monitor.on_probe_failure()
-            else:
-                monitor.observe(monitor.ratio or 0.0)
-            if monitor.eviction_active():
-                await self._maybe_evict(monitor)
+            await self._refresh(monitor)
         self._observe_autonomous_loads()
 
     # ========== 准入（Gate） ==========
@@ -144,6 +153,11 @@ class ModelLifecycleManager:
         monitor = self.monitors.get(driver.resource)
         if monitor is None or not monitor.cfg.enabled:
             return True, "monitor_disabled"
+        if monitor.probe_absent:
+            # 本机没有该资源的数据源（如非 NVIDIA 卡）：监控失效 ≠ 有压力，放行。
+            # 这条判定必须在 has_first_sample 之前——旧 nvidia-smi 路线把"永远采不到"
+            # 算成 await，无卡机器的模型准入被永久卡死（见 environment-constraints.md）
+            return True, "probe_absent_no_card"
         if not monitor.has_first_sample:
             return False, "awaiting_first_sample"
         if not monitor.admission_allowed():
@@ -417,6 +431,10 @@ class ModelLifecycleManager:
             "enabled": self.enabled,
             "gpu_state": self.monitors["gpu"].state.value if "gpu" in self.monitors else "disabled",
             "cpu_state": self.monitors["cpu"].state.value if "cpu" in self.monitors else "disabled",
+            # 数据源在本机不存在的资源（如非 NVIDIA 卡 → gpu）；这些资源的准入直接放行
+            "probe_absent_resources": sorted(
+                res for res, m in self.monitors.items() if m.probe_absent
+            ),
             "loaded_ids": sorted(
                 d.model_id for d in self.registry.all() if _safe_is_loaded(d)
             ),

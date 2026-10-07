@@ -172,8 +172,13 @@ def _setup_logging():
     import multiprocessing
     is_main_process = multiprocessing.current_process().name == "MainProcess"
 
+    # pytest 进程内不挂文件 handler（2026-09-30 实测：测试的 ERROR 会落进生产
+    # data/logs/server.log——如紧急停止单测的假异常"session 模块炸了"出现 6 组，
+    # 污染运维判读）。import 时 pytest 已在 sys.modules，用它判定；生产进程不受影响。
+    under_pytest = "pytest" in sys.modules
+
     # 文件（默认开启，崩溃后可追溯）
-    if cfg["file_enabled"] and is_main_process:
+    if cfg["file_enabled"] and is_main_process and not under_pytest:
         try:
             from logging.handlers import RotatingFileHandler
 
@@ -204,7 +209,7 @@ def _setup_logging():
 
 _setup_logging()
 
-VERSION = "0.49.0"
+VERSION = "0.53.0"
 
 app = FastAPI(title="LocalAgent API", version=VERSION)
 

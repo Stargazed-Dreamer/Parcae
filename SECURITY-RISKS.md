@@ -1,7 +1,7 @@
 # SECURITY-RISKS.md
 
 > LocalAgent 项目已知安全风险与查证结论。
-> 本文件由 `temp/sdd/chat-engine-safety-fixes/` SDD 流程产出，对应 spec D18/D19/D25 决策。
+> 本文件由 `temp/planning_archive/sdd/chat-engine-safety-fixes/` SDD 流程产出（该目录随仓库跟踪），对应 spec D18/D19/D25 决策。
 >
 > 风险等级：
 > - **高危**：攻击者接触本机即可利用，建议尽快修复
@@ -252,7 +252,7 @@ config.toml 被访问时 token 暴露。
 
 ### 当前处置
 
-**迁移后消除。** 迁移脚本 `tools/migrate_secrets.py` 负责搬迁。
+**迁移已完成。** 当时的迁移脚本 `tools/migrate_secrets.py` 已删除；密钥文件的备份/恢复现走 `tools/backup_secrets.py` + `tools/restore_secrets.py`。
 
 ---
 
@@ -286,11 +286,11 @@ release engine 的 path_mapping 规则遗漏会导致个人路径泄露到发布
 
 ### 影响
 
-发布包接收者可看到真实本地路径（如 `C:\<user_home>\`）。
+发布包接收者可看到真实本地路径（如 `<user_home>\`）。
 
 ### 缓解措施
 
-- 每轮发布前跑 `uv run python -m tools.release.cli scan --profile friend-full` 验证
+- 每轮发布前跑 `uv run python -m tools.release.cli scan --profile public-full` 验证
 - path_mapping 覆盖 4 种字面形式（单反斜杠/双反斜杠/正斜杠/转义）× 大小写变体
 - build_release 是扁平拷贝，不含 `.git` 历史
 
@@ -406,7 +406,7 @@ clone 完整 git 历史可获取历史密钥。
 
 ### 影响
 
-agent 通过 `localagent_advanced_tool` 网关可调这些端点，传 `C:\<user_home>\.ssh\id_rsa` 等敏感路径。虽然 `Image.open` 限制只能读图片格式，但攻击者可通过截图/PDF 间接泄露敏感信息。`docviewer_read`/`mindforge_convert` 可能接受更多文档格式，风险更高。
+agent 通过 `localagent_advanced_tool` 网关可调这些端点，传 `<user_home>\.ssh\id_rsa` 等敏感路径。虽然 `Image.open` 限制只能读图片格式，但攻击者可通过截图/PDF 间接泄露敏感信息。`docviewer_read`/`mindforge_convert` 可能接受更多文档格式，风险更高。
 
 ### 缓解措施
 

@@ -89,7 +89,7 @@ class ScriptedProbe:
 
 
 class FailingProbe:
-    """连续失败的探测（模拟 nvidia-smi 不可用）"""
+    """连续失败的注入探针（模拟数据源存在但这次采不到 → 走 PROBE_DEGRADED）"""
 
     def __call__(self):
         raise RuntimeError("nvidia-smi not found")
@@ -580,8 +580,8 @@ def test_health_summary_low_freq_fields():
     m = make_manager(probe_ratios=[0.5], drivers=[FakeDriver("ocr")])
     tick_n(m, 1)
     s = m.health_summary()
-    assert set(s) == {"enabled", "gpu_state", "cpu_state", "loaded_ids",
-                      "reload_degraded_ids", "last_transition_ts"}
+    assert set(s) == {"enabled", "gpu_state", "cpu_state", "probe_absent_resources",
+                      "loaded_ids", "reload_degraded_ids", "last_transition_ts"}
     assert s["gpu_state"] == "normal"
     assert s["loaded_ids"] == ["ocr"]
 

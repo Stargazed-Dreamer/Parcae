@@ -225,11 +225,11 @@ class TestTerminalSessions:
             from server.exec import (
                 _TERMINAL_MEMORY_TAIL_CHARS,
                 TerminalSpawnRequest,
+                _terminal_spawn_impl,
                 _terminals,
                 terminal_delete,
                 terminal_detail,
                 terminal_output,
-                terminal_spawn,
             )
 
             command = (
@@ -237,9 +237,9 @@ class TestTerminalSessions:
                 "[print('out-%05d-' % i + 'x' * 80) for i in range(2500)]; "
                 "[print('err-%05d-' % i + 'y' * 80, file=sys.stderr) for i in range(2500)]"
             )
-            spawned = await terminal_spawn(TerminalSpawnRequest(
+            spawned = await _terminal_spawn_impl(TerminalSpawnRequest(
                 cmd=command, shell="python", label="large-output-test", timeout=10,
-            ))
+            ), None)
             assert spawned["success"] is True
             await _terminals[spawned["tid"]]["_collector_task"]
 
@@ -385,9 +385,15 @@ class TestTerminalSessionCleanup:
 
     def test_terminal_detail_defaults_to_safe_preview(self):
         async def scenario():
-            from server.exec import TerminalSpawnRequest, _terminals, terminal_delete, terminal_detail, terminal_spawn
+            from server.exec import (
+                TerminalSpawnRequest,
+                _terminal_spawn_impl,
+                _terminals,
+                terminal_delete,
+                terminal_detail,
+            )
 
-            spawned = await terminal_spawn(TerminalSpawnRequest(cmd="print('z' * 20000)", shell="python"))
+            spawned = await _terminal_spawn_impl(TerminalSpawnRequest(cmd="print('z' * 20000)", shell="python"), None)
             await _terminals[spawned["tid"]]["_collector_task"]
             detail = await terminal_detail(spawned["tid"])
             assert detail["stdout_total_chars"] >= 20000
@@ -399,9 +405,9 @@ class TestTerminalSessionCleanup:
 
     def test_terminal_delete_removes_log_files(self):
         async def scenario():
-            from server.exec import TerminalSpawnRequest, _terminals, terminal_delete, terminal_spawn
+            from server.exec import TerminalSpawnRequest, _terminal_spawn_impl, _terminals, terminal_delete
 
-            spawned = await terminal_spawn(TerminalSpawnRequest(cmd="print('cleanup')", shell="python"))
+            spawned = await _terminal_spawn_impl(TerminalSpawnRequest(cmd="print('cleanup')", shell="python"), None)
             await _terminals[spawned["tid"]]["_collector_task"]
             paths = [
                 _terminals[spawned["tid"]]["_stdout_path"],

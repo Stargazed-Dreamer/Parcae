@@ -1,6 +1,6 @@
 [project]
 name = "localagent"
-version = "0.49.0"
+version = "0.53.0"
 description = "LocalAgent API backend with PaddleOCR-VL"
 requires-python = ">=3.12"
 dependencies = [
@@ -27,7 +27,13 @@ dependencies = [
     "jieba>=0.42.1",
     "numpy>=1.26.0",
     "orjson>=3.10.0",
-    "playwright>=1.60.0",
+    # 2026-09-30 由 playwright 迁移至 patchright（fork，API 兼容 drop-in）：
+    # 原版 connect_over_cdp 对每个 page/frame 发 Runtime.enable，console 序列化
+    # 预览走对象原型链枚举，可被反爬检测（2026-09-30 红蓝对抗实测复现）；
+    # patchright 不逐 frame 发 Runtime.enable，实测检测向量清零。
+    # 代价：page.on("console") 收不到主 world 的 consoleAPICalled（原理性），
+    # console_logs 已改用 CDP Log domain 兜底（error/warning/network 级）。
+    "patchright>=1.63.0",
     # phase 3 public audience: SPDX 2.3 SBOM 生成 + schema 校验（2026-07-31 用户批准）
     # ⚠ tools/release/engine/sbom.py 是模块级 import，必须留在主依赖
     "spdx-tools>=0.8.0",

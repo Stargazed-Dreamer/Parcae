@@ -72,7 +72,7 @@ def _make_plan(
         scan_digest="d" * 64,
         gates_required=("policy-schema", "tracked-file-inventory",
                         "sensitive-content-scan", "manifest-audit",
-                        "no-key-startup", "archive-verification"),
+                        "compile-check", "archive-verification"),
         gates_results=(
             GateResult(name="policy-schema", passed=True, details="ok"),
             GateResult(name="tracked-file-inventory", passed=True, details="ok"),
@@ -357,8 +357,8 @@ def test_build_release_runs_build_time_gates(
     # Mock heavy gates to pass
     monkeypatch.setattr(
         build_module,
-        "_gate_no_key_startup",
-        lambda sd: GateResult(name="no-key-startup", passed=True, details="mock ok"),
+        "_gate_compile_check",
+        lambda sd: GateResult(name="compile-check", passed=True, details="mock ok"),
     )
     monkeypatch.setattr(
         build_module,
@@ -592,13 +592,13 @@ def test_path_mapping_replaces_personal_paths(tmp_path: Path) -> None:
     from tools.release.engine.build import _apply_path_mapping
 
     path_mapping = _load_public_path_mapping()
-    assert "users\\admin" in path_mapping, "users\\admin rule missing"
+    assert "<user_home>" in path_mapping, "<user_home> rule missing"
 
     target = tmp_path / "config" / "mcps.txt"
     target.parent.mkdir(parents=True)
     target.write_text(
-        r"lower: C:\<user_home>\.trae-cn\mcps" + "\n"
-        + r"upper: C:\<user_home>\AppData" + "\n"
+        r"lower: <user_home>\.trae-cn\mcps" + "\n"
+        + r"upper: <user_home>\AppData" + "\n"
         + r"mindforge: <external_project_root>\MindForge\src" + "\n",
         encoding="utf-8",
     )
@@ -607,11 +607,11 @@ def test_path_mapping_replaces_personal_paths(tmp_path: Path) -> None:
 
     assert replaced >= 3, f"expected >=3 replacements, got {replaced}"
     content = target.read_text(encoding="utf-8")
-    assert "<user_home>" in content, f"users\\admin should be replaced, got: {content}"
+    assert "<user_home>" in content, f"<user_home> should be replaced, got: {content}"
     assert "<external_project_root>\\MindForge" in content, (
         f"backslash repl must be written literally, got: {content}"
     )
-    assert "users\\admin" not in content.lower(), (
+    assert "<user_home>" not in content.lower(), (
         f"original path (any case) should not remain: {content}"
     )
 
@@ -623,9 +623,9 @@ def test_path_mapping_covers_personal_path_patterns(tmp_path: Path) -> None:
     - <project_root> → <project_root>
     - <external_project_root>\MindForge → <external_project_root>\MindForge
     - <user_home> → <user_home>
-    - <data_drive>:\<working_root> → <academic_root>
-    - <data_drive>:\Documents/<data_drive>:\Pictures → <data_drive>:\...
-    - <data_drive>:\<bilibili_videos> → B 站相关占位符
+    - <data_drive>:/<working_root> → <academic_root>
+    - Documents/Pictures → <data_drive>:\...
+    - <data_drive>:/<bilibili_videos> → B 站相关占位符
     """
     from tools.release.engine.build import _apply_path_mapping
 
@@ -635,12 +635,12 @@ def test_path_mapping_covers_personal_path_patterns(tmp_path: Path) -> None:
         # (input, expected_substring_after_mapping)
         (r"<project_root>\server", "<project_root>"),
         (r"<external_project_root>\MindForge\src", "<external_project_root>"),
-        (r"C:\<user_home>\.trae-cn", "<user_home>"),
-        (r"E:\<data_drive>:\<academic_root>\doc", "<academic_root>"),
-        (r"<data_drive>:\<data_drive>:\Documents\notes", "<data_drive>:\\<data_drive>:\Documents"),
-        (r"<data_drive>:\<data_drive>:\Pictures\photos", "<data_drive>:\\<data_drive>:\Pictures"),
-        (r"D:\<data_drive>:\<bilibili_organized_output>\output", "<bilibili_organized_output>"),
-        (r"E:\<data_drive>:\<bilibili_videos>\video", "<bilibili_videos>"),
+        (r"<user_home>\.trae-cn", "<user_home>"),
+        (r"<data_drive>:/<academic_root>\doc", "<academic_root>"),
+        (r"<data_drive>:<data_drive>:\Documents\notes", "<data_drive>:/<data_drive>:\Documents"),
+        (r"<data_drive>:<data_drive>:\Pictures\photos", "<data_drive>:/<data_drive>:\Pictures"),
+        (r"<data_drive>:/<bilibili_organized_output>\output", "<bilibili_organized_output>"),
+        (r"<data_drive>:/<bilibili_videos>\video", "<bilibili_videos>"),
     ]
 
     for i, (input_text, expected_substring) in enumerate(test_cases):
@@ -657,3 +657,50 @@ def test_path_mapping_covers_personal_path_patterns(tmp_path: Path) -> None:
             f"expected {expected_substring!r} in result, got {result!r}"
         )
         assert replaced >= 1, f"expected >=1 replacement for {input_text!r}, got {replaced}"
+
+
+def test_normalize_placeholder_paths_collapses_drive_prefix() -> None:
+    r"""盘符前缀归一化：`<data_drive>:/<working_root>\项目` → `<data_drive>:/<working_root>\项目`
+
+    占位符本身已带盘符语义，所以前置盘符直接丢掉；紧贴占位符的反斜杠统一成正斜杠——
+    `\` 紧跟 `<` 在包内 .py 里是非法转义，build 期会打出 SyntaxWarning。
+    """
+    from tools.release.engine.build import _normalize_placeholder_paths
+
+    out, n = _normalize_placeholder_paths(r"<data_drive>:/<working_root>\项目")
+    assert out == r"<data_drive>:/<working_root>\项目", out
+    assert n == 2, f"expected 2 edits (丢盘符 + 统一分隔符), got {n}"
+
+    # 幂等：复跑（CI / 已 sanitized 的源）不该再改任何东西
+    out2, n2 = _normalize_placeholder_paths(out)
+    assert (out2, n2) == (out, 0), f"非幂等: {out2!r} n={n2}"
+
+    # 非占位符上下文不受影响
+    for untouched in (r"D:\code\localAgent", r"<data_drive>:<data_drive>:\Documents", "E:/some/dir"):
+        assert _normalize_placeholder_paths(untouched)[0] == untouched, untouched
+
+
+def test_path_mapping_leaves_no_drive_prefix_before_placeholder(tmp_path: Path) -> None:
+    r"""真 profile + 真函数：只替换末段的规则不得在包内留下"盘符+占位符"四不像。"""
+    import re as _re
+
+    from tools.release.engine.build import _MANGLED_DRIVE, _apply_path_mapping
+
+    path_mapping = _load_public_path_mapping()
+    target = tmp_path / "notes.md"
+    target.write_text(
+        r"源：<data_drive>:/<articles_root>\doc" + "\n"
+        + r"结果：<data_drive>:/<image_organize_output>" + "\n"
+        + r"备份：<data_drive>:/<ipad_backup>\ipad" + "\n"
+        + r"账号：<user_home>\.ssh\id_rsa" + "\n",
+        encoding="utf-8",
+    )
+
+    _apply_path_mapping(tmp_path, path_mapping)
+
+    content = target.read_text(encoding="utf-8")
+    content = target.read_text(encoding="utf-8")
+    assert not _MANGLED_DRIVE.search(content), f"仍有盘符前缀残留: {content!r}"
+    assert not _re.search(r"\\{1,2}<(?=[a-z_]+>)", content), f"占位符前仍是反斜杠: {content!r}"
+    for token in ("<articles_root>", "<image_organize_output>", "<ipad_backup>", "<user_home>"):
+        assert token in content, f"{token} 未出现，规则可能 no-op: {content!r}"

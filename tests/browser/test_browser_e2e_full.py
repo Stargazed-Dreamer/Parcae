@@ -1274,7 +1274,7 @@ class TestL1HWaitFor:
         """POST /browser/wait_for wait_type=download 已支持：click + wait_for 捕获下载事件。
 
         实现真源（wait_endpoints.py download 分支）：session 持久监听器 page.on('download')
-        在 manager.create_session 时挂载，触发时存入 pending_<data_drive>:/Downloads 队列。
+        在 manager.create_session 时挂载，触发时存入 pending_downloads 队列。
         wait_for 优先消费队列，再等待 download_event；download_dir 提供时自动 save_as。
 
         download.html 的 #downloadBtn 用 Blob + a.click() 触发下载，

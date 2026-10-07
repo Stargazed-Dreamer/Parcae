@@ -327,7 +327,7 @@ async def browser_close(req: BrowserCloseRequest):
     # page.close() + 连坐关闭 popup），不再 exec_python 起新 Python 进程冷启动。
     # page 关闭后 session 由 manager 的 page.on("close") 监听器自动清理。
     if req.session_id:
-        from .session.manager import get_session_manager
+        from .session.manager import get_closed_hint, get_session_manager
         mgr = await get_session_manager()
         closed = await mgr.close_session(req.session_id, close_page=True)
         if closed:
@@ -337,7 +337,7 @@ async def browser_close(req: BrowserCloseRequest):
         # 对已关闭标签重试报错。
         return BrowserResponse(
             success=True,
-            message=f"session_id {req.session_id} 不存在或已失效（标签页视为已关闭）",
+            message=f"session_id {req.session_id} 不存在或已失效（标签页视为已关闭）" + get_closed_hint(req.session_id),
         )
 
     # 兼容旧调用：session_id 为空时 urls / tab_ids 至少提供一个
@@ -352,7 +352,7 @@ async def browser_close(req: BrowserCloseRequest):
     cdp_url = _cdp_endpoint()
     code = f"""
 import asyncio, json
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 
 _PARAMS = json.loads({params_literal})
 _CDP_URL = '{cdp_url}'
@@ -494,7 +494,10 @@ async def browser_console_logs(req: BrowserConsoleLogsRequest):
 
     With session_id: reads the session's persistent log buffer (accumulated across
     calls since session creation) and supports since_cursor for incremental reads.
-    Without session_id: one-shot capture for capture_ms milliseconds.
+    2026-09-30 patchright 迁移后：持久捕获为**按需开启**——首次调用本端点即对该
+    session 粘性开启 Runtime.enable（直到 session 关闭），开启前的日志不可见。
+    Without session_id: one-shot capture for capture_ms milliseconds
+    （窗口式 Runtime.enable，抓完即 disable）。
 
     Example — incremental read of all new logs since last cursor:
       browser_console_logs(session_id="abc123", since_cursor=42)
@@ -519,7 +522,7 @@ async def browser_console_logs(req: BrowserConsoleLogsRequest):
 
     # 有 session：直接读取持久日志缓冲（增量）
     if req.session_id:
-        from .session.manager import get_session_manager
+        from .session.manager import get_closed_hint, get_session_manager
         mgr = await get_session_manager()
         s = mgr.get_session(req.session_id)
         if s is None:
@@ -530,10 +533,16 @@ async def browser_console_logs(req: BrowserConsoleLogsRequest):
                     error_code="TAB_NOT_FOUND",
                     error_message=BROWSER_ERROR_CODES["TAB_NOT_FOUND"],
                     phase="connect",
-                    debug_detail=f"session_id {req.session_id} 不存在或已失效",
+                    debug_detail=f"session_id {req.session_id} 不存在或已失效" + get_closed_hint(req.session_id),
                     elapsed_ms=elapsed,
                 ),
             )
+        # 2026-09-30 patchright 迁移：按需开启 console 捕获（幂等）。
+        # patchright 主 world 不发 Runtime.enable，session 创建时收不到 console 事件；
+        # 显式读 console_logs 即视为要捕获，从此粘性开启（直到 session 关闭）。
+        # 首次调用只能拿到开启之后产生的日志——检测暴露面换取功能可用性的显式取舍。
+        if not s.console_capture_enabled:
+            await mgr.enable_console_capture(req.session_id)
         # 从 since_cursor 开始读取（P1-2: 增量返回 cursor/next_cursor/dropped_count）
         all_logs = s.console_logs
         cursor = max(0, req.since_cursor)
@@ -597,23 +606,62 @@ async def main():
             print('ERROR:TAB_NOT_FOUND')
             return
         logs = []
-        def on_console(msg):
-            level = msg.type  # 'log', 'info', 'warning', 'error', 'debug'
-            text = msg.text
-            filt = _PARAMS.get("filter")
-            if filt and filt.lower() not in text.lower():
-                return
-            want = _PARAMS["level"]
-            if want != "all" and level != want:
-                return
-            logs.append({
-                "level": level,
-                "text": text,
-                "url": msg.location.get("url", "") if hasattr(msg, "location") else "",
-                "line": msg.location.get("lineNumber", 0) if hasattr(msg, "location") else 0,
-                "column": msg.location.get("columnNumber", 0) if hasattr(msg, "location") else 0,
-            })
-        page.on("console", on_console)
+        # 2026-09-30 patchright 迁移：主 world 不发 Runtime.enable，page.on("console")
+        # 收不到 consoleAPICalled（原理性）；CDP Log domain 兜底在 Chrome 140 上实测
+        # 零事件（无 Runtime.enable 时 console-api/network 源均不来，见
+        # temp/browser_mgmt_audit_20260930/test_cdp_events.py）。改为窗口式
+        # Runtime.enable：仅在本次 capture_ms 抓取窗口内开启，抓完立即 disable——
+        # 检测暴露面限于一页一窗口。
+        _FILT = _PARAMS.get("filter")
+        _WANT = _PARAMS["level"]
+        def _fmt_args(args):
+            parts = []
+            for a in args or []:
+                if isinstance(a, dict):
+                    if "value" in a:
+                        parts.append(str(a["value"]))
+                    elif a.get("description"):
+                        parts.append(a["description"])
+            return " ".join(parts)
+        def on_console_api(params):
+            try:
+                if not isinstance(params, dict):
+                    return
+                level = params.get("type", "info")
+                text = _fmt_args(args=params.get("args"))
+                if _FILT and _FILT.lower() not in text.lower():
+                    return
+                if _WANT != "all" and level != _WANT:
+                    return
+                frames = (params.get("stackTrace") or {}).get("callFrames") or []
+                top = frames[0] if frames else {}
+                logs.append({
+                    "level": level,
+                    "text": text,
+                    "url": top.get("url", ""),
+                    "line": top.get("lineNumber", 0) or 0,
+                    "column": top.get("columnNumber", 0) or 0,
+                })
+            except Exception:
+                pass
+        def on_exception(params):
+            try:
+                if not isinstance(params, dict):
+                    return
+                d = params.get("exceptionDetails") or {}
+                exc = d.get("exception") or {}
+                text = exc.get("description") or d.get("text", "")
+                if _FILT and _FILT.lower() not in text.lower():
+                    return
+                if _WANT not in ("all", "error"):
+                    return
+                logs.append({"level": "error", "text": text, "url": "", "line": 0, "column": 0})
+            except Exception:
+                pass
+        cdp = await context.new_cdp_session(page)
+        cdp.on("Runtime.consoleAPICalled", on_console_api)
+        cdp.on("Runtime.exceptionThrown", on_exception)
+        await cdp.send("Runtime.enable")
         # 也捕获页面错误事件（uncaught exception）
         def on_pageerror(err):
             text = err.message
@@ -627,6 +675,11 @@ async def main():
         page.on("pageerror", on_pageerror)
         # 等待 capture_ms
         await asyncio.sleep(_PARAMS["capture_ms"] / 1000.0)
+        # 抓取窗口结束即关 Runtime.enable（恢复静默）
+        try:
+            await cdp.send("Runtime.disable")
+        except Exception:
+            pass
         print('OK:' + json.dumps(logs, ensure_ascii=False))
 
 asyncio.run(main())
@@ -744,7 +797,7 @@ async def browser_navigate(req: BrowserNavigateRequest):
 
     # 优先用持久 session（热态 <250ms）
     if req.session_id:
-        from .session.manager import get_session_manager
+        from .session.manager import get_closed_hint, get_session_manager
         mgr = await get_session_manager()
         sess = mgr.get_session(req.session_id)
         page = await mgr.get_page(req.session_id) if sess else None
@@ -756,7 +809,7 @@ async def browser_navigate(req: BrowserNavigateRequest):
                     error_code="TAB_NOT_FOUND",
                     error_message=BROWSER_ERROR_CODES["TAB_NOT_FOUND"],
                     phase="connect",
-                    debug_detail=f"session_id {req.session_id} 不存在或已失效",
+                    debug_detail=f"session_id {req.session_id} 不存在或已失效" + get_closed_hint(req.session_id),
                     elapsed_ms=elapsed,
                 ),
             )
@@ -852,7 +905,13 @@ async def browser_navigate(req: BrowserNavigateRequest):
                     raise
             # 后续等待 req.wait_until 事件（如 domcontentloaded/networkidle）
             # 超时不视为失败（agent 可用 navigation_completed 判断）
-            if navigation_completed and req.wait_until != "commit":
+            # 2026-10-01：back/forward 是 bfcache 恢复型导航，Chrome 不重发
+            # domcontentloaded/load（两库 A/B 实测一致：playwright 1.60 与 patchright
+            # 均在 wait_for_load_state 处吃满 timeout，见
+            # temp/browser_mgmt_audit_20260930/test_backend_flow_ab.py），
+            # commit 实测 <100ms 已完成——恢复型导航跳过第二段等待。
+            if navigation_completed and req.wait_until != "commit" \
+                    and req.action not in ("back", "forward"):
                 try:
                     await page.wait_for_load_state(req.wait_until, timeout=timeout_ms)  # type: ignore[arg-type]
                 except Exception:
@@ -942,7 +1001,10 @@ async def main():
                             raise
                 else:
                     raise
-            if navigation_completed and _PARAMS["wait_until"] != "commit":
+            # 2026-10-01：back/forward 是 bfcache 恢复型导航，Chrome 不重发
+            # domcontentloaded（与 session 模式同因），跳过第二段等待。
+            if navigation_completed and _PARAMS["wait_until"] != "commit" \
+                    and action not in ("back", "forward"):
                 try:
                     await page.wait_for_load_state(_PARAMS["wait_until"], timeout=timeout_ms)
                 except Exception:
@@ -994,8 +1056,14 @@ class BrowserScreenshotRequest(BaseSchema):
     - full_page: 整页（含滚动区域）
     - element: 指定 CSS 选择器的元素截图
 
-    返回路径 + base64（默认 mcp_image_block=True 供 MCP 转 ImageContent）。
-    REST 调用方传 return_base64=False 可只返回路径，避免大字符串进 LLM 上下文。
+    默认只返回 `path`（临时 JPEG 文件路径）。要内嵌图片须显式传 `return_base64=True`，
+    那时响应里 `data.mcp_image_block=True`，由 `server/core/mcp_gateway.py` 的
+    `_scrub_image_block` 转成 MCP ImageContent（多模态模型能"看"，文本上下文不留 base64）。
+
+    默认值曾是 True，导致一次普通截图往 LLM 上下文塞 181424 字符——因为当时网关只认
+    顶层和 `result` 两种形状，而本端点把标记放在 `data` 下，转换根本没触发。
+    网关已改成递归查找，但**默认仍保持只返回 path**：拿 path 交给 understand_image /
+    ocr_path 是更省上下文的做法。
 
     - session_id: 持久 session id（推荐，热态 <250ms）。不传则走 url_pattern 子进程模型
     - url_pattern: 无 session 时匹配标签页（有 session 时忽略）
@@ -1010,7 +1078,7 @@ class BrowserScreenshotRequest(BaseSchema):
     selector: str | None = None  # element 用
     max_size: int = 1024  # 长边像素上限（压缩）
     quality: int = 85
-    return_base64: bool = True  # False=只返回路径，避免大字符串进上下文
+    return_base64: bool = False  # 默认只返回 path；True 才内嵌 base64 并触发 ImageContent 转换
 
 
 class BrowserScreenshotResponse(BaseSchema):
@@ -1031,11 +1099,14 @@ async def browser_screenshot(req: BrowserScreenshotRequest):
     Use full_page to capture long scrolling content (eval reports Browser Use
     had this and LocalAgent didn't). Use element for a single card/button.
 
-    - return_base64=False returns only the file path (avoids LLM context bloat).
+    - return_base64 defaults to False: only the file path comes back, so nothing
+      large enters LLM context. Pass True only when a multimodal model must see
+      the pixels inline (the gateway then converts it to MCP ImageContent).
+      Prefer handing the returned path to understand_image / ocr_path instead.
     - max_size caps the longest edge (default 1024) and JPEG-quality compresses.
 
     Example — full page screenshot:
-      browser_screenshot(shot_type="full_page", url_pattern="bilibili", return_base64=False)
+      browser_screenshot(shot_type="full_page", url_pattern="bilibili")
     """
     if req.shot_type == "element" and not req.selector:
         return BrowserScreenshotResponse(
@@ -1054,7 +1125,7 @@ async def browser_screenshot(req: BrowserScreenshotRequest):
     if req.session_id:
         import time as _time
         start = _time.perf_counter()
-        from .session.manager import get_session_manager
+        from .session.manager import get_closed_hint, get_session_manager
         mgr = await get_session_manager()
         sess = mgr.get_session(req.session_id)
         page = await mgr.get_page(req.session_id) if sess else None
@@ -1066,7 +1137,7 @@ async def browser_screenshot(req: BrowserScreenshotRequest):
                     error_code="TAB_NOT_FOUND",
                     error_message=BROWSER_ERROR_CODES["TAB_NOT_FOUND"],
                     phase="connect",
-                    debug_detail=f"session_id {req.session_id} 不存在或已失效",
+                    debug_detail=f"session_id {req.session_id} 不存在或已失效" + get_closed_hint(req.session_id),
                     elapsed_ms=elapsed,
                 ),
             )
@@ -1225,12 +1296,26 @@ asyncio.run(main())
         # 仅在 base64 已内嵌进响应时清理临时截图。return_base64=False 时 path 是
         # 对外契约（调用方拿着路径后续读取），文件必须保留——此前 finally 无条件
         # unlink 导致返回的 path 悬空（2026-09-13 code review 4-2）。
-        if req.return_base64:
-            try:
-                from pathlib import Path
+        #
+        # 但 return_base64 默认改成 False 后，"保留 path" 成了常态，而原先这条路径
+        # 会立刻 unlink——目录会持续累积。按 mtime 扫掉超过 24h 的旧截图，既保住
+        # path 契约又堵住磁盘增长（本次刚写的文件 mtime≈now，不会被误删）。
+        try:
+            import time as _time
+            from pathlib import Path
+
+            if req.return_base64:
                 Path(message).unlink(missing_ok=True)
-            except Exception:
-                pass
+            else:
+                cutoff = _time.time() - 86400
+                for stale in Path(_shot_dir()).glob("shot_*.png"):
+                    try:
+                        if stale.stat().st_mtime < cutoff:
+                            stale.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
 
 
 # ========== Ticket 04：触发新端点模块的 @router.post 注册 ==========

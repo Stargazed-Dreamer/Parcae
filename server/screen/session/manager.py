@@ -70,6 +70,7 @@ class SessionManager:
         source: str = "agent",
         max_duration_hours: int | None = None,
         shutdown_permitted: bool = False,
+        owner: str = "anonymous",
     ) -> dict:
         """授权进入指定模式。
 
@@ -79,6 +80,8 @@ class SessionManager:
             source: 授权来源（默认 "agent"）
             max_duration_hours: watchdog 时长（小时），仅 watchdog 模式有效
             shutdown_permitted: 是否允许关机，仅 watchdog 模式有效
+            owner: 持有者 caller id（2026-10-02 归属记录，仅追溯用；
+                覆盖裁决仍由决策 17 的用户弹窗把关）
 
         Returns:
             status() 快照
@@ -117,6 +120,7 @@ class SessionManager:
                 idle_grace_seconds=self._policy.idle_grace_seconds,
                 max_duration_seconds=max_duration_seconds,
                 shutdown_permitted=shutdown,
+                owner=(owner or "anonymous").strip() or "anonymous",
             )
             self._last_revoked_reason = ""
             self._last_revoked_at = 0.0
@@ -249,6 +253,33 @@ class SessionManager:
         with self._lock:
             return self._state is not None
 
+    def needs_new_approval(self, requested_mode: str, needs_shutdown: bool = False) -> bool:
+        """一次 `/control/request` 是否需要重新征求用户批准（= 权限升级）。
+
+        授权状态只能被"用户的新批准"改变（ADR-0037），所以"要不要弹窗"这条判据必须有
+        唯一真源：渲染层（`OverlayClient.ensure_takeover_approved` 的 skipped 短路）与
+        测试替身（根 `conftest.py` 的 `MockGUIClient`）都消费本函数，不再各抄一遍条件——
+        同一条规则写两处且其中一处漂移，正是 2026-09-30 那次"脚本自己的 request 擦掉
+        用户勾选的关机权限"能藏五周的原因（测试替身里没有 skipped 路径）。
+
+        升级的三种情形：
+        1. 当前无授权（任何请求都要问用户）；
+        2. 请求 watchdog，而当前不是 watchdog（normal/no_permission → watchdog）；
+        3. 请求 watchdog 且 `needs_shutdown=True`，而当前 watchdog 缺关机位。
+
+        关机位只存在于 watchdog（`grant()` 对 normal 恒置 `shutdown_permitted=False`），
+        所以 `requested_mode != "watchdog"` 时不看 `needs_shutdown`：否则会弹一个
+        "根本没有关机复选框可勾"的窗，用户点了也拿不到权限。
+        """
+        status = self.status()  # status() 内含过期检查
+        if not status.get("active"):
+            return True
+        if requested_mode != Mode.WATCHDOG.value:
+            return False
+        if status.get("mode") != Mode.WATCHDOG.value:
+            return True
+        return bool(needs_shutdown and not status.get("shutdown_permitted", False))
+
     # ========== 过期检查（两阶段降级） ==========
 
     def _check_expiry(self) -> bool:
@@ -334,6 +365,7 @@ class SessionManager:
                 "mode": Mode.NO_PERMISSION.value,
                 "task_description": "",
                 "source": "",
+                "owner": "",
                 "granted_at": 0.0,
                 "last_activity_at": 0.0,
                 # 旧字段兼容
@@ -378,6 +410,7 @@ class SessionManager:
             "mode": state.mode.value,
             "task_description": state.task_description,
             "source": state.source,
+            "owner": state.owner,
             "granted_at": state.granted_at,
             "last_activity_at": state.last_activity_at,
             # 旧字段兼容

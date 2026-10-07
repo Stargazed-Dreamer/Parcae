@@ -98,7 +98,7 @@ def _make_plan(
         scan_digest="d" * 64,
         gates_required=("policy-schema", "tracked-file-inventory",
                         "sensitive-content-scan", "manifest-audit",
-                        "no-key-startup", "archive-verification"),
+                        "compile-check", "archive-verification"),
         gates_results=(
             GateResult(name="policy-schema", passed=True, details="ok"),
             GateResult(name="tracked-file-inventory", passed=True, details="ok"),
@@ -133,7 +133,7 @@ def _setup_build_mocks(
         tmp_path: temp directory for staging + dist
         plan: PreparedRelease to build
         staging_files: {rel_path: content} to write into staging (default: from plan.file_entries)
-        heavy_gate_results: {gate_name: GateResult} for no-key-startup / activity-task-safe-stop / focused-tests
+        heavy_gate_results: {gate_name: GateResult} for compile-check / activity-task-safe-stop / focused-tests
                            (default: all pass)
 
     Returns:
@@ -170,8 +170,8 @@ def _setup_build_mocks(
     if heavy_gate_results is None:
         heavy_gate_results = {}
     monkeypatch.setattr(
-        build_module, "_gate_no_key_startup",
-        lambda sd: heavy_gate_results.get("no-key-startup", default_pass),
+        build_module, "_gate_compile_check",
+        lambda sd: heavy_gate_results.get("compile-check", default_pass),
     )
     monkeypatch.setattr(
         build_module, "_gate_activity_task_safe_stop",
@@ -390,7 +390,7 @@ def test_gates_run_before_sealing(
 ) -> None:
     """P0-4: failing build-time gates must prevent ZIP from reaching dist/.
 
-    When a build-time gate (e.g., no-key-startup) fails, build_release must
+    When a build-time gate (e.g., compile-check) fails, build_release must
     raise ValueError and NOT move any ZIP to dist/. The staging directory
     may contain a .failed.zip (if ZIP was generated before the gate check),
     but dist/ must be empty.
@@ -404,13 +404,13 @@ def test_gates_run_before_sealing(
 
     # Mock a failing heavy gate
     failing_gate = GateResult(
-        name="no-key-startup",
+        name="compile-check",
         passed=False,
         details="mocked gate failure for P0-4 test",
     )
     _setup_build_mocks(
         monkeypatch, tmp_path, plan,
-        heavy_gate_results={"no-key-startup": failing_gate},
+        heavy_gate_results={"compile-check": failing_gate},
     )
 
     # build_release must raise due to gate failure

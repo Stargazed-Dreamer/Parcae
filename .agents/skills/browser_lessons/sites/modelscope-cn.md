@@ -14,7 +14,7 @@ aliases: [魔搭, 魔搭社区, ModelScope]
 | **登录态要求** | 匿名可浏览模型列表/详情页；调 API 需 ModelScope token（写到 keys.json） |
 | **抓取频次** | 周期（按需，新模型发布时） |
 | **文件创建日期** | 2026-07-24 |
-| **最后更新** | 2026-09-19 |
+| **最后更新** | 2026-09-21 |
 
 ## 网站概况
 
@@ -141,6 +141,10 @@ const hasModelscope = text.includes('魔搭社区');
 | **想用 `:<Provider>` 后缀救回下架模型** | 给下架模型拼 `:DashScope` 重试 | 后缀只对"有外部提供方绑定"的模型有效。错误码可区分：`Invalid provider: X` = 提供方名非法；仍报 `has no provider supported` = 模型本身无绑定，后缀无效（实测 Qwen3-VL 8B/235B 两种后缀都失败） | 2026-09-19 |
 | **已上架模型可能转付费** | 404 当成下线反复调试 | 404 "This model is unavailable for free. The paid version is available now" = 模型转付费（Tencent-Hunyuan/Hy3），免费 token 无法调用 | 2026-09-13 |
 | **inclusionAI Ring 系 401 ling_auth_not_exist** | 以为是 token 失效去换 token | Ring 系走 inclusionAI ling 独立授权层，通用 ModelScope token 不通（同 token 调 Ling-3.0-flash 正常） | 2026-09-13 |
+| **`?search=` 参数被静默忽略** | 用 `https://modelscope.cn/models?search=piano` 构造搜索 URL，期望得到过滤结果 | 实测三个不同关键词（piano / transcription / 钢琴）返回**完全相同的 30 个默认模型 ID**（Qwen/MiniMax 等）——参数被吞，拿到的是默认列表。要搜必须用页面搜索框交互，或先抓 XHR 找真参数名，**不要拿参数名硬试**（会可见地反复刷新用户屏幕上的页面） | 2026-09-21 |
+| **想拿 token 做程序化全局搜索** | 用 `keys.json` 里的 ModelScope token 打 `POST /api/v1/models` 当关键词搜索端点 | 该端点是**按 owner 列模型**，不传 `Path` 时报 `400 Code=10010202003`。`Authorization: Bearer <token>` 鉴权可过（对比未鉴权的 `401 user not logged in`），`Cookie: m_session=<token>` 仍 401。**没有匿名的全局关键词搜索 API** | 2026-09-21 |
+| **`/search?search=` 页是 SPA 壳** | 对该 URL 做 HTTP GET 后解析 HTML 找模型 ID | 只返回 4311 字节空壳、0 个 ID。要走 `/models` 列表页（SSR 出卡片）+ `a[href*="/models/"]` DOM 提取 | 2026-09-21 |
+| **判"魔搭可不可达"只看 DNS** | `gethostbyname` 解出 IP 就认为能下模型权重 | 数据面真路径 `https://www.modelscope.cn/models/<ns>/<name>/resolve/master/<file>` 实测 200 / 10036 B 可达。**这条比 hf-mirror 可靠**：hf-mirror 元数据面（`HfApi.list_repo_files`）通，但 `/resolve/main/` 数据面 ConnectTimeout | 2026-09-21 |
 
 ## 遗留问题
 
@@ -155,3 +159,4 @@ const hasModelscope = text.includes('魔搭社区');
 | 2026-07-24 | 初始创建，汇总自 `temp/modelscope_explore/` 探索结果和 `modelscope_model_update` skill 首次扫描 |
 | 2026-09-13 | 二次扫描（LLM+VL）新增 3 坑：面板魔搭标签漏判须 API 实测兜底、模型转付费 404 特征、Ring 系 ling 独立授权 401 |
 | 2026-09-19 | 排查 VL 连续 400 新增 3 坑：面板 OpenAI/Anthropic 是协议 tab 不是提供方、`has no provider supported` = 模型下架（非机制变更）、`:Provider` 后缀救不回下架模型；同步核查官方文档（端点/鉴权未变，新增 Responses API 与 Anthropic 兼容） |
+| 2026-09-21 | 查钢琴转录权重时新增 4 坑：`?search=` 被静默忽略、`POST /api/v1/models` 是按 owner 列而非全局搜索（Bearer 可鉴权但需 `Path`）、`/search` 页是 SPA 壳、判可达性要看数据面 `/resolve/master/`（实测通，优于 hf-mirror 数据面超时）。⚠️ 本次 `browser_write_lesson` 写不进来：该端点 section 白名单只收 `已知坑`，而本文件实际标题是 `已知坑（与正常行为区分）`，两条报错互相打转，故改为手工编辑 |

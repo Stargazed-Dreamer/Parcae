@@ -5,7 +5,8 @@
 # 自 v9 起，VL provider 配置（base_url/api_key/model/max_concurrency/timeout/rate_limit_cooldown）
 # 统一迁移到 data/llm/keys.json 的 key.vision 段（按 base_url 自动匹配）。
 # config.toml [vision] 段只保留全局参数（开关/编码/重试），不再含 provider 配置。
-# 迁移工具：tools/migrate_keys_v8_to_v9.py（v8→v9 一次性迁移，幂等可重复运行）
+# 旧格式 keys.json 由 server/llm_pool/key_store.py 的 _maybe_migrate() 在加载时逐级自动迁移
+# （一次性脚本 tools/migrate_keys_v8_to_v9.py 已删除；当前目标版本看该文件的迁移链顶部）
 #
 # ===== v8: model tier 系统说明 =====
 # 自 v8 起，[llm.models.*] 段已移除。model 的 tier (1-5) 由 keys.json 中每个 model 的
@@ -60,9 +61,9 @@ allow_privacy_warning_for_sensitive = false
 # ===== 非 LLM 密钥配置（data/secret/secrets.toml）=====
 # 自 lib/secret 改造起，所有非 LLM 密钥（tushare_token / github_token / example_token 等）
 # 统一存到 data/secret/secrets.toml 的 [tokens] 段，由 lib/secret 统一读取。
-# config.toml 不再存放任何密钥（已删除 tushare_token / github_token 字段）。
+# config.toml 不再存放任何密钥。
 #
-# secrets.toml 模板（手动创建或用 tools/migrate_secrets.py 从旧 config.toml 迁移）：
+# secrets.toml 模板（手动创建；曾备份过的机器可用 tools/restore_secrets.py 从备份恢复）：
 #   [tokens]
 #   tushare_token = "你的-tushare-pro-token"
 #   github_token = "你的-github-fine-grained-pat"
@@ -180,8 +181,9 @@ feedback_vl_enabled = true
 # 服务端维持长连接 Playwright Page 句柄，避免每次 DOM 操作重新 connect_over_cdp +
 # 启动子进程导致的 0.5–1.4 秒固定开销。新接口 /browser/snapshot /action /wait_for
 # /evaluate /console_logs /navigate /screenshot 都支持 session_id 复用热态。
-session_idle_timeout_secs = 900           # 持久 session idle 超时（秒，默认 900=15min），超时自动清理并关闭 tab
-session_max_count = 20                    # 持久 session 数量上限（防内存泄漏，按 LRU 淘汰）
+session_idle_timeout_secs = 900           # 有主 session idle 租约（秒，默认 900=15min），owner 每次操作即续租
+session_anon_idle_timeout_secs = 300      # 无主（anonymous：内部调用/老脚本）session 租约，没人续租故更快回收
+session_max_count = 32                    # 全局 session 上限（LRU 只淘汰 anonymous；单个 caller 另有持有上限）
 # P2-1: browser_session_create(url=...) 时自动按域名匹配 .agents/skills/browser_lessons/sites/*.md
 # 结果存到 TabSession.site_lessons，snapshot/action 响应附带 site_lessons_hint。
 # P2-3: browser_action 每次调用记录到 stats_db_path 指向的 SQLite 库，供 /browser/selector_stats 查询成功率
@@ -196,6 +198,11 @@ port = 8766                               # 监听端口
 # exec_inspect(tid, timeout=N) 查状态。
 # 0=禁用，回退 v15 立即返回行为。默认 10s 覆盖 ~80% 短任务（读文件/查信息/简单计算）。
 # 长任务（>10s）仍返回 running，行为与 v15 一致。
+# Host 白名单（DNS rebinding 防护）：非白名单 Host 一律 421。
+# 恒放行 127.0.0.1 / localhost / ::1 与上面的 host 值；只有在 host 写成 0.0.0.0
+# 有意暴露局域网时，才需要把允许访问的主机名/IP 列在这里。
+# 改动需重启后端生效。
+# host_whitelist = ["192.168.4.105", "mybox.local"]
 exec_python_inline_wait_secs = 10
 
 [runner]
@@ -221,6 +228,13 @@ typewriter_normal_interval_ms = 16
 #   真死流由 stream_idle_timeout_secs 兜底
 stream_idle_timeout_secs = 90
 stall_detection_window_secs = 0
+
+# 2026-10-07 ask_user 卡片：agent 提问后等多久没人回答（秒）
+#   0 = 永不超时（默认）：卡片一直挂着直到你点「提交回答」或「跳过，你自己定」
+#   >0 = 到时把提问判为"没人应答"（**不是**拒绝），卡片自动失效
+# 只有这里能决定时长：ask_user 工具入参里没有 timeout 格——agent 若能传超时，
+# 就能传 1 秒把"问你"变相成"替你拍板"。中断/切会话随时能唤醒等待，不受此值限制。
+ask_user_timeout_secs = 0
 
 [runner.doom_loop]
 # v6-lite-streaming-gui T04: DoomLoop 检测 thinking_delta 尾重复（spec D10/D11）
@@ -270,9 +284,10 @@ paddle_device = "cpu"
 # （可用内存最低 0.46GB 时降级必然 swap/OOM，故阈值必须真正生效）。
 # 恢复带迟滞：降级后至少保持 gpu_fallback_hold_sec 秒且 GPU 水位回落到
 # low_watermark 以下，下次加载才回 GPU（避免水位临界反复切换）。
-# gpu_fallback_min_avail_gb = 2.0   # 降级所需最小可用内存（GB）
-# gpu_fallback_max_cpu_pct = 70.0   # 降级允许的最大 CPU 占用（%）
-# gpu_fallback_hold_sec = 300.0     # 降级后最短保持秒数（迟滞防抖）
+# 值是游戏满载实测标定的，改之前先看 docs/environment-constraints.md 的降级章节。
+gpu_fallback_min_avail_gb = 2.0   # 降级所需最小可用内存（GB）
+gpu_fallback_max_cpu_pct = 70.0   # 降级允许的最大 CPU 占用（%）
+gpu_fallback_hold_sec = 300.0     # 降级后最短保持秒数（迟滞防抖）
 
 [logging]
 # 日志配置（崩溃可追溯）
@@ -358,12 +373,14 @@ coordinate_uia_fusion = true
 # 请求：GUI"请求任务授权" / screen_request_control
 # 收回：GUI"收回授权" / screen_release_control / task_closure
 takeover_persistent_enabled = true
-# 最后一次成功投递控制操作后的空闲撤销秒数；只读、dry-run、失败操作不续期
+# ⚠️ 遗留键：不再决定撤销时机，只作为 /health 的 configured_idle_timeout_seconds 展示值。
+# 真正的 normal 空闲策略是下方 SessionManager 两阶段（idle_warning_seconds + idle_grace_seconds）。
 takeover_idle_timeout_seconds = 300
 # 旧配置 takeover_idle_warning_seconds 仍可读取，但新配置请只使用上面的 canonical 名称
 
-# 看门狗模式（mode="watchdog"）硬上限秒数，到期自动撤销授权。默认 10h=36000s。
-# watchdog 模式不因空闲撤销，仅由硬上限/紧急停止/用户主动撤销。
+# ⚠️ 遗留键：仅进 /health 的 configured_watchdog_max_duration_seconds 展示。
+# watchdog 硬上限实际由下方 watchdog_default_hours（小时，弹窗/agent 可覆盖）决定，
+# 到期是**降级到 NORMAL**（关机位同时归零），不是直接释放。
 # 适用场景：用户离开前调 screen_request_control(mode="watchdog") 让 agent 持续监控。
 takeover_watchdog_max_duration_seconds = 36000
 
@@ -404,7 +421,7 @@ preload_on_startup = false
 # - 热路径模型（两个 embedding）默认钉住（evictable=False，仅手动卸载可达）
 # - enabled=false 时纯透传（不做自动监控，admit() 全放行）
 enabled = true
-poll_interval_sec = 5.0         # 监控采样周期（秒）
+poll_interval_sec = 5.0         # 状态机推进周期（秒）；实际采样节奏见 [resource_probe]
 reload_fail_cooldown_sec = 30    # per-model 加载失败冷却默认值（秒）
 
 [model_manager.gpu]
@@ -435,6 +452,36 @@ enabled = false
 #
 #   [model_manager.models.memory_embedding]
 #   evictable = false   # 默认钉住（热路径，每个 MCP 请求都会用）
+
+[resource_probe]
+# 常驻资源采样中枢（server/resource_probe/）——进程内唯一采样 owner。
+# 取代旧的"每 5 秒 fork 一个 nvidia-smi"：实测 nvidia-smi 单次 ~45ms + 一次进程创建
+# （≈1.7 万次/天），NVML 常驻会话是 init 17ms 一次性 + 单次查询 0.03ms。
+# 消费方（模型压力监控、活动采集的高负载门）只读中枢缓存，自己不再起进程。
+#
+# ⚠ 适配性：GPU 侧只支持 NVIDIA。nvml.dll / libnvidia-ml.so.1 由 NVIDIA 驱动提供，
+#   AMD / Intel 集显 / Apple 上 gpu_mem、gpu_util 两个探针必然判为 absent，
+#   含义是"本机没有可采的 NVIDIA 卡"→ GPU 压力监控自动失效并放行准入（不是故障）。
+#   要支持别的 GPU：在 server/resource_probe/__init__.py 的 PROBE_REGISTRY 注册一个新的
+#   Probe 实现（+ 可选在这里加一段开关），不要改 nvml.py，也不要退回子进程。
+#   详见 docs/environment-constraints.md「资源采样中枢」。
+enabled = true
+poll_interval_sec = 5.0          # 默认采样周期（秒），可被各探针 interval_sec 覆盖
+stale_multiplier = 3.0           # 缓存样本超过 N×interval 视为过期（消费方拿到 None）
+absent_retry_sec = 300.0         # 探针判 absent 后的慢速重探间隔，避免每周期空转
+
+# 每个探针可单独开关与调周期；未声明的按默认（四个内置探针全开）
+[resource_probe.probes.gpu_mem]
+enabled = true                   # 整卡显存 used/total（NVML）→ 驱动 GPU 压力状态机
+
+[resource_probe.probes.gpu_util]
+enabled = true                   # 整卡 GPU 利用率（NVML）→ 活动采集的 OCR 兜底高负载门
+
+[resource_probe.probes.mem_ram]
+enabled = true                   # 物理内存 used/total（psutil）→ 驱动 CPU 资源状态机
+
+[resource_probe.probes.cpu_percent]
+enabled = true                   # CPU 占用 %（psutil 差分量，不再阻塞 0.1s）
 
 [vision]
 # 远程 VL（v9 起：provider 配置在 keys.json 的 key.vision 段，config.toml 仅保留全局开关）
@@ -484,6 +531,10 @@ path = ""  # MindForge 项目根目录的绝对路径（必填，启用时需用
 hf_mirror = "https://hf-mirror.com"        # HuggingFace 镜像源（中国用户默认推荐；海外用户可改回 https://huggingface.co 或留空）
 # enable_semantic = true                      # 是否启用语义检索（设为 false 可跳过嵌入模型下载，仅用BM25；详见 docs/memory-system.md）
 # hybrid_alpha = 0.5                          # 向量检索权重（0=纯BM25, 1=纯向量）
+# hybrid_min_vector_similarity = 0.3          # HONEST_EMPTY：纯向量命中的最低原始余弦相似度。
+#                                             #   低于它且 BM25 未命中的候选直接不返回（宁空勿凑），
+#                                             #   设 0 关闭这道门槛（详见 docs/memory-system.md）
+# projection_retention_days = 30              # 上下文投影留痕（context_projections 表）保留天数
 # auto_record = true                          # 是否自动记录 agent 交互
 # record_sources = ["tool", "agent", "user"]  # 自动记录的来源类型；默认含 "tool" 但 97%+ 为低价值工具调用噪声，可在 config.toml 改为 ["agent", "user"] 禁用
 # maintenance_interval = 10                   # 每 N 次 agent 交互触发记忆维护
@@ -492,11 +543,18 @@ hf_mirror = "https://hf-mirror.com"        # HuggingFace 镜像源（中国用�
 
 # [memory.maintain]
 # 记忆维护器配置（自动老化 + LLM 验证）
-# v8: model_tier 字段已移除。维护器通过 resolve_key("memory_maintainer") 从 keys.json 获取 key，
-# tier 由 USE_CASE_REGISTRY.memory_maintainer.default_tier (=2) 决定。
+# v8: model_tier 字段已移除，验证用的 key 由 use_case 解析。
+# 真源是 USE_CASE_REGISTRY.memory_validate（tier (2,4)，见 server/llm_pool/types.py）；
+# memory_maintainer 这个 use_case 早在 v15 就废弃了，别再照旧注释去找它。
 # interval_hours = 6                          # 维护器运行间隔（小时）
 # stale_days = 7                              # 记忆过期阈值（天），超过标记为 stale
 # enable_validate = true                      # 是否启用 LLM 验证（false 则只做老化标记）
+# preview_chars = 2400                        # 单条记忆喂给验证器的正文字数上限。
+#                                             #   旧值 800 是 72% 假归档的主因：超窗记忆只被看到
+#                                             #   前半段（常常是 JSON 元数据信封），模型据此判 archive。
+#                                             #   正文仍超窗时 archive 建议不采纳，改为延判（见 docs/memory-system.md）
+# batch_limit = 25                            # 单轮最多验证多少条（按 stale_score 从旧到新取），防止积压一次打空 cheap 池
+# revalidate_days = 30                        # 同一条记忆两次验证的最小间隔（天）。此前 keep/update 每轮被重置回 pending，等于无限重验
 
 # Evidence Ledger（A）— 证据组织层
 # 在 memory_search 与 agent 之间插入证据组织层，把多源召回（messages + facts + summaries）
@@ -563,7 +621,7 @@ vl_persist_batch_threshold = 20            # 配额文件批量写盘阈值（�
 [loops.download_watcher]
 enabled = false                             # 默认关闭；启用前确认 watch_dir 目录存在，否则后端会自动跳过该 loop（不崩溃）
 scan_interval = 300                         # 秒，每5分钟扫描
-watch_dir = "<data_drive>:\<system_data_root>/<data_drive>:/Downloads"  # 监控目录（你的实际下载路径，可在 shell:<data_drive>:/Downloads 查看；导出时自动替换为占位符）
+watch_dir = "<data_drive>:/<system_data_root>/Downloads"  # 监控目录（你的实际下载路径，可在 shell:Downloads 查看；导出时自动替换为占位符）
 file_count_threshold = 15                   # 超过15个文件触发分类
 classify_batch_size = 50                    # 单次分类文件数上限
 folder_batch_size = 10                      # 单次文件夹分类数上限（文件夹分类成本高，默认 10）

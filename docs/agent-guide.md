@@ -14,12 +14,12 @@
 
 ## 2. GUIDE_REGISTRY 结构
 
-**定义位置**：[agent_guide.py L196](file:///<project_root>/server/agent_guide.py)（浅拷贝静态版本 + 运行时 update 动态条目）
+**定义位置**：[agent_guide.py](file:///<project_root>/server/agent_guide.py) 的 `GUIDE_REGISTRY`（浅拷贝静态版本 + 运行时 update 动态条目）
 
 ```python
-GUIDE_REGISTRY: dict[str, dict] = dict(_STATIC_GUIDE_REGISTRY)  # L196
+GUIDE_REGISTRY: dict[str, dict] = dict(_STATIC_GUIDE_REGISTRY)
 # ...
-GUIDE_REGISTRY.update(_load_optional_guide_entries())  # L262
+GUIDE_REGISTRY.update(_load_optional_guide_entries())
 ```
 
 - 静态导入：从 [agent_guide_data.py](file:///<project_root>/server/agent_guide_data.py) 导入 `_STATIC_GUIDE_REGISTRY`
@@ -54,7 +54,7 @@ GUIDE_REGISTRY.update(_load_optional_guide_entries())  # L262
 
 ## 3. Scope 分类
 
-代码中实际存在 6 个 scope：5 个静态 scope 定义在 [agent_guide_data.py](file:///<project_root>/server/agent_guide_data.py)，第 6 个 `recording` 通过 workspace 动态加载。
+scope 分静态与动态两类：静态 scope 定义在 [agent_guide_data.py](file:///<project_root>/server/agent_guide_data.py)，workspace 组件可动态加载额外 scope（如 `recording`）。
 
 | scope | 描述 | 代表性 task_type | 来源 |
 |-------|------|------------------|------|
@@ -69,7 +69,7 @@ GUIDE_REGISTRY.update(_load_optional_guide_entries())  # L262
 
 ## 4. 三种调用模式
 
-**统一端点**：`GET /guide`（[agent_guide.py L810-966](file:///<project_root>/server/agent_guide.py)，`operation_id="agent_guide"`）
+**统一端点**：`GET /guide`（[agent_guide.py](file:///<project_root>/server/agent_guide.py) 的 `get_agent_guide` 处理函数，`operation_id="agent_guide"`）
 
 **函数签名**：
 
@@ -86,11 +86,11 @@ def get_agent_guide(
 
 ### 调用模式分支
 
-| 模式 | 触发条件 | 代码位置 | 行为 |
-|------|----------|----------|------|
-| **task_type 精确命中** | 传 `task_type` 参数且在 GUIDE_REGISTRY 中 | L840-849 | 返回 TaskGuide（含 first_action + candidates=[]）；`task_type='system.task_closure'` 时自动注入 `structure_diff` |
-| **task 关键词匹配** | 传 `task` 参数（无 task_type） | L871-928 | 调 `match_task_candidates` → 弱匹配走 `mode=low_confidence`（L882-915）→ 强匹配走 TaskGuide（L916-928） |
-| **无参 GeneralGuide** | 不传 task 也不传 task_type | L949-966 | 返回全量分类清单 + 通用陷阱 + 文件位置 |
+| 模式 | 触发条件 | 行为 |
+|------|----------|------|
+| **task_type 精确命中** | 传 `task_type` 参数且在 GUIDE_REGISTRY 中 | 返回 TaskGuide（含 first_action + candidates=[]）；`task_type='system.task_closure'` 时自动注入 `structure_diff` |
+| **task 关键词匹配** | 传 `task` 参数（无 task_type） | 调 `match_task_candidates` → 弱匹配走 `mode=low_confidence` → 强匹配走 TaskGuide |
+| **无参 GeneralGuide** | 不传 task 也不传 task_type | 返回全量分类清单 + 通用陷阱 + 文件位置 |
 
 ## 5. consumption_contexts 消费闭环
 
@@ -98,20 +98,20 @@ def get_agent_guide(
 
 ### 5.1 数据库列定义
 
-文件：[memory/schema.py L63-64](file:///<project_root>/server/memory/schema.py)
+文件：[memory/schema.py](file:///<project_root>/server/memory/schema.py)（`consumption_contexts` / `trigger_keywords` 列定义）
 
 ```sql
 consumption_contexts TEXT,  -- JSON 数组字符串，如 ["recurring.accounting", "adhoc.web_archive"]
 trigger_keywords TEXT       -- JSON 数组字符串，如 ["退款", "curl"]
 ```
 
-迁移逻辑：L233-289（`migrate_db` v3 添加 `consumption_contexts` 列）。
+迁移逻辑：`migrate_db` v3 添加 `consumption_contexts` 列。
 
 ### 5.2 写入端（记忆写入时填字段）
 
 文件：[memory/manager.py](file:///<project_root>/server/memory/manager.py)
 
-`set` 方法 L189+，关键字段处理在 L218-230：
+`set` 方法的关键字段处理：
 
 ```python
 if structured:
@@ -131,15 +131,15 @@ if structured:
 
 文件：[memory/manager.py](file:///<project_root>/server/memory/manager.py)
 
-`find_consumable_memories` 方法 L364-（完整实现延续到约 L545）：
+`find_consumable_memories` 方法（完整实现较长）：
 
 **算法**：
-1. **SQL 索引优先**（L392-407）：用 `LIKE` 模式匹配三种 pattern：
+1. **SQL 索引优先**：用 `LIKE` 模式匹配三种 pattern：
    - `'%"*"%'` — 全场景通配
    - `f'%"{task_type}"%'` — 精确匹配
    - `f'%"{task_scope}.*"%'` — scope 通配（如 `recurring.*`）
-2. **回退全表扫描**（L413-431）：旧数据 `consumption_contexts` 列为 NULL 时
-3. **逐条匹配判定**（L499-523）：
+2. **回退全表扫描**：旧数据 `consumption_contexts` 列为 NULL 时
+3. **逐条匹配判定**：
    - `matched_context`：`"*"` / 精确 task_type / `scope.*` 通配
    - `matched_keyword`：`trigger_keywords` 中任一词出现在 `task_query` 中
 4. **返回字段**：`{key, summary, updated_at, stale, days_since_update, matched_by}`，`matched_by` 取值 `"context"` / `"keyword"` / `"context+keyword"`
@@ -147,7 +147,7 @@ if structured:
 
 ### 5.4 调用点（_build_task_guide 中）
 
-文件：[agent_guide.py L700-716](file:///<project_root>/server/agent_guide.py)
+文件：[agent_guide.py](file:///<project_root>/server/agent_guide.py) 的 `_build_task_guide`
 
 ```python
 # 动态关联：按 consumption_contexts / trigger_keywords 反向查询
@@ -157,30 +157,38 @@ if mgr:
     dynamic_memories = mgr.find_consumable_memories(task_type, task_query=task_query)
 ```
 
-静态 `memory_key` + `related_memory_keys` 通过 `mgr.get_memory_index(static_keys)` 查询（L693-698），动态结果合并去重后追加 `matched_by` 字段（L710-716）。
+静态 `memory_key` + `related_memory_keys` 通过 `mgr.get_memory_index(static_keys)` 查询，动态结果合并去重后追加 `matched_by` 字段。
+
+⚠️ **两条路的 `summary` 必须同源**：静态路由 `MemoryManager.get_memory_index`、动态路由
+`find_consumable_memories`，两者的标题摘要都只准调
+[`index_summary_from_value()`](file:///<project_root>/server/memory/manager.py)。
+这条约束曾经只落在静态路上，动态路留着一份 `value.get("name") or ... or value_str[:80]`
+的内联实现（注释还写着"复用 get_memory_index 的摘要逻辑"），结果【必读记忆】照样整坨回显
+元数据 JSON。防复发由 `tests/memory/test_find_consumable_memories.py::TestSummarySharesIndexHelper`
+逐形态断言"动态摘要 == 静态 helper 输出"，改摘要规则只需改 helper 一处。
 
 ### 5.5 staleness 字段注入
 
-文件：[memory/router.py L535](file:///<project_root>/server/memory/router.py)
+文件：[memory/router.py](file:///<project_root>/server/memory/router.py) 的 `_enrich_with_staleness`
 
-`_enrich_with_staleness(data)` 在 `_build_task_guide` 中调用（L720-724），让首轮就能看到过时记忆警告。
+`_enrich_with_staleness(data)` 在 `_build_task_guide` 中调用，让首轮就能看到过时记忆警告。
 
 ### 5.6 写入约束（task_closure 中强调）
 
 文件：[agent_guide_data.py](file:///<project_root>/server/agent_guide_data.py)
 
-`system.task_closure` 的 `step_3_extract.instruction` L446-453：
+`system.task_closure` 的 `step_3_extract.instruction`：
 
 > 可消费性自检（核心约束）：每条候选必须填：
 > - `consumption_contexts`: 哪些 task_type 应读取此记忆（通用用 `['*']`，具体用 `['recurring.accounting']`）
 > - `trigger_keywords`: 任务描述出现这些词时应读取（如 `['退款','curl']`）
 > 无法明确消费场景的候选 → 跳过不写入（存了没人用=垃圾）
 
-同样约束出现在 `system.wip_archive` 的 `step_2_extract.instruction` L1446-1449。
+同样约束出现在 `system.wip_archive` 的 `step_2_extract.instruction`。
 
 ## 6. first_action 注入"【必读记忆】"机制
 
-文件：[agent_guide.py L726-736](file:///<project_root>/server/agent_guide.py)
+文件：[agent_guide.py](file:///<project_root>/server/agent_guide.py) 的 `_build_task_guide`（first_action 后处理注入）
 
 ```python
 # first_action 后处理注入"【必读记忆】"（零侵入路由层增强）
@@ -200,36 +208,36 @@ if existing_memories:
 - 只对 `updated_at` 非 None 的记忆注入（跳过空 key 占位条目）
 - 最多取前 5 条记忆
 - 格式：`【必读记忆】` 标题 + `- {key}: {summary}` 列表 + 空行 + 原 first_action
-- 注入后的 `first_action` 写入响应 result（L747）
+- 注入后的 `first_action` 写入响应 result
 
 ## 7. match_task_candidates 五路加权
 
-文件：[agent_guide.py L504-638](file:///<project_root>/server/agent_guide.py)
+文件：[agent_guide.py](file:///<project_root>/server/agent_guide.py) 的 `match_task_candidates`
 
 ### 五路加权（摘要级）
 
-| 路 | 信号 | 分数 | 代码位置 |
-|----|------|------|----------|
-| 1 | **kw_exact** — entry keyword 完整子串出现在 task 中 | +10/词 | L556-559 |
-| 2 | **bigram_overlap** — 中文 2-gram 集合交集 | +2/重叠 bigram，上限 16 | L562-566 |
-| 3 | **synonym** — 同义词组命中 | +3/组基础 +2/组不同词 | L569-572（`_synonym_hits` L386-403） |
-| 4 | **kw_fuzzy** — keyword 的 2-gram ≥50% 在 task 中 | +3/词 | L575-584 |
-| 5 | **domain_hints** — context 含特定 domain 时加分 | +bonus（由 entry 声明） | L588-599 |
+| 路 | 信号 | 分数 |
+|----|------|------|
+| 1 | **kw_exact** — entry keyword 完整子串出现在 task 中 | +10/词 |
+| 2 | **bigram_overlap** — 中文 2-gram 集合交集 | +2/重叠 bigram，上限 16 |
+| 3 | **synonym** — 同义词组命中（`_synonym_hits`） | +3/组基础 +2/组不同词 |
+| 4 | **kw_fuzzy** — keyword 的 2-gram ≥50% 在 task 中 | +3/词 |
+| 5 | **domain_hints** — context 含特定 domain 时加分 | +bonus（由 entry 声明） |
 
 ### 关键辅助函数
 
-- `_char_bigrams` L336-345 — 中文 2-gram 分词
-- `_strip_aux` L359-364 — 剥离语气助词（"一下/看看/试试"等，`_AUX_PARTICLES` L353-356）
-- `_SYNONYM_GROUPS` L369-383 — 8 个同义词组（屏幕/识别/点击/输入/窗口/操作/文字/爬取-保存）
-- `_extract_context_signals` L455-501 — 从 context 提取 URL domains + 中文 bigrams
+- `_char_bigrams` — 中文 2-gram 分词
+- `_strip_aux` — 剥离语气助词（"一下/看看/试试"等，见 `_AUX_PARTICLES`）
+- `_SYNONYM_GROUPS` — 同义词组（屏幕/识别/点击/输入/窗口/操作/文字/爬取-保存）
+- `_extract_context_signals` — 从 context 提取 URL domains + 中文 bigrams
 
 ### strong_match 判定（保守）
 
-L614-629：只有 `kw_exact` 命中 OR `kw_fuzzy ratio ≥ 80%` 才算强匹配。纯 bigram 重叠的弱匹配走 `mode=low_confidence` 路径。
+只有 `kw_exact` 命中 OR `kw_fuzzy ratio ≥ 80%` 才算强匹配。纯 bigram 重叠的弱匹配走 `mode=low_confidence` 路径。
 
 ### 弱匹配阈值
 
-`WEAK_MATCH_THRESHOLD = 15`（L411）— top-1 score 低于此值走精简响应。
+`WEAK_MATCH_THRESHOLD = 15` — top-1 score 低于此值走精简响应。
 
 > 关键词编写规范（5 大原则 + 标准流程 + 维护清单）详见 [agent-guide-keywords.md](file:///<project_root>/docs/agent-guide-keywords.md)。
 
@@ -260,7 +268,7 @@ index_section = "components"
 
 ### 8.2 AgentGuideEntry dataclass
 
-文件：[component_manifest.py L46-49](file:///<project_root>/server/component_manifest.py)
+文件：[component_manifest.py](file:///<project_root>/server/component_manifest.py) 的 `AgentGuideEntry` dataclass
 
 ```python
 @dataclass
@@ -272,17 +280,17 @@ class AgentGuideEntry:
 
 ### 8.3 加载流程
 
-文件：[agent_guide.py L199-258](file:///<project_root>/server/agent_guide.py) `_load_optional_guide_entries`
+文件：[agent_guide.py](file:///<project_root>/server/agent_guide.py) 的 `_load_optional_guide_entries`
 
 **双轨策略**：
-1. **优先读 manifest**（L219-237）：调 `load_manifests()` → 对每个 enabled 组件读 `[agent_guide]` 段 → `importlib.import_module(f"workspace.{name}.{m.agent_guide.file[:-3]}")` → 取 `entries_var`（通常为 `GUIDE_REGISTRY_ENTRIES`）→ `result.update(entries)`
-2. **回退旧机制**（L239-256）：扫 `workspace/*/loop_actions.py` → 跳过已通过 manifest 加载的组件 → 读 `GUIDE_REGISTRY_ENTRIES` 属性
+1. **优先读 manifest**：调 `load_manifests()` → 对每个 enabled 组件读 `[agent_guide]` 段 → `importlib.import_module(f"workspace.{name}.{m.agent_guide.file[:-3]}")` → 取 `entries_var`（通常为 `GUIDE_REGISTRY_ENTRIES`）→ `result.update(entries)`
+2. **回退旧机制**：扫 `workspace/*/loop_actions.py` → 跳过已通过 manifest 加载的组件 → 读 `GUIDE_REGISTRY_ENTRIES` 属性
 
 主代码库不直接 import 任何 workspace 组件，删除 `workspace/<component>/` 后 manifest 消失，条目自动注销。
 
 ### 8.4 测试隔离设计
 
-GUIDE_REGISTRY 用浅拷贝创建独立 dict（L196 `dict(_STATIC_GUIDE_REGISTRY)`），而非直接 import 引用。原因（L181-185 注释）：`test_component_e2e` 通过 `importlib.reload(agent_guide)` 模拟组件删除/添加，若直接 import 引用，reload 不会 reload `agent_guide_data`，导致 GUIDE_REGISTRY 保留上次的动态条目污染。浅拷贝确保 reload 时 GUIDE_REGISTRY 重置为静态版本，再由 update 合并动态条目。
+GUIDE_REGISTRY 用浅拷贝创建独立 dict（`dict(_STATIC_GUIDE_REGISTRY)`），而非直接 import 引用。原因（见源码注释）：`test_component_e2e` 通过 `importlib.reload(agent_guide)` 模拟组件删除/添加，若直接 import 引用，reload 不会 reload `agent_guide_data`，导致 GUIDE_REGISTRY 保留上次的动态条目污染。浅拷贝确保 reload 时 GUIDE_REGISTRY 重置为静态版本，再由 update 合并动态条目。
 
 ## 9. 流程图
 

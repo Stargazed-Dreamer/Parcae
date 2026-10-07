@@ -8,7 +8,7 @@ LoopManager 在 FastAPI startup 时启动 asyncio 后台协程，按 trigger 调
 
 已落地的 Action 在 loop_actions.py 中实现，通过 register_loop_actions() 注册到 LoopManager：
     CollectWindowsAction / ScreenVLDescribeAction / HourlySummarizeAction
-    <data_drive>:/DownloadscanAction / CleanupActivityAction
+    DownloadScanAction / CleanupActivityAction
 """
 
 import asyncio
@@ -16,7 +16,7 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -92,6 +92,11 @@ class CronTrigger(Trigger):
     适用于"过期应补"的任务（如 hourly_summarize）；抓屏类任务不需要补跑，保持 catchup=False。
     """
 
+    # 补跑条数上限：超过这么多错过周期就只补最近的，其余计入 dropped 通知用户
+    CATCHUP_RUN_CAP = 24
+    # 回溯扫描上限（分钟）：30 天。超出则断档按"数不清"计一次
+    _CATCHUP_SCAN_MAX_MINUTES = 24 * 60 * 30
+
     def __init__(self, expr: str, timezone_name: str = "Asia/Shanghai", catchup: bool = False):
         self.expr = expr.strip()
         parts = self.expr.split()
@@ -153,6 +158,19 @@ class CronTrigger(Trigger):
         """
         if not self.catchup:
             return []
+        missed, _dropped = self.missed_runs_detailed(last_run, now)
+        return missed
+
+    def missed_runs_detailed(self, last_run: float | None, now: float) -> tuple[list[float], int]:
+        """返回 (要补跑的触发时刻, 因补跑上限被丢弃的匹配时刻数)。
+
+        unknown-outcome-evidence T08：旧实现只返回被 24 条上限截断后的列表，
+        剩下的错过周期**静默丢弃**，再由 `last_run_at = max(...)` 把断档抹平——
+        于是"机器关了三天"和"机器关了一小时"在数据上看起来一样。
+        现在把丢弃数量如实算出来给调用方记账。
+        """
+        if not self.catchup:
+            return ([], 0)
         if last_run is None:
             # 从未运行过：从 now 当前分钟往前找最近的匹配 cron 的时刻（最多 1 个）
             # 不会和 next_run_at 的当前分钟触发重复：catchup 先跑，last_run_at 推进后，
@@ -162,27 +180,37 @@ class CronTrigger(Trigger):
             for _ in range(24 * 60):
                 if self._match_field(self.minute, cursor_dt.minute) and \
                    self._match_field(self.hour, cursor_dt.hour):
-                    return [cursor_dt.timestamp()]
+                    return ([cursor_dt.timestamp()], 0)
                 cursor_dt -= timedelta(minutes=1)
-            return []
+            return ([], 0)
         missed: list[float] = []
+        dropped = 0
         # 从 last_run 下一分钟开始搜索（不含 last_run 本身）
         cursor_dt = datetime.fromtimestamp(last_run, tz=self.tz).replace(
             second=0, microsecond=0
         ) + timedelta(minutes=1)
         end_dt = datetime.fromtimestamp(now, tz=self.tz)
-        count = 0
-        # 遍历 last_run→now 之间的每一分钟，收集匹配 cron 的时刻
-        # 最多扫描 24*60 分钟（24 小时），避免极端情况无限循环
-        for _ in range(24 * 60):
-            if cursor_dt > end_dt or count >= 24:
+        # 遍历 last_run→now 之间的每一分钟。补跑条数封顶 CATCHUP_RUN_CAP，
+        # 但**继续**往后扫完（扫描范围另设 30 天上限）以便数出被丢弃了几个。
+        for _ in range(self._CATCHUP_SCAN_MAX_MINUTES):
+            if cursor_dt > end_dt:
                 break
             if self._match_field(self.minute, cursor_dt.minute) and \
                self._match_field(self.hour, cursor_dt.hour):
-                missed.append(cursor_dt.timestamp())
-                count += 1
+                if len(missed) < self.CATCHUP_RUN_CAP:
+                    missed.append(cursor_dt.timestamp())
+                else:
+                    dropped += 1
             cursor_dt += timedelta(minutes=1)
-        return missed
+        if cursor_dt <= end_dt:
+            # 超出扫描上限：剩下的按"无法数清"计一次，至少让断档存在被看见
+            dropped += 1
+            logger.warning(
+                "CronTrigger catchup: 距上次执行超过扫描上限（%d 分钟），"
+                "剩余错过周期未逐个数清",
+                self._CATCHUP_SCAN_MAX_MINUTES,
+            )
+        return (missed, dropped)
 
     def __repr__(self):
         suffix = ", catchup=True" if self.catchup else ""
@@ -195,6 +223,15 @@ class Action:
     """动作基类。子类实现 execute()。"""
 
     action_type: str = "base"
+
+    def pending_retry_targets(self, context: dict) -> list[float]:
+        """本动作认为"该重做、但调度器没记成错过"的历史触发时刻（epoch 秒）。
+
+        默认空：绝大多数动作没有"产物已落盘但要重跑"的概念。
+        实现了它的动作，其返回值会在 catchup 时并入补跑清单，
+        逐个以 context["catchup_target_ts"] 触发 execute。
+        """
+        return []
 
     async def execute(self, context: dict) -> dict:
         """执行动作。返回 {"success": bool, "error": str?, ...}。
@@ -233,6 +270,16 @@ class LoopTask:
     fail_threshold: int = _FAIL_THRESHOLD_DEFAULT  # 可被 config 段 fail_threshold 覆盖
     running: bool = False  # 运行时标志，防止并发重复执行（不持久化）
     last_inbox_error: str | None = None  # 上次推送到 inbox 的 error 文本，用于失败去重
+    # --- unknown-outcome-evidence T07/T08 ---
+    # 执行前落盘的"本轮已开始"标记（write-ahead）。进程在动作执行中被干掉时它留在那儿，
+    # 重启后就能区分"这一轮没跑"与"这一轮不知道跑没跑完"——旧实现只有 last_run_at，
+    # 而它在动作返回后才推进，所以崩在执行中 = 看起来没跑 = 直接重跑一遍。
+    inflight_run_key: str | None = None
+    # 结局不明的周期键。不可逆档的动作会把该周期记在这里：不会被自动补跑，
+    # 但也不阻塞后续新周期（键含触发时刻，下一周期是新键，照常调度）。
+    unknown_run_keys: list[str] = field(default_factory=list)
+    # catch-up 因为上限被丢弃的错过周期数（旧实现静默丢弃 + max() 掩盖断档）
+    missed_periods_dropped: int = 0
 
     def status_dict(self) -> dict:
         return {
@@ -250,10 +297,77 @@ class LoopTask:
             "fail_count": self.fail_count,
             "run_count": self.run_count,
             "fail_threshold": self.fail_threshold,
+            "side_effect_tier": task_side_effect_tier(self),
+            "inflight_run_key": self.inflight_run_key,
+            "unknown_run_keys": list(self.unknown_run_keys),
+            "missed_periods_dropped": self.missed_periods_dropped,
             "next_run_at": (
                 lambda nxt: datetime.fromtimestamp(nxt).strftime("%Y-%m-%d %H:%M:%S") if nxt else None
             )(self.trigger.next_run_at(self.last_run_at, time.time())),
         }
+
+
+# ==================== 结局状态语义（unknown-outcome-evidence T07/T10） ====================
+# skipped 与 unknown 在计数上的语义集中在这张表里，避免"新增一个态就改一处 if"。
+#   success → 清零 fail_count（真成功才清零）
+#   skipped → 不计不清（设计内跳过，不是失败也不是成功；旧实现让 skip/fail 交替
+#             能慢慢爬到阈值，就是因为它"不清零"又没有别的约束）
+#   failed  → +1
+#   unknown → +1 但**不触发 auto_pause**：结局不明说明我们失去了信息，不是动作本身
+#             又失败了一次；把它当失败会让一次崩溃把任务推向暂停，那是误判的搬家。
+RESULT_STATE_RULES: dict[str, dict[str, int | bool]] = {
+    "success": {"count": 0, "clear": True, "can_pause": False},
+    "skipped": {"count": 0, "clear": False, "can_pause": False},
+    "failed": {"count": 1, "clear": False, "can_pause": True},
+    "unknown": {"count": 1, "clear": False, "can_pause": False},
+}
+
+
+def task_side_effect_tier(task: "LoopTask") -> str:
+    """该任务动作的副作用档。config 段可写 side_effect_tier 覆盖，默认保守。"""
+    from lib.side_effect_tier import TIER_READ_ONLY, tier_for
+
+    override = str(task.config.get("side_effect_tier") or "").strip()
+    if override in (TIER_READ_ONLY, "local_reversible", "external_irreversible"):
+        return override
+    # action_type 不在分档表里时 tier_for 返回 external_irreversible（保守方向）
+    return tier_for(task.action.action_type)
+
+
+def classify_run_result(result: dict) -> str:
+    """把 action 返回值归到四种结局之一。"""
+    if not isinstance(result, dict):
+        return "failed"
+    if result.get("skipped"):
+        return "skipped"
+    if result.get("outcome_unknown") or result.get("unknown"):
+        return "unknown"
+    if result.get("success"):
+        return "success"
+    return "failed"
+
+
+def result_message(result: dict) -> str:
+    """从 action 返回值里取"人能读懂的失败原因"。
+
+    取键顺序与 skipped 分支的 D11 链对齐：只认 error 一个键的话，
+    没写 error 的 action（如 ScreenVL 只回填 vl_status）在收件箱里会退化成
+    「错误: unknown」，读者看不到原因。
+    """
+    for key in ("error", "skip_reason", "reason", "vl_status"):
+        value = result.get(key)
+        if value:
+            return str(value)
+    return "unknown"
+
+
+def apply_result_to_counters(task: "LoopTask", outcome: str) -> None:
+    """按 RESULT_STATE_RULES 更新失败计数（唯一的计数真源）。"""
+    rule = RESULT_STATE_RULES.get(outcome, RESULT_STATE_RULES["failed"])
+    task.fail_count += int(rule["count"])
+    if rule["clear"]:
+        task.fail_count = 0
+        task.last_inbox_error = None
 
 
 # config 段 → 子任务构建规则
@@ -408,6 +522,9 @@ class LoopManager:
         self._task: asyncio.Task | None = None
         self._running = False
         self._last_save = 0.0
+        # 磁盘 IO 审计 2026-10-01：缓存上次落盘内容，未变化时跳过全量重写。
+        # 调度循环每 30 秒调一次 _save_state，实测绝大多数轮次状态毫无变化。
+        self._last_state_payload: str | None = None
         self._register_builtin_actions()
 
     def _register_builtin_actions(self):
@@ -525,27 +642,65 @@ class LoopManager:
         if not isinstance(trigger, CronTrigger) or not trigger.catchup:
             return False
         try:
-            missed = trigger.missed_runs(task.last_run_at, now)
+            missed, dropped = trigger.missed_runs_detailed(task.last_run_at, now)
         except Exception as e:
             logger.warning(f"Loop catchup: {task.task_id} 计算错过时刻失败: {e}")
             return False
-        if not missed:
-            return False
+        if dropped:
+            # T08：超出补跑上限的周期不再静默丢弃——累计并告诉用户
+            task.missed_periods_dropped += dropped
+            logger.warning(
+                "Loop catchup: %s 有 %d 个错过周期超出补跑上限未补（累计 %d）",
+                task.task_id, dropped, task.missed_periods_dropped,
+            )
+            self._push_catchup_dropped_inbox(task, dropped)
+        retries = self._pending_retry_targets(task)
+        # 占位重做排在 missed 之后：错过的周期是"没跑过"，优先于"跑过但要重做"
+        targets = list(missed) + [ts for ts in retries if ts not in set(missed)]
+        # 扫过就留一行：缺了它，"确实没有待补的周期"和"这段代码根本没跑到"在日志里同形
         logger.info(
-            f"Loop catchup: {task.task_id} 检测到 {len(missed)} 个错过时刻，开始补跑"
+            "Loop catchup: %s 扫描 missed=%d revisit=%d 排队=%d",
+            task.task_id, len(missed), len(retries), len(targets),
         )
-        for target_ts in missed:
+        if not targets:
+            return False
+        held = [
+            ts for ts in missed if f"{task.task_id}@{int(ts)}" in task.unknown_run_keys
+        ]
+        logger.info(
+            f"Loop catchup: {task.task_id} 检测到 {len(missed)} 个错过时刻"
+            + (f" + {len(targets) - len(missed)} 个待重做的占位周期"
+               if len(targets) > len(missed) else "")
+            + "，开始补跑"
+            + (f"（{len(held)} 个因结局不明被扣住，不自动重跑）" if held else "")
+        )
+        for target_ts in targets:
             # 补跑过程中若任务被 auto_pause（连续失败），停止后续补跑
             if task.paused:
                 logger.warning(
                     f"Loop catchup: {task.task_id} 补跑中触发 auto_pause，"
-                    f"剩余 {len(missed) - missed.index(target_ts)} 个时刻不再补跑"
+                    f"剩余 {len(targets) - targets.index(target_ts)} 个时刻不再补跑"
                 )
                 break
             await self._run_task(task, catchup_target_ts=target_ts)
         logger.info(f"Loop catchup: {task.task_id} 补跑完成")
         self._save_state()
         return True
+
+    def _pending_retry_targets(self, task: LoopTask) -> list[float]:
+        """问 action 要"该重做但调度器没记成错过"的历史时刻（如 hourly 的占位小时）。
+
+        单个 action 探测失败不该让整条补跑停摆，所以异常只记日志、返回空。
+        """
+        try:
+            targets = task.action.pending_retry_targets({
+                "task_id": task.task_id,
+                "config": task.config,
+            })
+        except Exception as e:
+            logger.warning(f"Loop catchup: {task.task_id} 收集待重做时刻失败: {e}")
+            return []
+        return [float(ts) for ts in (targets or [])]
 
     async def _run_loop(self):
         """主调度循环，每秒检查 trigger"""
@@ -557,7 +712,8 @@ class LoopManager:
                         continue
                     nxt = task.trigger.next_run_at(task.last_run_at, now)
                     if nxt and nxt <= now:
-                        await self._run_task(task)
+                        # fire_ts 传进 run_key，让每个周期有稳定身份（T07）
+                        await self._run_task(task, fire_ts=nxt)
                 # 每 30 秒保存一次状态
                 if now - self._last_save > 30:
                     self._save_state()
@@ -570,7 +726,7 @@ class LoopManager:
                 await asyncio.sleep(30)  # 异常后退避，避免每秒刷爆日志
 
     async def _run_task(self, task: LoopTask, catchup_target_ts: float | None = None,
-                        manual: bool = False):
+                        manual: bool = False, fire_ts: float | None = None):
         """执行单个任务，异常捕获 + 失败计数 + 自动暂停
 
         catchup_target_ts: 补跑模式下的目标触发时刻（epoch 秒）。None 表示正常触发。
@@ -582,6 +738,9 @@ class LoopManager:
               （旧实现只打日志，endpoint 返回旧 last_result 造成"已触发"假象）。
             - 不推进 last_run_at（P2-4）：手动补跑不应顺延 IntervalTrigger 的调度
               周期。last_result/run_count 照常更新。
+        fire_ts: 本次触发对应的调度时刻（正常路径由 _run_loop 传 trigger 算出的 nxt）。
+            用于拼周期运行键 run_key = "<task_id>@<int(fire_ts)>"
+            （unknown-outcome-evidence T07）。手动触发不传即退化为"当下时刻"。
         """
         if task.running:
             if manual:
@@ -598,12 +757,47 @@ class LoopManager:
                 return
             logger.warning(f"Loop 任务 {task.task_id} 已在运行，跳过本次触发")
             return
+
+        # --- 周期运行键与"结局不明"闸门（unknown-outcome-evidence T07）---
+        period_ts = (
+            catchup_target_ts if catchup_target_ts is not None
+            else fire_ts if fire_ts is not None
+            else time.time()
+        )
+        run_key = f"{task.task_id}@{int(period_ts)}"
+        if run_key in task.unknown_run_keys:
+            # 上一轮这条周期崩在执行中且动作属外部不可逆档：不重复执行，
+            # 但后续新周期的键不同，照常调度——不会把任务卡死。
+            logger.warning(
+                "Loop 周期 %s 结局不明（上次执行未落结局），按外部不可逆档不自动重跑；"
+                "确认可重跑请清 unknown_run_keys 或手动触发", run_key,
+            )
+            task.last_result = {
+                "success": False,
+                "skipped": True,
+                "skip_reason": f"outcome_unknown:{run_key}",
+                "outcome_unknown_hold": True,
+            }
+            # 必须推进调度进度，否则 next_run_at 会一直返回同一时刻，主循环每秒空转重试。
+            # 手动触发不推进（与 _run_task 其余路径一致）。
+            if not manual:
+                task.last_run_at = max(period_ts, task.last_run_at or 0)
+            self._save_state()
+            return
+
         task.running = True
+        # write-ahead：动作还没跑，先让磁盘知道"这一轮已经开始了"。
+        # 进程被干掉时这个标记留着，重启后就能说"不知道跑没跑完"，而不是猜"没跑"。
+        task.inflight_run_key = run_key
+        self._save_state()
+
         if catchup_target_ts is not None:
             label = f"{task.task_id} (catchup={datetime.fromtimestamp(catchup_target_ts).strftime('%Y-%m-%d %H:%M')})"
         else:
             label = task.task_id
         logger.info(f"Loop 执行任务: {label} (action={task.action.action_type})")
+        # 本轮结局；异常/未知情况默认按 failed 计，但 can_pause 由 RESULT_STATE_RULES 判
+        outcome = "failed"
         try:
             context = {
                 "task_id": task.task_id,
@@ -613,6 +807,9 @@ class LoopManager:
             if catchup_target_ts is not None:
                 context["catchup_target_ts"] = catchup_target_ts
             result = await task.action.execute(context)
+            if isinstance(result, dict):
+                # 运行键随结果落盘，事后能回答"这条结果是哪个周期产生的"
+                result = {**result, "run_key": run_key}
             # last_run_at 更新策略：
             # - catchup 模式：取 max(target_ts, current)，避免补跑历史时刻时把进度回退
             #   （如正常 cron 已跑到 01:00，补跑 ts=23:00 不应让 last_run_at 倒退到 23:00）
@@ -626,10 +823,14 @@ class LoopManager:
                 task.last_run_at = time.time()
             task.last_result = result
             task.run_count += 1
-            # 三态判断：success / skipped / failed
-            # skipped = 主动跳过（配额决策、节流等设计内行为），不计失败也不清 fail_count
-            # D11: 统一 skip_reason 字段（兼容旧 action 的 reason / vl_status）
-            if result.get("skipped"):
+            # 三态判断集中到 RESULT_STATE_RULES + classify_run_result
+            # （unknown-outcome-evidence T10：skipped/unknown 的计数语义只在这张表里定义，
+            # 避免每加一种结局就改一处 if）
+            outcome = classify_run_result(result)
+            prev_fail = task.fail_count
+            apply_result_to_counters(task, outcome)
+            if outcome == "skipped":
+                # D11: 统一 skip_reason 字段（兼容旧 action 的 reason / vl_status）
                 skip_msg = (
                     result.get("skip_reason")
                     or result.get("reason")
@@ -639,31 +840,33 @@ class LoopManager:
                 logger.info(
                     f"Loop 任务 {task.task_id} 跳过（skipped）: {skip_msg}"
                 )
-            elif result.get("success"):
-                # 成功：清空失败计数和去重缓存（让下次失败能再次推送）
-                prev_fail = task.fail_count
-                task.fail_count = 0
-                task.last_inbox_error = None
+            elif outcome == "success":
                 if prev_fail > 0:
                     logger.info(
                         f"Loop 任务 {task.task_id} 恢复正常（前 fail_count={prev_fail}）"
                     )
+            elif outcome == "unknown":
+                logger.warning(
+                    f"Loop 任务 {task.task_id} 本轮结局不明（action 自报 unknown）: "
+                    f"{result.get('error') or result.get('reason') or 'no reason'}"
+                )
+                self._hold_period_as_unknown(task, run_key)
             else:
-                task.fail_count += 1
+                fail_msg = result_message(result)
                 logger.warning(
                     f"Loop 任务 {task.task_id} 返回失败 "
                     f"(fail_count={task.fail_count}/{task.fail_threshold}): "
-                    f"{result.get('error')}"
+                    f"{fail_msg}"
                 )
                 # 首次失败推送 inbox（同 error 去重），让用户立即看到
-                self._push_first_failure_inbox(task, result.get("error", "unknown"))
+                self._push_first_failure_inbox(task, fail_msg)
         except Exception as e:
             # last_run_at 更新策略与成功路径一致：catchup 取 max；manual 不推进
             if catchup_target_ts is not None:
                 task.last_run_at = max(catchup_target_ts, task.last_run_at or 0)
             elif not manual:
                 task.last_run_at = time.time()
-            task.last_result = {"success": False, "error": str(e)}
+            task.last_result = {"success": False, "error": str(e), "run_key": run_key}
             task.fail_count += 1
             task.run_count += 1
             logger.exception(
@@ -674,9 +877,21 @@ class LoopManager:
             self._push_first_failure_inbox(task, str(e))
         finally:
             task.running = False
+            # 本轮已落结局（成功/跳过/失败/自报不明），清掉 write-ahead 标记。
+            # 没走到这一步就被杀掉的进程会把它留在 tasks.json 里 → 重启即知"结局不明"。
+            task.inflight_run_key = None
 
         # 连续失败超阈值，自动暂停 + 推收件箱（critical 级别）
-        if task.fail_count >= task.fail_threshold and not task.paused:
+        # T07/T10：can_pause 由 RESULT_STATE_RULES 决定——unknown（结局不明）累计计数
+        # 但不把任务推向暂停：那次我们只是失去了信息，不是动作又失败了一次。
+        pause_allowed = bool(
+            RESULT_STATE_RULES.get(outcome, RESULT_STATE_RULES["failed"])["can_pause"]
+        )
+        if (
+            pause_allowed
+            and task.fail_count >= task.fail_threshold
+            and not task.paused
+        ):
             task.paused = True
             task.paused_reason = "auto_failed"
             logger.error(
@@ -684,6 +899,55 @@ class LoopManager:
             )
             self._push_fail_inbox(task)
         self._save_state()
+
+    def _hold_period_as_unknown(self, task: LoopTask, run_key: str) -> None:
+        """把这一周期记为"结局不明"，并按副作用档决定是否允许它再跑。
+
+        unknown-outcome-evidence T07：
+        - 外部不可逆（发消息 / 签到 / 提交 / 删除…）→ 记进 unknown_run_keys，
+          这条周期不会被自动重跑，并推一条 inbox 让人裁决；
+        - 只读 / 本地可逆 → 不记账，下一轮 catch-up 正常补跑（重跑无害）。
+        两种情况都留下理由，便于事后回答"当时为什么补/为什么不补"。
+        """
+        from lib.side_effect_tier import can_auto_rerun
+
+        tier = task_side_effect_tier(task)
+        if can_auto_rerun(tier):
+            logger.info(
+                "Loop 周期 %s 结局不明，但 %s 档为 %s，允许后续补跑",
+                run_key, task.action.action_type, tier,
+            )
+            return
+        if run_key not in task.unknown_run_keys:
+            task.unknown_run_keys.append(run_key)
+            # 只留最近若干条，避免长期跑下去把状态文件撑大
+            task.unknown_run_keys = task.unknown_run_keys[-50:]
+        logger.warning(
+            "Loop 周期 %s 记为不可自动重跑（tier=%s），已推送 inbox 待人确认",
+            run_key, tier,
+        )
+        try:
+            from server.inbox import get_store
+
+            get_store().create({
+                "source": "loop_manager",
+                "category": "outcome_unknown",
+                "title": f"Loop 周期结局不明: {run_key}",
+                "description": (
+                    f"任务 {task.task_id} 的这一步返回「结果不明」，且动作属外部不可逆档"
+                    f"（{task.action.action_type} / {tier}），调度器不会自动重跑。"
+                    "请先查证它到底做没做，确认后可手动触发。"
+                ),
+                "payload": {
+                    "task_id": task.task_id,
+                    "run_key": run_key,
+                    "tier": tier,
+                    "event": "period_outcome_unknown",
+                },
+                "dedupe_key": f"loop_unknown:{run_key}",
+            })
+        except Exception as e:
+            logger.warning(f"推送结局不明 inbox 失败: {e}")
 
     def _push_first_failure_inbox(self, task: LoopTask, error: str):
         """首次失败推送 inbox（warning 级别），同 error 去重避免刷屏。
@@ -739,7 +1003,7 @@ class LoopManager:
                 "category": "task_failed",
                 "title": f"Loop 任务自动暂停: {task.task_id}",
                 "description": f"连续失败 {task.fail_count} 次，已暂停。最后错误: "
-                               f"{(task.last_result or {}).get('error', 'unknown')}",
+                               f"{result_message(task.last_result or {})}",
                 "payload": {
                     "task_id": task.task_id,
                     "fail_count": task.fail_count,
@@ -770,10 +1034,19 @@ class LoopManager:
                     "paused_reason": t.paused_reason,
                     "run_count": t.run_count,
                     "enabled": t.enabled,
+                    # unknown-outcome-evidence T07：write-ahead 标记必须落盘，
+                    # 否则进程被干掉后重启，磁盘上没有东西能说明"这一轮开始过"
+                    "inflight_run_key": t.inflight_run_key,
+                    "unknown_run_keys": list(t.unknown_run_keys),
+                    "missed_periods_dropped": t.missed_periods_dropped,
                 }
                 for task_id, t in self.tasks.items()
             }
             payload = json.dumps(state, ensure_ascii=False, indent=2)
+            # 磁盘 IO 审计 2026-10-01：内容未变则跳过写盘。调度循环每 30 秒
+            # 调一次本方法，而状态绝大多数轮次完全不变，全量重写纯属浪费。
+            if payload == self._last_state_payload:
+                return
             # T06：先写 tmp 文件，再 os.replace 原子替换
             fd, tmp_path = _tempfile.mkstemp(
                 prefix=".tasks_", suffix=".tmp", dir=str(STATE_FILE.parent)
@@ -782,6 +1055,7 @@ class LoopManager:
                 with _os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(payload)
                 _os.replace(tmp_path, STATE_FILE)
+                self._last_state_payload = payload
             except Exception:
                 try:
                     _os.unlink(tmp_path)
@@ -798,6 +1072,7 @@ class LoopManager:
                 return
             state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
             auto_resumed = []
+            unresolved_inflight: list[tuple[str, str]] = []
             for task_id, s in state.items():
                 if task_id in self.tasks:
                     t = self.tasks[task_id]
@@ -807,24 +1082,70 @@ class LoopManager:
                     t.paused = s.get("paused", False)
                     t.paused_reason = s.get("paused_reason")
                     t.run_count = s.get("run_count", 0)
+                    # unknown-outcome-evidence T07：把磁盘上的"不明"状态接回来
+                    t.unknown_run_keys = [
+                        str(k) for k in (s.get("unknown_run_keys") or []) if k
+                    ]
+                    t.missed_periods_dropped = int(s.get("missed_periods_dropped") or 0)
+                    leftover_inflight = s.get("inflight_run_key")
+                    if leftover_inflight:
+                        # 上一进程在动作执行中被干掉：这一轮的结局不明
+                        t.inflight_run_key = None
+                        from lib.side_effect_tier import can_auto_rerun
+
+                        if not can_auto_rerun(task_side_effect_tier(t)):
+                            # 外部不可逆 → 记进不明清单，不自动重跑，等人裁决
+                            t.unknown_run_keys.append(str(leftover_inflight))
+                            t.unknown_run_keys = t.unknown_run_keys[-50:]
+                            unresolved_inflight.append((task_id, str(leftover_inflight)))
+                        else:
+                            # 只读/本地可逆 → 重跑无害，交给 catch-up 正常补
+                            logger.info(
+                                "Loop 任务 %s 上一轮结局不明（run_key=%s），"
+                                "但动作档允许重跑，不拦",
+                                task_id, leftover_inflight,
+                            )
                     # enabled 以 config 为准，但允许运行时暂停状态保留
                     if s.get("paused"):
                         # 启动时自动恢复 auto_failed 任务：
                         #   - 用户可能已修复根因（如更新 token、VL 恢复），需要让任务重新尝试
                         #   - 若根因仍存在，会再次累积 fail_count 触发自动暂停（带去重推送）
                         #   - manual 暂停不自动恢复，保留用户意图
-                        if t.paused_reason == "auto_failed":
+                        # unknown-outcome-evidence T09：不再清零 fail_count。
+                        # 旧实现每次重启都发一张"全新额度"，于是一个永远失败的任务
+                        # 可以无限 pause→resume→pause 循环下去。现在保留计数，且已经
+                        # 攒满阈值的任务不再自动恢复——跨重启的重试预算是有界的。
+                        if (
+                            t.paused_reason == "auto_failed"
+                            and t.fail_count < t.fail_threshold
+                        ):
                             t.paused = False
                             t.paused_reason = None
-                            t.fail_count = 0
                             t.last_inbox_error = None
                             auto_resumed.append(task_id)
+                        elif t.paused_reason == "auto_failed":
+                            logger.warning(
+                                "Loop 任务 %s 仍处 auto_failed（fail_count=%d 已达阈值 %d），"
+                                "本次启动不再自动恢复，需人工 resume",
+                                task_id, t.fail_count, t.fail_threshold,
+                            )
                         elif not t.paused_reason:
-                            # 兜底：paused=true 但 paused_reason 缺失（历史 schema 遗留）视为 auto_failed
-                            t.paused = False
-                            t.paused_reason = None
-                            t.fail_count = 0
-                            auto_resumed.append(task_id)
+                            # T10：paused=true 但原因缺失（历史 schema 遗留）。
+                            # 旧实现猜成 auto_failed 并直接恢复——那会覆盖"用户手动暂停"
+                            # 的意图。猜不准时按人工意图留着，并告诉用户我们分不清。
+                            logger.warning(
+                                "Loop 任务 %s 处于 paused 但没有暂停原因，按人工暂停保留"
+                                "（旧实现会当成失败自动恢复）", task_id,
+                            )
+                            t.paused_reason = "manual"
+                            self._push_unknown_pause_notice(task_id)
+            if unresolved_inflight:
+                for task_id, run_key in unresolved_inflight:
+                    logger.warning(
+                        "Loop 任务 %s 上一轮结局不明（run_key=%s）：已记入不可自动重跑清单并推送 inbox",
+                        task_id, run_key,
+                    )
+                self._push_outcome_unknown_inbox(unresolved_inflight)
             if auto_resumed:
                 logger.info(
                     f"Loop 启动时自动恢复 {len(auto_resumed)} 个 auto_failed 任务: "
@@ -835,6 +1156,82 @@ class LoopManager:
             logger.info(f"Loop 状态已恢复: {len(state)} 条记录")
         except Exception as e:
             logger.warning(f"Loop 状态恢复失败: {e}")
+
+    def _push_outcome_unknown_inbox(self, pairs: list[tuple[str, str]]) -> None:
+        """启动时发现"上一轮开始过但没落结局"，逐条推 inbox 让人裁决（T07）。"""
+        try:
+            from server.inbox import get_store
+
+            store = get_store()
+        except Exception as e:
+            logger.warning(f"加载 inbox store 失败: {e}")
+            return
+        for task_id, run_key in pairs:
+            try:
+                store.create({
+                    "source": "loop_manager",
+                    "category": "outcome_unknown",
+                    "title": f"Loop 上轮结局不明: {task_id}",
+                    "description": (
+                        f"后端重启时发现周期 {run_key} 已开始执行但没有落下结局，"
+                        "该任务的动作属外部不可逆档，因此不会自动重跑。"
+                        "请查证它到底做没做，确认后手动触发。"
+                    ),
+                    "payload": {
+                        "task_id": task_id,
+                        "run_key": run_key,
+                        "event": "startup_inflight_unresolved",
+                    },
+                    "dedupe_key": f"loop_unknown:{run_key}",
+                })
+            except Exception as e:
+                logger.warning(f"推送结局不明 inbox 失败 {run_key}: {e}")
+
+    def _push_catchup_dropped_inbox(self, task: LoopTask, dropped: int) -> None:
+        """补跑上限之外的周期：告诉用户漏了多少（T08），别用 max() 把断档抹平。"""
+        try:
+            from server.inbox import get_store
+
+            get_store().create({
+                "source": "loop_manager",
+                "category": "catchup_dropped",
+                "title": f"Loop 补跑不完整: {task.task_id}",
+                "description": (
+                    f"任务 {task.task_id} 在停机期间错过了超过补跑上限"
+                    f"（CronTrigger.CATCHUP_RUN_CAP）的周期，本次有 {dropped} 个"
+                    f"周期没有补跑（累计漏掉 {task.missed_periods_dropped} 个）。"
+                    "补跑上限本身不变，避免开机瞬间被打爆。"
+                ),
+                "payload": {
+                    "task_id": task.task_id,
+                    "dropped": dropped,
+                    "total_dropped": task.missed_periods_dropped,
+                    "event": "catchup_overflow",
+                },
+                "dedupe_key": f"loop_catchup_dropped:{task.task_id}:{int(time.time() // 3600)}",
+            })
+        except Exception as e:
+            logger.warning(f"推送补跑缺口通知失败: {e}")
+
+    def _push_unknown_pause_notice(self, task_id: str) -> None:
+        """paused 但原因缺失：按人工意图保留，并告诉用户我们分不清（T10）。"""
+        try:
+            from server.inbox import get_store
+
+            get_store().create({
+                "source": "loop_manager",
+                "category": "pause_reason_unknown",
+                "title": f"Loop 暂停原因不明: {task_id}",
+                "description": (
+                    f"任务 {task_id} 在状态文件里是暂停状态，但没有记录暂停原因。"
+                    "旧实现会把它当成「失败自动暂停」直接恢复，那可能覆盖你手动暂停的意图；"
+                    "现在按人工暂停保留，需要恢复请在面板里 resume。"
+                ),
+                "payload": {"task_id": task_id, "event": "pause_reason_missing_kept_manual"},
+                "dedupe_key": f"loop_pause_unknown:{task_id}",
+            })
+        except Exception as e:
+            logger.warning(f"推送暂停原因不明通知失败: {e}")
 
     def _push_auto_resume_inbox(self, task_ids: list[str]):
         """启动时自动恢复 auto_failed 任务后，推 inbox 通知用户"""

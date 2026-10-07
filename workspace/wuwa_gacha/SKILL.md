@@ -164,7 +164,7 @@ uv run python workspace/wuwa_gacha/wuwa_gacha.py
 ### 注册表路径
 `HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\KRInstall Wuthering Waves`
 - 键名：`InstallPath`
-- 示例值：`F:\<data_drive>:\<game_install_root>\Wuthering Waves`
+- 示例值：`<data_drive>:/<game_install_root>\Wuthering Waves`
 
 ### 日志文件路径
 `{InstallPath}\Wuthering Waves Game\Client\Saved\Logs\Client.log`

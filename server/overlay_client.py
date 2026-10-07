@@ -184,6 +184,7 @@ def _create_start_confirm_dialog():
             allow_task_authorization: bool = True,
             requested_mode: str = "normal",
             timeout_seconds: int = 30,
+            max_duration_hours: int | None = None,
         ):
             """初始化弹窗并显示。
 
@@ -192,6 +193,8 @@ def _create_start_confirm_dialog():
                     用户只能允许/拒绝，不能改模式（spec 决策 17）。
                 allow_task_authorization: 兼容旧签名，新设计忽略（授权总由 SessionManager 管）
                 timeout_seconds: 倒计时秒数（与 server 端 takeover_confirm_timeout_seconds 一致）
+                max_duration_hours: agent 请求的看门狗时长，用作 spinbox 初值（超范围由
+                    QSpinBox 自动夹到 1-999）；None 时用默认 10。用户仍可改动。
             """
             self.result_data = {
                 "status": "cancelled",
@@ -202,7 +205,9 @@ def _create_start_confirm_dialog():
                 "shutdown_permitted": False,
             }
             self.feedback_edit.clear()
-            self.duration_spinbox.setValue(10)
+            self.duration_spinbox.setValue(
+                10 if max_duration_hours is None else int(max_duration_hours)
+            )
             self.shutdown_checkbox.setChecked(True)
             self.watchdog_group.setVisible(requested_mode == "watchdog")
             self.task_label.setText(f"任务: {task_description}")
@@ -718,6 +723,7 @@ def _gui_subprocess(recv_queue: multiprocessing.Queue,
                         allow_task_authorization=msg.get("allow_task_authorization", True),
                         requested_mode=msg.get("requested_mode", "normal"),
                         timeout_seconds=msg.get("timeout_seconds", 30),
+                        max_duration_hours=msg.get("max_duration_hours"),
                     )
                     start_confirm.show()
                     start_confirm.raise_()
@@ -1072,12 +1078,22 @@ class OverlayClient:
         force_prompt: bool = False,
         source: str = "agent",
         requested_mode: str = "normal",
+        needs_shutdown: bool = False,
+        max_duration_hours: int | None = None,
     ) -> dict:
         """顶栏未显示时弹"接管确认"窗口，询问用户是否允许 agent 接管键鼠操作。
 
         Args:
             requested_mode: agent 请求的模式（"normal" | "watchdog"）。
                 用户只能允许/拒绝，不能改模式（决策 17）。
+            max_duration_hours: agent 请求的看门狗时长（小时）。仅作为弹窗 spinbox
+                **初值**下传，用户仍可上调；不传则沿用控件默认 10 小时。此前该参数
+                没有下传给弹窗，导致"请求 1 小时"实机被授权成 10 小时（2026-09-30 实测）。
+            needs_shutdown: agent 的任务需要关机权限。仅在 requested_mode=="watchdog"
+                时有意义（关机位只在 watchdog 模式存在，见 SessionManager.grant）：
+                会话已是 watchdog 但用户当初没勾"允许关机"时，这属于**权限升级**，
+                需要重新弹窗，而不是短路成 skipped。否则脚本永远拿不到关机权限，
+                只能靠 release 把已有 watchdog 一起丢掉再重来（2026-09-30 实测痛点）。
 
         Returns:
             {
@@ -1093,23 +1109,25 @@ class OverlayClient:
             - "cancelled"：用户点"拒绝" 或 超时 timeout_action=cancel
             - "error"：GUI 子进程异常（fail-closed）
         """
-        # 1. 已有任务授权 → 模式一致或为降级/平级请求时直接放行；
-        #    升级请求（normal→watchdog）不短路，照常弹窗让用户勾选确认
-        #    （request 的语义是"覆盖现有授权"，此处短路会让升级永远拿不到弹窗）
+        # 1. 权限升级判据由会话层单点给出（SessionManager.needs_new_approval，ADR-0037）：
+        #    非升级（平级/低权限的重复请求）直接放行 status="skipped"，升级则照常弹窗。
+        #    2026-09-30 起 routes.py 只对 status=="confirmed" 执行 grant，所以 skipped
+        #    就是"沿用现有授权、什么也不改"；旧版 skipped 也会被 routes 当成新授权重grant，
+        #    于是脚本的平级 request 会擦掉用户勾选的 shutdown_permitted 并续命 watchdog 时钟
         session = get_session_manager()
-        if session.is_active():
-            # 保留当前会话模式（避免 agent 重调 request 时把 watchdog 误降级为 normal）
-            current_mode = session.status().get("mode", "normal")
-            if not (requested_mode == "watchdog" and current_mode != "watchdog"):
-                return {
-                    "status": "skipped",
-                    "reason": "",
-                    "task_authorization": True,
-                    "requested_mode": requested_mode,
-                    "authorized_mode": current_mode,
-                    "max_duration_hours": None,
-                    "shutdown_permitted": False,
-                }
+        if not session.needs_new_approval(requested_mode, needs_shutdown):
+            # 保留当前会话模式与关机位（避免 agent 重调 request 时把 watchdog 误降级为 normal）
+            current = session.status()
+            return {
+                "status": "skipped",
+                "reason": "",
+                "task_authorization": True,
+                "requested_mode": requested_mode,
+                "authorized_mode": current.get("mode", "normal"),
+                "max_duration_hours": None,
+                # skipped 不改状态，这里如实回报现值（routes 只读不用，但调用方会看）
+                "shutdown_permitted": bool(current.get("shutdown_permitted", False)),
+            }
         if self._overlay_visible and not force_prompt:
             return {
                 "status": "skipped",
@@ -1132,6 +1150,8 @@ class OverlayClient:
                 "allow_task_authorization": allow_task_authorization,
                 "requested_mode": requested_mode,
                 "timeout_seconds": confirm_timeout,
+                # 请求时长作为弹窗 spinbox 初值下传；缺省时子进程沿用默认 10
+                "max_duration_hours": max_duration_hours,
             },
             confirm_timeout + 5,
         )

@@ -699,7 +699,7 @@ Test the interface through the eyes of 5 distinct user archetypes. Each persona 
 - Submits forms with unexpected data (emoji, RTL text, very long values)
 - Tries to break workflows by navigating backwards, refreshing mid-flow, or opening in multiple tabs
 - Looks for inconsistencies between what the UI promises and what actually happens
-- <data_drive>:\Documents problems methodically
+- Documents problems methodically
 
 **Test Questions**:
 - What happens at the edges (0 items, 1000 items, very long text)?

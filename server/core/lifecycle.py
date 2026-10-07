@@ -120,6 +120,14 @@ def register_lifecycle(app):
         # T5-1：注册模型存活管理器驱动并启动监控（design §11 步骤 5）
         # 先注册后监控（design §13）：全部驱动注册完成才启动监控循环，
         # 避免逐出逻辑遇到未知模型。start() 内部会先采首样本堵失明窗口。
+        # 采样只有一个 owner：常驻资源中枢（NVML/psutil，不创建子进程）。
+        # 中枢先于管理器启动——活动采集的高负载门也读它，不依赖 MLM 是否启用。
+        try:
+            from server.resource_probe import get_resource_hub
+
+            await get_resource_hub().ensure_started()
+        except Exception as e:
+            logger.warning(f"资源采样中枢启动失败（GPU/RAM 采样降级为按需直采）: {e}", exc_info=True)
         try:
             from server.model_manager import get_model_manager
             from server.model_manager.drivers import (
@@ -216,6 +224,14 @@ def register_lifecycle(app):
             await get_model_manager().stop()
         except Exception as e:
             logger.warning(f"ModelLifecycleManager 停止失败: {e}")
+        # 停止常驻采样中枢（关 NVML 会话、取消 ticker）
+        try:
+            from server.resource_probe import get_resource_hub, reset_resource_hub
+
+            await get_resource_hub().stop()
+            reset_resource_hub()
+        except Exception as e:
+            logger.warning(f"资源采样中枢停止失败: {e}")
         screen_on_shutdown()
         system_on_shutdown()
         # 批量保存模式下 shutdown 时强制落盘

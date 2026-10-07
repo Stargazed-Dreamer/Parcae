@@ -29,6 +29,10 @@ class SessionState:
     max_duration_seconds: float | None
     # watchdog 模式关机权限（normal 时为 False）
     shutdown_permitted: bool
+    # 2026-10-02 归属记录：谁持有本次授权（lib.agent_identity.get_caller_id）。
+    # 仅用于 status 展示与"谁顶掉了谁"追溯；覆盖裁决仍由决策 17 的用户弹窗把关
+    # （2026-10-02 深入核验：grant 覆盖并非静默——只有用户在新弹窗确认才覆盖）。
+    owner: str = "anonymous"
 
     @property
     def idle_total_seconds(self) -> int:

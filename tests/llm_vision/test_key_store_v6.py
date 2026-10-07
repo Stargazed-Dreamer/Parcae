@@ -143,6 +143,67 @@ def test_pick_model_scope_filter():
     assert _pick_model_for_tier(rec, None, "nonexistent") == ""
 
 
+def test_pick_model_exclude_models_falls_to_next():
+    """exclude_models 是"同 key 模型级 fallback"的落点：剔掉最低 tier 后应给下一个。
+
+    2026-10-05 起因：远程 VL 每个 key 只解析出一个模型，400 死模型没有可换的下一个。
+    """
+    rec = KeyRecord(
+        id="t", label="t", key="k", base_url="b",
+        models=[
+            {"name": "vl-dead", "scope": ["vl"], "tier": 2},
+            {"name": "vl-alive", "scope": ["vl"], "tier": 4},
+        ],
+    )
+    assert _pick_model_for_tier(rec, (1, 5), "vl") == "vl-dead"
+    assert _pick_model_for_tier(rec, (1, 5), "vl", exclude_models={"vl-dead"}) == "vl-alive"
+    # 全排除 → 空串，调用方据此跳过该 key（不是回退到已死的模型）
+    assert _pick_model_for_tier(rec, (1, 5), "vl", exclude_models={"vl-dead", "vl-alive"}) == ""
+    # 排除名与 scope 无关的模型不互相影响
+    assert _pick_model_for_tier(rec, None, "llm", exclude_models={"vl-dead"}) == ""
+
+
+def test_resolve_keys_exclude_models_per_key(monkeypatch, tmp_path):
+    """resolve_keys(exclude_models={key_id: {...}}) 走真加载器，不是假 resolver。"""
+    test_data = {
+        "version": 6,
+        "keys": [{
+            "id": "k1",
+            "label": "test",
+            "key": "sk-x",
+            "base_url": "https://api.test/v1",
+            "models": [
+                {"name": "vl-dead", "scope": ["vl"], "tier": 2},
+                {"name": "vl-alive", "scope": ["vl"], "tier": 4},
+            ],
+            "max_concurrency": 3,
+            "privacy_warning": "",
+            "group": "",
+            "enabled": True,
+            "allowed_uses": [],
+            "status": {"works": True, "fail_count": 0,
+                       "last_health_check": "", "last_check_status": "", "last_check_detail": ""},
+        }],
+    }
+    test_file = tmp_path / "keys.json"
+    test_file.write_text(json.dumps(test_data), encoding="utf-8")
+
+    from server.llm_pool import key_store
+    monkeypatch.setattr(key_store, "_get_unified_keys_path", lambda: test_file)
+    key_store._invalidate_cache()
+    try:
+        assert key_store.resolve_keys("vl_ocr")[0].model == "vl-dead"
+        # tier 范围来自 use_case.default_tier：排除死模型后应拿到同 key 的下一个
+        alive = key_store.resolve_keys("vl_ocr", tier=(1, 5), exclude_models={"k1": {"vl-dead"}})
+        assert [r.model for r in alive] == ["vl-alive"]
+        assert alive[0].key_id == "k1", "换的是同一个 key 里的另一个模型，不是别的 key"
+        # 两个都排除 → 该 key 整体退出候选（调用方得到空列表而不是死模型）
+        assert key_store.resolve_keys("vl_ocr", tier=(1, 5),
+                                      exclude_models={"k1": {"vl-dead", "vl-alive"}}) == []
+    finally:
+        key_store._invalidate_cache()
+
+
 def test_resolve_keys_model_level_scope(monkeypatch, tmp_path):
     """验证 VL use_case 选 VL model 而非 LLM model（核心场景）"""
     test_data = {
@@ -293,5 +354,6 @@ def test_resolve_keys_privacy_warning_blocks_sensitive(monkeypatch):
     resolved_vl = key_store.resolve_keys("vl_ocr")
     for rk in resolved_vl:
         rec = key_store.get_key_by_id(rk.key_id)
+        assert rec is not None, f"resolve_keys 给出了查不到的 key_id: {rk.key_id}"
         assert not rec.privacy_warning, \
             f"敏感 use_case 选到了带 privacy_warning 的 key: {rk.label}"

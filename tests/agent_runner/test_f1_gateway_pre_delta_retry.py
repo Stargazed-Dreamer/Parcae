@@ -21,11 +21,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from client.core.agent.llm_pool_gateway import (
-    LLMPoolGateway,
     SSE_EVENT_CONTEXT_OVERFLOW,
     SSE_EVENT_DONE,
     SSE_EVENT_PROVIDER_ERROR,
     SSE_EVENT_TEXT_DELTA,
+    LLMPoolGateway,
 )
 
 

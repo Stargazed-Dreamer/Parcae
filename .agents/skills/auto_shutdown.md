@@ -26,6 +26,43 @@ task_type: adhoc.auto_shutdown
 
 ## 工作流（agent 自己跑 loop + 调端点）
 
+### 第 0 步：注册看门狗授权（⛔ 强制前置，任何自动关机任务通用，跳过必失败）
+
+> 2026-09-22 事故教训：过夜探针没有 watchdog 授权，真触发时被 403 拦截，
+> 且 403 发生在 inbox 推送之前 ⇒ 失败完全静默，机器没关机卡死到中午。
+> **没有这一步，后面全部白做。**
+
+```
+0a. 调 POST /screen/control/request（MCP 工具 screen_request_control）
+    参数：mode="watchdog", task_description="挂机关机：<触发条件>",
+          max_duration_hours=预计挂机时长向上取整（不传则默认 10h 上限！）,
+          needs_shutdown=true
+    ⚠ 弹窗里"允许关机"复选框**默认勾选**，用户取消勾选 ⇒ shutdown_permitted=false
+      ⇒ /auto_shutdown/trigger 返回 403 shutdown_not_permitted。
+    ⚠ 已经有 watchdog 但缺关机位：带 needs_shutdown=true 再请求属于**权限升级**，
+      会弹第二次确认窗（不必先 screen_release_control 把 watchdog 丢掉）；不带该参数
+      则短路成 status="skipped"，现有授权一律不改。升级这次会按弹窗时长重建 watchdog
+      硬上限时钟（granted_at 重置），不是无损补位。
+    ⚠ 返回 status="cancelled" ⇒ 用户拒绝或 30s 超时（fail-closed）：
+      不得继续，也不得反复重发施压，明确告知用户"未获关机授权，自动关机任务无法保证执行"。
+    ⚠ max_duration_hours 作为弹窗时长 spinbox 的**初值**下传，用户可上调；
+      用户没动就按请求值授权（2026-09-30 之前该值没传进弹窗，一律按默认 10h 授权）。
+
+0b. 验证（不看返回值猜，必须复查）：
+    GET /health → screen.takeover_persistent
+    要求 mode == "watchdog" 且 shutdown_permitted == true。
+    （注意：GET /screen/status 不含会话权限字段，别用它验证）
+    两个条件缺一个 ⇒ 回到 0a 重新请求或停任务。
+
+0c. watchdog 硬上限（机制说明，非隐患）：
+    watchdog 有 max_duration_seconds 硬上限，到期自动降级为 NORMAL
+    且 shutdown_permitted 归零。默认 10h 是有意设计（过夜足够），
+    弹窗里用户可自行设置时长；agent 也可用 max_duration_hours 显式传。
+    挂机时长明显超过上限时（如挂机 14h）传对应值即可。
+```
+
+### 第 1-5 步：检测 + 触发
+
 ```
 1. 确认触发条件 + task_id
    - task_id 用于截屏目录隔离（temp/auto_shutdown/<task_id>/final_screenshot.png）
@@ -35,10 +72,13 @@ task_type: adhoc.auto_shutdown
    - 用 time.sleep 或 asyncio.sleep 控制检测间隔（60s 常用）
    - 检测函数 agent 自行编写（识图 / 查日志 / 查 API / 查文件 / 查时间）
    - 不依赖任何内置条件检测（旧 6 种条件已删除）
+   - ⛔ 独立探针脚本必须：启动时预检 0b 的权限；触发失败要重试 + 落告警文件，
+     禁止"单发即退"（参考 workspace/windows_forensics/tools/probes/mem_watch.py 的 2026-09-23 修正版）
 
 3. 条件满足 → 调 POST /auto_shutdown/trigger
    - 端点内部自动：截屏 + 推 inbox + 调 shutdown /s /t 120
    - 120s 倒计时（不是 60s，多 60s 宽限用户刹停）
+   - ⚠ dry_run 默认 True，生产必须显式传 dry_run=false，否则只推 inbox 不关机
    - 返回 {success, task_id, trigger_count, shutdown_scheduled, dry_run, screenshot_path, cancel_command}
 
 4. 用户反悔 → 调 POST /auto_shutdown/cancel
@@ -92,7 +132,7 @@ task_type: adhoc.auto_shutdown
   "task_id": "game_afk_20260803",  // 必填，截屏目录隔离用
   "reason": "游戏完成",             // 可选，默认 ""
   "screenshot": true,               // 可选，默认 true（关机瞬间截屏存档）
-  "dry_run": false                  // 可选，默认 false（true 跳过 shutdown 调用，测试用）
+  "dry_run": false                  // 可选，⚠️ 默认 True（T04 安全优先：不显式传 false 就不会真关机，只推 inbox）
 }
 ```
 
@@ -112,7 +152,7 @@ task_type: adhoc.auto_shutdown
 ### POST /auto_shutdown/cancel
 
 ```json
-{"dry_run": false}  // 可选，默认 false
+{"dry_run": false}  // 可选，⚠️ 默认 True（同 trigger，T04 安全优先）
 ```
 
 返回：
@@ -219,10 +259,20 @@ while not flag_file.exists():
 6. **inbox 失败正常**：用户睡前 inbox 不重要，关机本身重要
 7. **trigger_count 不持久化**：后端重启归零，inbox 有历史记录可查
 
+## 排查：「inbox 有关机条目但实际没关机」（2026-09-22 实战）
+
+inbox 条目标题恒为「关机已触发」，**即使 dry_run=True 也一样**（inbox 推送在 dry_run 分支之前）——标题不可信，要查 payload：
+
+1. **查 payload 的 `dry_run`**：只读查 `data/inbox.db`（表 `inbox_items`，SQLite，`?mode=ro` 打开）。`dry_run: true` ⇒ 端点根本没执行 shutdown 命令（设计如此，T04 安全网）。
+2. **查 `temp/auto_shutdown/*.log`**：watchdog 探针脚本（如 `workspace/windows_forensics/tools/probes/mem_watch.py`）自己落日志。真触发被拒的签名：`TRIGGER FAILED HTTPError: HTTP Error 403: Forbidden`。
+3. **403 = 关机权限未激活**：端点 T19 权限检查 `SessionManager.can_shutdown()`，需 **watchdog 模式 + 勾选允许关机**（`shutdown_permitted=True`）才放行。过夜无人值守时若没先开审批面板授权，必然 403 fail-closed。403 发生在 inbox 推送之前 ⇒ 权限被拒时**连 inbox 条目都不会有**。
+4. **交叉验证真没关过机**：`wevtutil qe System "/q:*[System[(EventID=1074)]]" /rd:true /f:text`（只读查 1074 关机发起事件，时间为 UTC，本地 +8）。真执行过 `shutdown /s /t 120` 一定有 User32 1074 事件。
+5. **探针脚本自身缺陷要补**：单发即退脚本触发失败后就退出（不重试、不推送告警）⇒ 无人值守场景会静默失效。已修正：见 `workspace/windows_forensics/tools/probes/mem_watch.py`（预检权限 + 重试 + 告警文件 + inbox 推送）。
+
 ## 看门狗模式联动（自然行为，不单独 spec）
 
-- agent loop 跑 screen 操作前，应确认看门狗授权 active（调 `/screen/grant/status`）
-- agent 每次 screen 操作成功会自动续期看门狗授权
+- 看门狗授权的申请/查询端点：`POST /screen/control/request`（申请，mode="watchdog"）/ `GET /health` 的 `screen.takeover_persistent`（查询 mode/shutdown_permitted/max_duration_seconds）。~~`/screen/grant/status`~~ 端点不存在，是过时引用；`GET /screen/status` 也不含会话权限字段
+- agent 每次 screen 操作成功会自动续期看门狗授权（仅对 idle 计时；**watchdog 的 max_duration 硬上限不因续期重置**，到点照样降级）
 - 用户撤销看门狗授权 → agent 下次 screen 操作被拒 → agent 应识别此信号并停止 / 询问用户
 - agent 触发关机时，看门狗授权自然失效（系统关机），无需显式撤销
 

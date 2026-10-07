@@ -17,6 +17,7 @@
 """
 
 import base64
+import inspect
 import io
 import logging
 
@@ -25,13 +26,14 @@ import logging
 import time
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 logger = logging.getLogger("localagent.screen")
 router = APIRouter(prefix="/screen", tags=["Screen"])
 
 
 # ========== 子模块 re-export（供 routes 端点 + 端点模块通过 routes.X 访问，兼容 monkeypatch）==========
+from lib.agent_identity import get_caller_id  # noqa: E402
 from lib.schema import BaseSchema  # noqa: E402
 from server.screen.capture import (  # noqa: E402,F401
     _capture_fullscreen,
@@ -113,14 +115,23 @@ _COORDINATE_ACTIONS = frozenset({"click", "double_click", "right_click", "scroll
 # ========== 接管确认（takeover confirm） ==========
 
 def _ensure_takeover_approved(screen_cfg: dict, task_description: str | None) -> tuple[bool, str]:
-    """顶栏未显示时弹"接管确认"窗口，询问用户是否允许 agent 接管键鼠操作。
+    """接管确认（takeover confirm）——**纵深防御兜底**，不是授权入口。
 
-    评估文档外的新增保护：agent 调用争夺输入的端点前，若 overlay 未显示，
-    必须先弹窗征求用户同意（30s 超时，超时行为可配置）。
+    评估文档外的新增保护：agent 调用争夺输入的端点前，若顶栏未显示，
+    先弹窗征求用户同意（30s 超时，超时行为可配置）。
+
+    ⚠️ 现实行路径（2026-09-30 核对）：**每个**副作用端点 handler 都在同一 handler 里
+    先调 `_enforce_session_permission()`，无授权直接 403，进不到这里（把关清单不手写，
+    见 `gated_side_effect_operations()`，`/health` 的
+    `screen.takeover_confirm.protected_endpoints` 即其结果）；能进来时
+    `session.is_active()` 必然成立，于是下面的 `return True, ""` 就是出口，弹窗与 grant
+    分支只在"未来某端点漏掉 403 检查"或两次调用之间授权到期的竞态下才会走到。
+    唯一的授权入口是 `POST /screen/control/request`（`screen_request_control`）。
+    watchdog 的"不弹窗"也在这一行实现：会话 active（含 watchdog）直接放行。
 
     Returns:
         (approved, reason)
-        - approved=True：顶栏已显示或用户允许或超时 proceed
+        - approved=True：已授权 / 顶栏已显示 / 用户允许 / 超时 proceed
         - approved=False：用户拒绝 / 超时 cancel / GUI 异常（fail-closed）
         - reason：用户反馈 / 超时原因 / 错误信息（approved=True 时也可能非空，如"timeout_auto_proceed"）
     """
@@ -136,13 +147,9 @@ def _ensure_takeover_approved(screen_cfg: dict, task_description: str | None) ->
         logger.warning(f"takeover confirm: overlay/session 模块导入失败，fail-closed 取消: {e}")
         return False, f"GUI 模块不可用: {e}"
 
-    # 当前任务授权短路。活动时间只在成功投递后更新，不在 gate 阶段更新。
+    # 活动时间只在成功投递后更新，不在 gate 阶段更新。
     session = get_session_manager()
     if session.is_active():
-        return True, ""
-
-    # watchdog 模式短路：用户显式开启看门狗模式 = 强授权，takeover_confirm 弹窗无意义（用户不在场）
-    if session.status().get("mode") == "watchdog":
         return True, ""
 
     if overlay_client.overlay_visible:
@@ -226,8 +233,9 @@ def _touch_task_authorization_after_delivery(
 def _enforce_session_permission() -> dict:
     """副作用端点权限检查：无权限时 raise 403。
 
-    副作用端点（execute_action / batch_actions / desktop_transaction /
-    screen_semantic_action / focus_window / screen_window_*）开头调用此函数。
+    由各副作用端点 handler 在**开头**调用，因此这些端点在没有授权时根本执行不到
+    弹窗逻辑。实际把关清单不在这里维护，由 `gated_side_effect_operations()` 从路由表
+    现场扫描得出（`/health` 的 `screen.takeover_confirm.protected_endpoints` 即其结果）。
     只读端点不调用（无权限下正常执行，但会调 SessionManager.extend() 重置 idle）。
 
     Returns:
@@ -249,6 +257,27 @@ def _enforce_session_permission() -> dict:
             },
         )
     return session.status()
+
+
+def gated_side_effect_operations() -> list[str]:
+    """扫描路由表，列出 handler 开头真的调用了 `_enforce_session_permission()` 的端点。
+
+    改成现场推导的原因：手写清单已经两次和事实不符——`server/screen/session/modes.py`
+    里的 `ENDPOINTS_SIDE_EFFECT`/`ENDPOINTS_READONLY` 全仓零消费且漏掉了剪贴板读写与
+    scroll_capture（本次已删除），`/health` 的 `protected_endpoints` 则硬编码了 4 项。
+    """
+    gated: set[str] = set()
+    for route in router.routes:
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is None:
+            continue
+        try:
+            source = inspect.getsource(endpoint)
+        except (OSError, TypeError):  # 动态注册或拿不到源码的 callable
+            continue
+        if "_enforce_session_permission(" in source:
+            gated.add(getattr(route, "operation_id", None) or getattr(route, "path", ""))
+    return sorted(gated)
 
 
 def _session_mode() -> str:
@@ -295,6 +324,9 @@ class ControlRequest(BaseSchema):
     source: str = "agent"
     mode: str = "normal"  # "normal" | "watchdog"；watchdog 模式不因空闲撤销，硬上限到期降级到 normal
     max_duration_hours: int | None = None  # watchdog 时长（小时），范围 [watchdog_min_hours, watchdog_max_hours]；None 用默认值
+    needs_shutdown: bool = False  # 任务需要关机权限；仅 mode="watchdog" 有意义（normal 无关机位）
+    # 会话已是 watchdog 但用户当初没勾"允许关机"时，带此参数属于权限升级→会重新弹窗，
+    # 不必先 release（平级/低权限请求仍短路成 skipped，不改现有授权）
 
 
 class ControlResponse(BaseSchema):
@@ -308,15 +340,22 @@ class ControlResponse(BaseSchema):
     requested_mode: str = "normal"  # agent 请求的模式（"normal" | "watchdog"）
     mode: str = "normal"  # 用户实际授权的模式（"normal" | "watchdog"）；可能因用户未勾选 watchdog 而从 requested_mode 降级
     max_duration_seconds: float | None = None
+    # True = 本次没有新的用户批准，沿用了已有授权（内部 status=="skipped"）；
+    # 曾只能靠 message 文本区分"新批准/沿用"，agent 无法机器判断
+    reused_approval: bool = False
     task_authorization: dict = {}
 
 
 @router.post("/control/request", response_model=ControlResponse, operation_id="screen_request_control")
-def screen_request_control(req: ControlRequest):
+def screen_request_control(req: ControlRequest, request: Request):
     """Request user-mediated current-task authorization.
 
-    mode="watchdog" 时弹窗显示看门狗复选框（默认不勾，用户主动勾选才授权 watchdog）。
-    服务端以用户实际选择为准：agent 请求 watchdog 但用户未勾选 → 返回 mode="normal" + status="mode_downgraded"。
+    mode="watchdog" 时弹窗显示看门狗控件（时长 spinbox + "允许关机"复选框，复选框默认勾选）。
+    服务端以用户实际选择为准：agent 请求 watchdog 但用户点拒绝 → 返回 status="cancelled"。
+    needs_shutdown=True 时，"会话已是 watchdog 但缺关机位"算权限升级，会重新弹窗；
+    平级/低权限的重复请求短路成 status="skipped"，不改现有授权；
+    短路时对外 status 仍是 "authorized"（描述会话结果），是否沿用旧授权看
+    reused_approval=True——它是"这次有没有新的用户批准"的机器可读判据。
     """
     from server.config import get_screen_config
     from server.core.health import invalidate_health_cache
@@ -350,6 +389,8 @@ def screen_request_control(req: ControlRequest):
         force_prompt=True,
         source=req.source,
         requested_mode=req.mode,
+        needs_shutdown=req.needs_shutdown,
+        max_duration_hours=req.max_duration_hours,
     )
     approved = result.get("status") in {"confirmed", "skipped"}
     authorized_mode = result.get("authorized_mode", "normal")
@@ -362,9 +403,18 @@ def screen_request_control(req: ControlRequest):
             max_hours = int(screen_cfg.get("watchdog_default_hours", 10))
         # SessionManager.grant 内部会 clamp 到 [min, max]，此处仅传值
         max_duration_seconds = float(max_hours * 3600)
-    # 决策 17：agent 调 request = 显式请求新授权，总是覆盖现有授权
-    # （支持 normal→watchdog 升级、task_description 更改、idle 计时重置）
-    if approved and result.get("task_authorization"):
+    # 决策 17（2026-09-30 修订）：request 只有在用户真的在新弹窗里做了选择
+    # （status=="confirmed"）时才覆盖现有授权，从而支持 normal→watchdog 升级、
+    # task_description 更改与 idle 计时重置。
+    # status=="skipped" 表示会话已 active、弹窗根本没出现（overlay_client.py 的
+    # ensure_takeover_approved 在 session.is_active() 处短路），此时没有任何新决策，
+    # 不得 grant——grant() 会整体替换 SessionState，等于把一个低权限的重复请求
+    # 变成降级操作：擦掉用户勾选的 shutdown_permitted、重置 watchdog 的 10h 硬上限
+    # 时钟、并把 task_description 改写成脚本那句。
+    # 2026-09-30 异环夜采实测：睡前批准的 watchdog+允许关机被采集脚本自己的
+    # /screen/control/request 抹成 shutdown_permitted=False，导致
+    # /auto_shutdown/trigger 返回 403 shutdown_not_permitted。
+    if approved and result.get("status") == "confirmed" and result.get("task_authorization"):
         if authorized_mode == "watchdog":
             # 弹窗返回的 max_duration_hours / shutdown_permitted 优先；
             # 弹窗未返回时 fallback 到 agent 请求参数
@@ -381,12 +431,14 @@ def screen_request_control(req: ControlRequest):
                 source=req.source,
                 max_duration_hours=watchdog_max_hours,
                 shutdown_permitted=bool(result.get("shutdown_permitted", False)),
+                owner=get_caller_id(request.headers),
             )
         else:
             session.grant(
                 mode=SessionMode.NORMAL,
                 task_description=task_description,
                 source=req.source,
+                owner=get_caller_id(request.headers),
             )
     authorization = session.status()
     invalidate_health_cache()
@@ -428,12 +480,20 @@ def screen_request_control(req: ControlRequest):
         mode=authorization.get("mode", authorized_mode),
         max_duration_seconds=authorization.get("max_duration_seconds"),
         status=status,
+        reused_approval=result.get("status") == "skipped",
         user_reason=user_reason,  # ISSUE-004：成功路径也返回用户反馈
         task_authorization=authorization,
         message=(
-            "当前任务授权已开启"
-            if authorization["active"]
-            else "已允许本次接管，未开启当前任务授权"
+            (
+                "沿用现有授权（未重新弹窗，权限未变更）；"
+                "需要升级权限（如补申请允许关机）请带 mode=\"watchdog\" + needs_shutdown=true 重新请求"
+            )
+            if result.get("status") == "skipped"
+            else (
+                "当前任务授权已开启"
+                if authorization["active"]
+                else "已允许本次接管，未开启当前任务授权"
+            )
         ),
     )
 

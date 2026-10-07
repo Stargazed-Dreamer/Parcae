@@ -6,42 +6,71 @@
 
 <!-- 由 tools/release/engine/history.py 维护,请勿手工编辑 -->
 
-## 0.49.0
-- 自上次发布以来:私有仓库 **47 个 commit**(起点 2026-09-17)
+## 0.53.0
+- 自上次发布以来:私有仓库 **193 个 commit**(起点 2026-09-20)
 - 主要更改:
-  - HCI VM：收下真机投递包（144/144 逐字节复验）+ 定位并修复「无 GPU 机器 OCR 准入被永久卡死」（`config.toml` 两键 + `jsd_research/VM_BOOTSTRAP.md` 新增 §1.1/§1.2 + `docs/environment-constraints.md` 新增专节）
-  - homework 引入两层 profile：新增本机覆盖层 `profile.local.toml` + 统一解析器 `tools/hw_profile.py`
-  - SpaceSniffer 复刻：`.sns` 快照的 squarified treemap 浏览器（`tools/spacesniffer/`，PySide6 GUI）
-  - 新增 `.agents/skills/browser_lessons/sites/wjx-cn.md`（问卷星站点经验档）
-  - 新增 `workspace/ai_club_recruit/tools/export_png.py`：海报 HTML → 两档交付 PNG，交付图明确不入库
-  - 新增 `workspace/ai_club_recruit/` 工作区：2026 秋季招新的架构口径（真源）+ 对外物料立册
-  - `workspace/homework/tools/video_mcp/`：homework 自有 MCP 视频帧服务独立入库 + MCP 注册说明 + jsd 工具登记
-  - 新增 `tools/network/wifi_adapter_repair.bat`（无线网卡掉线一键修复，桌面副本 `WiFi网卡修复.bat`）+ `bat_writing` skill 补 4 条实测坑
-  - x_video_dl 下载账本去重（`tools/x_video_dl.py` + 输出目录下 `download_manifest.json`）
-  - 新增 `doc.weflow.top`（《微信相关技术研究笔记》）全站归档能力：WARC + 离线镜像 + 单文件 + Markdown 四形态留档（一次性脚本 `extract_weflow_doc.py` + `dev/verify_weflow_doc_browser.py` 已在同一轮按用户决策回收，见 Removed；归档产物保留在 `workspace/web_archive/weflow/`，方法学沉淀在 `SKILL.md` 专节）
-  - gh_mirror 初始化支持 clone 加速前缀 `GH_MIRROR_CLONE_PROXY`（`workspace/gh_mirror/gh_mirror_init.py` 新增 `resolve_clone_url()`）
-  - 重型依赖 extras 化（D2 路径 B）：20 个直接依赖移入 `[project.optional-dependencies]` 5 个能力组，主依赖降至 28 项
-  - public 仓部署说明改造：四阶段渐进式部署 + 三份文档口径统一 + 5 个发布 gate 缺陷
-  - `chat_digest` 把"选档位"前置为开工第一问，并把三份提示词抄录入库（`workspace/chat_digest/SKILL.md` + `prompts/`）
-  - `extract_feishu.py` 补 `quote_container`（引用容器）渲染分支 + 飞书游客态知识库接口定性（`workspace/web_archive/extract_feishu.py` + `SKILL.md` + `browser_lessons/sites/feishu.cn.md`）
-  - 远程 VL 默认模型换成 `Qwen/Qwen3.5-35B-A3B`，并把"魔搭会下架模型 ID"固化进文档（`AGENTS.md` + `docs/environment-constraints.md` + `docs/llm-pool.md` + `docs/mcp-reference.md` + `docs/computer-use-reference.md` + `docs/deployment.md` + `.agents/skills/ocr.md` + `browser_lessons/sites/modelscope-cn.md`）
-  - `web_archive` 工作区目录整改 + 立规矩（`workspace/web_archive/`，14 个文件位移 + `.gitignore`/`manifest.toml`/`SKILL.md` 同步）
-  - weflow 归档迁入仓库内
-  - `manifest.toml` 修两条真实漂移
-  - 消除机器绝对路径
-  - `SKILL.md` 新增「目录布局与维护规矩」章节
-  - 验证：显式 `uv run pyright workspace/web_archive/*.py dev/*.py` 仅 3 条既有 `wechat_decod
-  - `AGENTS.md`「磁盘清理规则」补回收站失败定位方法论
-  - 依赖映射表/审计报告停止进发布包，生成落点改 `temp/release_deps/`（`tools/release/generate_dependency_map.py` + `tools/release/audit_dependencies.py` + `release/audience/friend.toml`/`public.toml`）
-  - `friend-full` 发布线（打包 ZIP 分发给朋友）整体移除
-  - 两份依赖生成物退出版本跟踪（`release/dependency_map.toml` 9,878 B + `release/dependency_audit.json` 72,088 B，`git rm --cached` + 工作树副本送回收站）
-  - 回收 `web_archive` weflow 一次性归档脚本（`workspace/web_archive/extract_weflow_doc.py` 39,731 B + `workspace/web_archive/dev/verify_weflow_doc_browser.py` 11,225 B 送回收站）
-  - `web_archive` 两份个人 URL 清单退出版本跟踪（`git rm --cached` + `.gitignore` 新增 `inputs/urls_wechat_source.json`）
-  - 公开部署说明的轻量安装清单有误：把 `pyside6` 当可选项排除（`docs/deployment.md` + `README_public.md` + `tools/release/templates/DEPLOYMENT.md.j2`）
-  - `browser_write_lesson` 同一站点被写成两份档案（`server/browser/site_lessons.py`）+ 清理既有重复 `sites/scnu-edu-cn.md`
-  - browser_lessons 站点索引补同步 + 站点索引用简写路径易被误读（`.agents/skills/browser_lessons/references/site_index.md` + `AGENTS.md` + `docs/operations-manual.md`）
-  - `chat_digest/digest_room.py`：`--room` 传完整 `@chatroom` ID 会"无匹配"，修掉群名互为子串时的选群歧义（`resolve_room()`）
-  - `fix_bat_encoding.py` 的 `--enc` 值被当成输出路径，`--inplace --enc utf8` 会在项目根写出名为 `utf8` 的文件而源文件不动（`.agents/skills/bat_writing/scripts/fix_bat_encoding.py`）
-  - gh_mirror 首次初始化必定失败：`work_root` 从未创建导致磁盘检查抛 WinError 3（`workspace/gh_mirror/gh_mirror_init.py`）
-  - public-full path_mapping 补 clash_verge 安装路径映射（`release/profiles/public-full.toml`）
-  - release 编排增量发布锚定死锁修复（`tools/release/cli.py` + `tools/release/engine/triage.py`）
+  - chat_digest 的 v4 同步换成 mtime 增量快路径
+  - `ask_user` 从"清单里有但从没接线"变成会话时间线里的一张交互卡片
+  - 压缩判据改成「上一次调用的真实 prompt_tokens + 之后新增消息的字符增量」，上下文上限来自 keys.json 的 model 级 `context_window`，没填就报"上限未知"且不判压缩
+  - 死链闸门 C6 上闸：在用文档面引用的仓库内路径必须解析得到，存量走机器扫出的基线名单
+  - 祖先链那一格是本轮实测纠的自己的错
+  - 名单不是橡皮图章
+  - 摘改矩阵抓到一个真缺口
+  - ⚠️ **洗存量这一档没做完，而且比想象的贵**：49 条按「同名文件能否查得」分档 = 18 条有唯一同名目标 / 9 条多目标 / 22 条磁盘上根本没有。
+  - 作废一条混口径记录：账本原写「148 条中 75 条不可解析」——分子取自 commit `674893a` 的 docs 口径（当时死链 32），分母 75
+  - VL Ticket 04：两级状态视图 + `POST /vision/reset`，聚合判据补上"整条 key 的模型当日全判死"
+  - `POST /headless/sessions`：直连创建一个 headless 会话，不必再绕 LoopManager
+  - Ticket 02(a) 正式裁决：5xx 连败计数与冷却保持 key 级连坐，代价改成看得见的
+  - 异环采集器把"要人复核的稀有度"从一句话升级成一份可查证据（裁片 + 索引落盘）
+  - VL 降级链的「同 token 串行」守卫单测 D8（Ticket 02 的"不得放松"项）
+  - `(key_id, model)` 级「今日永久失效」标记：死模型不再每轮重新烧一遍
+  - migrate_changelog 归档完自动复跑一次发布口径扫描，HIGH 复活当场拦下
+  - gate 账本三方一致性闸门 `tests/release_ci/test_gate_ledger_consistency.py`
+  - 内核对象不回收：新增两支只读探针，并按 `report/根因测试路线_20261005.md` 完成阶段 0—2 交付
+  - gh_mirror「添加跟踪」的默认流程改成 Actions 服务器端导入 + 前置检查，本地零下载
+  - gh_mirror 的 6 个新导入仓补齐 `release-backup.yml`，44 个 enabled 仓实现全覆盖
+  - gh_mirror 新增跟踪仓 `NapNeko/NapCatQQ`，并把 release-backup 铺满全部 38 仓
+  - release 备份新增范围限制 `--since-days` / `--limit`，可按仓配置、手动可覆盖
+  - release 稀疏清理的完整考量归档为可重启的计划
+  - 远程 VL 的"死模型"处置：400/404/422 判永久失败、同 key 换下一个模型、响应体进日志
+  - gh_mirror 远端 workflow 漂移体检（只读）
+  - 记忆召回判卷标注器，把"该读到哪几条"交给人判
+  - chat_digest 常驻「引用↔编号」校验器 `workspace/chat_digest/verify_quotes.py`
+  - 构建期 gate `no-key-startup` 改名 `compile-check`，并去掉"只取前 200 个 `.py`"的静默上限
+  - video_digest 的 STT 后端正式从 whisper 切到 r2t2_stt，新增默认驱动桥 `r2t2_bridge.py`
+  - 整批一次装载
+  - SRT 地板按片长取档，两档都是本机实测
+  - ⚠️ **机制没有定案，别再写成因果**：昨天把"崩"归因到"越物理上限 → `cudaFree` 归零 → 每步在零空闲设备上申请 → 慢 10–40 倍"。
+  - SRT 会丢内容，缺口不等于静音
+  - 片长默认取上游常量 `ALIGNER_INTERNAL_CHUNK_SEC`（180s），一片正好对应 aligner 内部一块；片尾短于 5s 并进前一片——
+  - 时间戳这一档禁止任何形式的自动决定
+  - 幂等 no-op 不再被显存守卫误拒
+  - SKILL 里两条今天已失效的论断删除：「`STT_PY` 仍指向 whisper」、「每片一个新进程 + `load()` 后 dummy 预分配可解挂死」。
+  - 验证全部实跑：`uv run pyright` 显式对 6 个文件 **0 错**（`workspace/` 不在仓库级 include 内）；30s 样本 T
+  - gh_mirror「这个仓是否已下发」改成运行时判定，手抄的 `PILOT_DONE` 废除
+  - 记忆维护告警改为存储级周带去重，并堵住测试往真库写告警
+  - 记忆库最后 4 条 NULL 类型收口：三条定性 + 一条精简保留 + 一条拆包
+  - 记忆索引标题的最后一档兜底不再上屏 JSON，改为顶层字段名清单
+  - 四条过期记忆全洗：正文只留判据与指路，带日期的快照退回真源
+  - 补洗 3 条"轻形态信封"fact，并把"宁可少洗"的尾账关死
+  - `fact_type` 为空的存量收口：前缀即类型的补标，说不清的留成清单
+  - GPU 采样改成常驻 NVML 会话，新增进程内资源采样中枢 `server/resource_probe/`（消灭"每 5 秒起一个进程"）
+  - 存量记忆标签按 v5 判据全量重判（洗存量那一档，2026-10-04）
+  - 记忆索引标题不再把元数据信封整坨 JSON 打上屏（`server/memory/manager.py`）
+  - 补记（2026-10-05，重启后实测）
+  - loop catchup 扫完无条件留一行计数，「没活可干」与「这段代码没跑到」不再同形
+  - 占位小时会被回头补跑了，失败收件箱也不再写「错误: unknown」
+  - chat_digest：完整群 ID 在通讯录快照里查不到时放行，不再 `exit(1)`
+  - 两条"报出来的问题"实测后各修一半：GPU 降级三键补进模板、wx4py 的 notes 与现实对齐
+  - 「GitHub 连不上」的口径纠偏：被挡的是端口不是整台主机；本机现场改成一步实测而非文档快照
+  - `watchlist.json` 把非持仓标的标成「持仓」：000630 降级为监控
+  - `max_db_size_mb` 僵尸配置摘除
+  - 两个新镜像仓首同步失败的真因：workflow 侧从不 `git lfs fetch`（UnityPy）+ GitHub 单次 push 2 GiB 上限（Ark-Models）
+  - ① mirror-UnityPy
+  - ② mirror-Ark-Models
+  - `release-backup.yml` 的"每三周"闸门从来没有生效
+  - 无 NVIDIA 卡机器的模型准入死锁（`awaiting_first_sample` 永久 503）随采样改造一并解除
+  - `daily_summarize` 补显式 `timeout=300`（`server/activity_tracker/loop_actions.py`）
+  - `workspace/recorder/tests/test_recorder_gui.py` 的 pyright 存量 5 条清零
+  - homework 路由 keywords 补流程动词，实测把三句落空的原话拉回强匹配
+  - 脱敏规则「活性」闸门 `tests/release_ci/test_rule_liveness.py`

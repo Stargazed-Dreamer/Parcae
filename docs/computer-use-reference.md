@@ -8,7 +8,7 @@
 
 | 接口 | operation_id | 用途 |
 |------|--------------|------|
-| `POST /screen/control/request` | `screen_request_control` | 弹出用户确认窗，请求本次接管及可选的当前任务授权（agent 在请求时指定 `mode=normal` 或 `mode=watchdog`，用户只能允许/拒绝不能改模式） |
+| `POST /screen/control/request` | `screen_request_control` | 唯一的授权入口：弹用户确认窗，按 agent 请求的 `mode=normal`/`mode=watchdog` 请求授权（决策 17：用户只能允许/拒绝，不能改模式；点"允许接管"即授予该模式，不存在"只允许本次"的勾选框） |
 | `POST /screen/control/release` | `screen_release_control` | 主动收回当前任务授权，隐藏授权覆盖层并停止 worker |
 
 请求示例：
@@ -37,16 +37,27 @@
 
 **降级链**：`WATCHDOG → NORMAL → NO_PERMISSION`。每次降级发布 `transition` 事件，OverlayClient 据此刷新 UI 颜色和倒计时格式。**反向升级**需用户重新授权（agent 调 `screen_request_control` 触发新弹窗）。
 
+**`screen_request_control` 只在"新批准"时改状态（2026-09-30 修订）**：routes 只对 `status=="confirmed"`（确认窗真的出现过、用户点了允许）执行 `grant`。会话已 active 时的平级/低权限重复请求走 `status=="skipped"`，此时**不动任何状态**——`shutdown_permitted`、watchdog 的 10h 硬上限时钟、`task_description` 全部原样保留。修订前 `skipped` 也会被重新 grant，而 `ensure_takeover_approved` 的 skipped 字典里 `shutdown_permitted` 是写死的 `False`（现已改为如实回填现值），于是脚本自己的一句 request 就能把用户睡前勾选的关机权限擦掉（`/auto_shutdown/trigger` 随后 403 `shutdown_permitted=false`）。对外响应体用 **`reused_approval`** 字段区分两种情形（`True`=沿用旧授权、没有新的用户批准；`False`=弹窗里真的做了新批准）——对外 `status` 仍描述会话结果（`"authorized"`），不暴露内部 `skipped`。
+
+**关机位是可升级维度（`needs_shutdown`，2026-09-30 二次修订）**：`screen_request_control(mode="watchdog", needs_shutdown=true)` 在"会话已是 watchdog 但用户当初没勾允许关机"时被判为**权限升级**，会弹第二次确认窗，用户在窗里勾选"允许关机"后 `shutdown_permitted` 才落进 session——不需要先 `screen_release_control` 把已批准的 watchdog 一起丢掉。判据只看"缺什么"：什么都不缺（已经是 watchdog+关机位）就继续 `skipped`，不会骚扰用户；`needs_shutdown` 只在 `mode="watchdog"` 时有意义（关机位只存在于 watchdog，`SessionManager.grant` 对 normal 恒置 `False`），normal 会话带这个参数仍走 `skipped`，不会弹一个"用户无从勾选关机"的窗。⚠️ 升级要用户重新点一次窗，代价是这次 `grant` 会按弹窗里的时长**重建** watchdog 硬上限时钟（`granted_at` 重置）——它不是无损补一个位。
+
+**升级判据只有一个真源：`SessionManager.needs_new_approval(requested_mode, needs_shutdown)`**。`OverlayClient.ensure_takeover_approved` 的 skipped 短路与根 `conftest.py` 的测试替身都调它，不再各自抄一遍条件——同一条规则写两处（生产 + 替身）而其中一处漂移，正是上一个 bug 藏五周的原因；把判据收在会话层也符合"渲染层不做权限判断"的分层（ADR-0011）。
+
 ### 状态机与续期
 
-- 所有副作用端点（`execute_action` / `focus_window` / `batch_actions` / `desktop_transaction` / `screen_semantic_action` / `scroll_capture` / `app_launch` / `window_minimize` / `window_restore` / `window_raise` / `window_close`）在 NORMAL/WATCHDOG 模式下免重复确认。
-- 危险/不可逆操作、窗口关闭和 `require_confirm=true` 仍逐次确认；block 类危险操作仍拒绝。
-- WATCHDOG 模式下 CONFIRM 级别操作仍弹窗（用户不在场=超时 deny=操作被阻止）。
+- 副作用端点在 NORMAL/WATCHDOG 模式下免重复确认。哪些端点被会话权限把关**不手写维护**：`/health` 的 `screen.takeover_confirm.protected_endpoints` 由 `routes.gated_side_effect_operations()` 现场扫描路由表得出（键鼠、focus、窗口操作、app_launch、剪贴板读写、scroll_capture、UIA 语义层等）。
+- **例外：`window_close` 每次都弹确认窗**（`lifecycle_endpoints.py:333` 无条件调 `_confirm_control_operation`），不受模式豁免——它是"关掉的窗口可能带着未保存数据"这一类不可逆动作。
+- BLOCK 级危险关键词永远拒绝；`require_confirm=true`（调用方显式或 normal 模式下的 CONFIRM 级）逐次确认。
+- WATCHDOG 模式下 `danger_level=confirm` 的动作**自动跳过弹窗**（[ADR-0026](adr/0026-watchdog-skip-danger-confirm.md)：授权看门狗即同意 confirm 范围内的动作）；调用方显式 `require_confirm=true` 仍弹窗，BLOCK 级危险关键词仍拦截。
+- ⚠️ 例外：`screen_window_close` 走 `_confirm_control_operation`（`lifecycle_endpoints.py`），**任何模式都无条件弹确认窗**——watchdog 的自动跳过对它不生效，用户不在场就是超时 deny。
 - 只有成功且 `delivery_status != leaked` 的控制投递调用 `extend()` 重置 idle 计时。
 - 只读、dry-run、blocked、cancelled、failed 与泄漏投递不续期。
 - release、task closure、紧急停止、shutdown 和 restart 都清除授权。
+- **唯一授权入口是 `POST /screen/control/request`**。`_ensure_takeover_approved`（takeover_confirm 闸门）是纵深防御兜底：所有副作用端点 handler 都在同一 handler 里**先**调 `_enforce_session_permission()`（清单见 `/health` 的 `screen.takeover_confirm.protected_endpoints`，现场扫描得出），无授权直接 403，因此"顶栏没显示就弹窗"这段在生产里走不到——别把它当成"没授权也会问我"的实际兜底。
+- **紧急停止（Ctrl+\`）的授权撤销是永久的**（reason=`emergency_stop`，必须让用户重新批准才能继续）；`emergency_cooldown_seconds`（默认 10 秒）只在那段时间内拒绝新操作。撤销动作若失败会记 ERROR 并尽力隐藏顶栏，不再静默 pass。
+- 空闲时长只有一个真源：`SessionManager` 的两阶段策略（`[screen] idle_warning_seconds` + `idle_grace_seconds`）。遗留键 `takeover_idle_timeout_seconds`（默认 300）与 `takeover_watchdog_max_duration_seconds`（默认 36000）**不再决定任何时限**，只作为 `/health` 的 `configured_*` 展示值保留；`/health` 的 `idle_timeout_seconds` 现按两阶段之和上报（watchdog 下为 0，表示不因空闲撤销）。
 
-`/health` 的兼容路径 `screen.takeover_persistent` 返回 `configured`、`active`、`mode`、`phase`、`task_description`、`source`、`granted_at`、`last_activity_at`、`expires_at`、`remaining_seconds`、`max_duration_seconds`、`shutdown_permitted`、`revoked_reason` 等结构化状态。旧 `persistent` 命名只为兼容，用户可见概念统一为"当前任务授权"。
+`/health` 的兼容路径 `screen.takeover_persistent` 返回 `configured`、`active`、`mode`、`phase`、`task_description`、`source`、`granted_at`、`last_activity_at`、`expires_at`、`remaining_seconds`、`max_duration_seconds`、`shutdown_permitted`、`idle_warning_seconds`、`idle_grace_seconds`、`idle_timeout_seconds`、`revoked_reason` 等结构化状态。旧 `persistent` 命名只为兼容，用户可见概念统一为"当前任务授权"。
 
 30 秒确认响应超时与 NORMAL 模式 30 分钟 idle 降级是两套独立计时器。确认超时默认 `cancel`，不会自行授权或执行操作。
 
@@ -56,7 +67,7 @@
 
 **开启方式**：
 
-- agent 调 `screen_request_control(mode="watchdog", task_description="...", source="agent", max_duration_hours=10)`
+- agent 调 `screen_request_control(mode="watchdog", task_description="...", source="agent", max_duration_hours=10)`；任务还要自动关机时额外带 `needs_shutdown=true`（弹窗里"允许关机"复选框默认勾选，用户取消勾选则不授权）。`max_duration_hours` 作为弹窗时长 spinbox 的**初值**下传，用户可上调；2026-09-30 之前该值没有传进弹窗，实际一律按用户没动的默认 10 小时授权。
 - GUI 面板"请求任务授权"按钮 → 勾选"看门狗模式"复选框
 
 **watchdog 模式 vs normal 模式差异**：
@@ -64,23 +75,23 @@
 | 维度 | normal 模式 | watchdog 模式 |
 |------|------------|---------------|
 | idle 降级 | 10min 告警 + 20min 降级到 NO_PERMISSION | **不生效**（agent 合理等待不被判定为空闲） |
-| takeover_confirm | 顶栏未显示时弹窗 | **禁用**（用户不在场，弹窗会阻塞） |
+| takeover_confirm | 会话已授权 → 静默放行（弹窗分支见"唯一授权入口"：无授权时端点先 403，弹不到） | 同左（watchdog 必然 active，直接放行） |
 | 硬上限 | 无 | **默认 10h 到期降级到 NORMAL**（config `takeover_watchdog_default_hours` 可调，1-999h 范围） |
-| require_confirm | safe 短路，CONFIRM 弹窗 | **不变**（safe 短路，CONFIRM 仍弹窗=超时 deny） |
+| require_confirm | safe 短路，CONFIRM 弹窗逐次确认 | **CONFIRM 自动跳过弹窗**（ADR-0026）；调用方显式 `require_confirm=true` 仍弹窗 |
 | DANGER_KEYWORDS_BLOCK | 拦截 | **不变**（永远拦截"关机/重启/格式化"等） |
 | EmergencyStop | Ctrl+` 撤销+冷却 | **不变**（用户随时可中断） |
 | shutdown_permitted | 始终 False | 用户在授权弹窗勾选（默认勾选）；不勾选时 `/auto_shutdown/trigger` 返回 403 |
 
 **撤销条件**（三重保障）：
 
-1. 用户主动撤销（GUI 按钮 / `screen_release_control` 端点），reason=`manual`
+1. 用户主动撤销：GUI 按钮 reason=`user_button` / agent 收尾 `screen_release_control` reason=`agent_release`
 2. 紧急停止触发（Ctrl+`），reason=`emergency_stop`
 3. 硬上限到期，reason=`max_duration_exceeded`（默认 10h，config 可调）——到期降级到 NORMAL 而非直接释放
 
 **关键约束**（spec §6 Anti-Cheat）：
 
 - **AFK 时必须 fail-closed**：用户不在场且遇到无法通过已授权、可观测、安全路径解决的问题时，立即停止并报告；不得绕过确认、放宽安全策略、切换未授权工具/通道、修改配置、无限重试或用替代动作"碰运气"。不确定是否安全时，一律按无法解决处理并放弃。
-- watchdog 模式**不豁免 CONFIRM 级别操作**（删除/支付/卸载等仍弹窗，用户不在场=超时 deny=操作被阻止）
+- watchdog 模式**会跳过 CONFIRM 级别弹窗**（删除/支付/卸载等 `danger_level=confirm` 的动作直接执行，[ADR-0026](adr/0026-watchdog-skip-danger-confirm.md)：授权看门狗=同意 confirm 范围内的动作）。所以 AFK 时**不能指望这道窗替你拦住手滑**——上面那条 fail-closed 纪律是唯一防线；调用方显式传 `require_confirm=true` 时两种模式都仍弹窗
 - watchdog 模式**不豁免 DANGER_KEYWORDS_BLOCK**（关机/重启/格式化等永远拦截）
 - watchdog 模式**不影响 command_guard**（exec_python/exec_cmd 的命令审批逻辑不变，agent 不能通过 exec_python 直接调 shutdown）
 - 关机走专门端点（`POST /auto_shutdown/trigger`，agent 自己跑 loop + 调端点，**不走 computer use**）；watchdog 模式未勾选"允许关机"时该端点返回 403
@@ -183,10 +194,10 @@ POST /screen/uia/action
 
 ### UIA 语义层使用前提
 
-UIA 语义层与键鼠操作共用同一套安全机制。`screen_semantic_action` 的 invoke/select/toggle 等动作**不经过 SendInput**，但仍然受 `takeover_confirm` 保护——顶栏 overlay 未显示时会弹窗确认。使用前应：
+UIA 语义层与键鼠操作共用同一套安全机制。`screen_semantic_action` 的 invoke/select/toggle 等动作**不经过 SendInput**，但同样先过 `_enforce_session_permission()`：无授权直接 403（`takeover_confirm` 那层弹窗在生产路径弹不到，见上方"唯一授权入口"）。使用前应：
 
 1. **管理员权限启动后端**（`start.bat` 自动 UAC 提权），否则 `focus_window` 无法激活窗口
-2. **先请求当前任务授权**（`screen_request_control`），由用户决定仅允许本次或勾选任务授权
+2. **先请求当前任务授权**（`screen_request_control`），用户在确认窗里点"允许接管"即授予 agent 请求的那一档模式（拒绝则什么也不改）
 3. **OCR 首次调用慢**（模型冷启动 15s+），预热后正常
 
 ### UIA vs 键鼠对比
@@ -723,7 +734,7 @@ uv run python -m server.main
 
 ## 历史经验留档（byr.pt 任务实测，2026-07-14）
 
-> 以下经验浓缩自一次 PT 站点保号+下载种子长任务的事后复盘。原 WIP `ux_issues_summary.md` 已删除，技术性经验（坐标/按键/截图/点击精度）已融入上文相应章节，此处仅保留未在其他章节体现的 agent 行为规范类教训。
+> 以下经验浓缩自一次 PT 站点保号+下载种子长任务的事后复盘，仅保留未在其他章节体现的 agent 行为规范类教训。
 
 ### 关键决策点必须询问用户
 

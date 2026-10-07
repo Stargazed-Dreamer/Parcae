@@ -266,7 +266,7 @@ def _evaluate(report: Report, d: dict) -> None:
 # --------------------------------------------------------------------------
 
 async def run(port: int) -> Report:
-    from playwright.async_api import async_playwright
+    from patchright.async_api import async_playwright
 
     report = Report()
     srv, echo_port = _start_echo_server()

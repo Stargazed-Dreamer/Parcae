@@ -23,8 +23,8 @@ apply_placeholders.py - 占位符自动替换脚本
 
 注意：
     <data_drive> 应传盘符字母（如 D），不要带冒号。导出包中占位符已含冒号
-    （如 <data_drive>:\\<data_drive>:\Documents），传 D 才能得到 D:\\<data_drive>:\Documents；若传 D: 会产生
-    D::\\<data_drive>:\Documents 双冒号异常路径，脚本会检测并报错退出。
+    （如 <data_drive>:/<data_drive>:\Documents），传 D 才能得到 <data_drive>:\Documents；若传 D: 会产生
+    D::/<data_drive>:\Documents 双冒号异常路径，脚本会检测并报错退出。
 
     占位符清单需与 release/profiles/public-full.toml 的
     [content_replacements] 规则（path_mapping / literal）保持同步。
@@ -69,9 +69,9 @@ PLACEHOLDERS = [
     {"placeholder": "<models_root>", "required": False,
      "prompt": "AI 模型存放目录 (例: <models_root>)"},
     {"placeholder": "<source_images_root>", "required": False,
-     "prompt": "图片源根目录 (例: <data_drive>:\Pictures\\collection)"},
+     "prompt": "图片源根目录 (例: Pictures\\collection)"},
     {"placeholder": "<classified_root>", "required": False,
-     "prompt": "已分类图片根目录 (例: <data_drive>:\Pictures\\classified)"},
+     "prompt": "已分类图片根目录 (例: Pictures\\classified)"},
     {"placeholder": "<image_organize_output>", "required": False,
      "prompt": "image_organizer 输出目录 (例: output\\image_organizer)"},
     {"placeholder": "<bilibili_videos>", "required": False,
@@ -98,6 +98,8 @@ PLACEHOLDERS = [
      "prompt": "B 站视频整理输出目录 (例: output\\bilibili_organized)"},
     {"placeholder": "<game_install_root>", "required": False,
      "prompt": "游戏安装根目录 (例: Games)"},
+    {"placeholder": "<vm_store>", "required": False,
+     "prompt": "虚拟机存放目录 (例: Virtual Machines)"},
     {"placeholder": "<copyright_holder>", "required": False,
      "prompt": "版权持有人名称 (例: Your-Name)"},
 ]

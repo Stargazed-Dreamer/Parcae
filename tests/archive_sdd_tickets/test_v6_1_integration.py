@@ -154,7 +154,7 @@ class TestToolResultVariantsAndBuiltin:
         file_read 路径安全 4 重校验限制在项目根目录内（spec D8.1），
         所以测试文件必须写到项目内 temp/ 下，不能用 pytest tmp_path（在用户 temp 目录）。
         """
-        # 用项目内 temp/html/ 目录（已被 .gitignore 排除，安全）
+        # 用项目内 temp/tests/ 目录（被 .gitignore 的 temp/* 兜住，安全）
         project_root = Path(__file__).resolve().parents[2]
         test_dir = project_root / "temp" / "tests"
         test_dir.mkdir(parents=True, exist_ok=True)
@@ -179,6 +179,7 @@ class TestToolResultVariantsAndBuiltin:
         finally:
             try:
                 test_file.unlink(missing_ok=True)
+                test_dir.rmdir()   # 只删自己建的空目录；并发会话还在用则非空，忽略即可
             except OSError:
                 pass
 

@@ -128,7 +128,12 @@ _BUILTIN_PARAMETERS: dict[str, dict] = {
             "questions": {
                 "type": "array",
                 "items": {"type": "object"},
-                "description": "问题列表（每个含 question/header/options 字段，必填）",
+                "description": (
+                    "问题列表（1-4 个，每个必填 question 字符串；可选 header 短标签、"
+                    "options（list[str] 或 [{label, description}]）、multiSelect 默认 false、"
+                    "allow_free_text 默认 true）。⚠️ 不接受 timeout 入参——等待时长只由"
+                    "config [runner] ask_user_timeout_secs 决定（0 = 永不超时）"
+                ),
             },
         },
         "required": ["questions"],
@@ -175,14 +180,17 @@ class BuiltinToolExecutor:
         self,
         *,
         base_url: str = "http://127.0.0.1:8766",
-        ask_callback: Callable[[list[dict]], list[dict]] | None = None,
+        ask_callback: Callable[[list[dict]], dict] | None = None,
         tool_specs: dict | None = None,
     ):
         """初始化内置工具集。
 
         Args:
             base_url: 后端 URL（web_search/web_fetch fallback 用）
-            ask_callback: GUI 注入的提问回调（同步阻塞，返回用户选择）
+            ask_callback: GUI 注入的提问回调（同步阻塞）。
+                契约见 `client/core/agent/builtin_tools/ask_user.py`：
+                返回 `{"outcome": str, "answers": list[dict]}`，
+                超时值只由 config `[runner] ask_user_timeout_secs` 决定，不在工具入参里。
             tool_specs: tool_specs.yaml 完整内容（含 builtin 段）。
                         None 时自动从默认路径加载。
         """

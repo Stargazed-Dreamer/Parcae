@@ -3,6 +3,7 @@
 初始化并协调三层记忆系统，提供全局单例。
 """
 
+import json
 import logging
 import threading
 from pathlib import Path
@@ -20,6 +21,65 @@ from server.memory.semantic import SemanticSearch
 from server.memory.store import MemoryStore
 
 logger = logging.getLogger(__name__)
+
+# 记忆索引标题的取值顺序：信封里的标题字段 → 正文首行 → 顶层字段名清单 → 原始截断
+_TITLE_FIELDS = ("name", "description", "title", "summary")
+_BODY_FIELDS = ("content", "text", "lesson", "note", "conclusion")
+# 只用于"这条记忆长得像信封"的判断：这些键不构成可读标题，也不该出现在字段名清单里
+_ENVELOPE_KEYS = frozenset({
+    "source", "updated_at", "created_at", "access_count", "confidence", "mentioned_at",
+    "fact_type", "consumption_contexts", "trigger_keywords", "source_task", "type", "date",
+    "key", "value",
+})
+_MAX_SUMMARY_CHARS = 120
+
+
+def _structured_shape(parsed: dict) -> str:
+    """顶层只有嵌套 dict/list（没有任何字符串标题/正文）时，用字段名清单代替 JSON 前缀。
+
+    真库实测这类有 36 条（`preferences`、`stock_advisor` 这种业务键），旧兜底是
+    `value[:120]`，上屏就是 `{"stock_review_output": {"no_html": true, "format":`。
+    """
+    names = [k for k in parsed if isinstance(k, str) and k not in _ENVELOPE_KEYS]
+    if not names and isinstance(parsed.get("value"), dict):
+        # 双层信封 {"key": ..., "value": {...}}：内层才是内容
+        names = [k for k in parsed["value"] if isinstance(k, str)]
+    if not names:
+        return ""
+    head = "、".join(names[:3])
+    more = f"…共 {len(names)} 项" if len(names) > 3 else ""
+    return f"（结构化：{head}{more}）"[:_MAX_SUMMARY_CHARS]
+
+
+def index_summary_from_value(value: str) -> str:
+    """把 facts.value 压成一行可读标题，供 agent_guide 的【必读记忆】清单上屏。
+
+    直接 `value[:80]` 会把 `{"source": "manual", "content": "## 现象..."}` 这类
+    元数据信封整坨 JSON 打到屏幕上，同清单里别的条目却是人话标题，读者无法对齐。
+    取值顺序：标题字段 → 正文首行 → 顶层字段名清单 → 非 JSON 才原样截断。
+    """
+    if not value:
+        return ""
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return value[:_MAX_SUMMARY_CHARS]
+    if not isinstance(parsed, dict):
+        return value[:_MAX_SUMMARY_CHARS]
+    for field in _TITLE_FIELDS:
+        got = parsed.get(field)
+        if isinstance(got, str) and got.strip():
+            return got.strip()[:_MAX_SUMMARY_CHARS]
+    for field in _BODY_FIELDS:
+        got = parsed.get(field)
+        if not isinstance(got, str):
+            continue
+        for line in got.splitlines():
+            line = line.strip().lstrip("#").strip()
+            if line:
+                return line[:_MAX_SUMMARY_CHARS]
+    return _structured_shape(parsed)
+
 
 # 全局单例
 _instance: Optional["MemoryManager"] = None
@@ -69,6 +129,8 @@ class MemoryManager:
             vector_top_k=self.config.vector_top_k,  # 设置向量搜索的top_k值
             bm25_top_k=self.config.bm25_top_k,  # 设置BM25搜索的top_k值
             tracer=self.search_tracer,  # v3: 注入 SearchTracer
+            # T18 HONEST_EMPTY：纯向量命中的绝对相似度门槛
+            min_vector_similarity=self.config.hybrid_min_vector_similarity,
         )
         # v3: EvidenceLedger — 证据组织层
         self.evidence_ledger = EvidenceLedger(store=self.store, config=self.config)
@@ -170,9 +232,12 @@ class MemoryManager:
             return result
 
         # 再查 messages 表
-        messages = self.store.query_messages(key=key, limit=1)
-        if messages:
-            msg = messages[0]
+        # v6：跳过 source='event' 的时间线事件行 —— 它只是"某时改过"的痕迹，正文是
+        # {event,key,chars,digest} 而**不是**记忆值；当记忆返回会让详情页显示一个摘要哈希。
+        # （只有 facts 缺行时才会走到这里；实测 kv-only = 0，正常路径不触发。）
+        for msg in self.store.query_messages(key=key, limit=5):
+            if msg.get("source") == "event":
+                continue
             try:
                 import json
                 data = json.loads(msg["content"])
@@ -190,7 +255,24 @@ class MemoryManager:
     def set(self, key: str, data: dict, structured: dict | None = None) -> dict:
         """写入记忆（兼容旧 KV 接口）
 
-        同时写入 messages 表和 facts 表。
+        同时写入 facts 表和 messages 表。
+
+        v6（P2 版本模型）起有两处行为变化：
+
+        1. **历史显式化**：``extract_facts_from_kv`` → ``upsert_fact`` 在覆盖前会把旧值
+           落进 ``fact_revisions``（判据是"值真的变了"）。
+        2. **messages 里每个 key 只保留一条"当前快照"行**，不再每写一次追加一行全文副本。
+           旧行为实测积出 183 行被取代的全文副本、约 6.9 万行 BM25 词条仍可被召回 ——
+           "当前真相"和"曾经为真"混在同一条召回通道里，没有显式语义。
+
+        ⚠️ 为什么是"原地更新快照"而不是"干脆不存全文"：KV 内容的召回目前由 messages 的
+        BM25+向量索引承担，而 facts 那条替代路径 ``_search_facts`` 用的是
+        ``LIKE '%query%'`` 子串匹配、**不分词**（"止损阈值"不会被切成"止损"+"阈值"），
+        直接砍掉会造成召回退化。改成"每 key 恰好一条、且只索引这一条"之后，
+        召回与改动前逐字等价，被取代的版本则天然进不了索引 —— 正是本项要的效果。
+
+        另外追加一条 ``source='event'`` 的事件行供时间线阅读；它**不建索引、不进 recent**
+        （只是"某时改过"的痕迹，不是记忆内容；且正文含 key 名，建索引会让搜 key 命中它）。
 
         Args:
             key: 记忆 key
@@ -200,18 +282,12 @@ class MemoryManager:
                 如果提供，会覆盖 data 中相同字段提取的值。
                 mentioned_at 不在此处设置（由 get_fact 自动维护）。
         """
+        import hashlib
         import json
 
-        # 写入 messages 表
         content = json.dumps(data, ensure_ascii=False)
-        msg_id = self.store.insert_message(
-            content=content,
-            source="manual",
-            role="system",
-            key=key,
-        )
 
-        # 提取事实（v3 双写策略：整体 + 结构化字段 + 旧标量拆分）
+        # 提取事实（内部经 upsert_fact：覆盖前把旧值记入 fact_revisions）
         # 如果 data 内部含 fact_type/occurred_at/consumption_contexts/trigger_keywords，
         # extract_facts_from_kv 会自动提取到独立列
         self.store.extract_facts_from_kv(key, data)
@@ -230,8 +306,38 @@ class MemoryManager:
             if prepared:
                 self.store._update_fact_structured_fields(key, prepared)
 
-        # 建立语义索引
-        self.semantic.index_message(msg_id, content)
+        # 每个 key 只维护一条当前快照行：有则原地更新 + 重建索引，无则新建 + 建索引
+        snapshot_id = self.store.get_kv_snapshot_id(key)
+        if snapshot_id is not None:
+            msg_id = snapshot_id
+            self.store.update_message_content(msg_id, content)
+            # 必须走 reindex（先删旧词/旧向量再建）：BM25 的 upsert 是 tf 累加、
+            # 向量按 (message_id, text_hash) 去重，只建不删会退化成新旧内容的并集
+            self.semantic.reindex_message(msg_id, content)
+        else:
+            msg_id = self.store.insert_message(
+                content=content,
+                source="manual",
+                role="system",
+                key=key,
+            )
+            self.semantic.index_message(msg_id, content)
+
+        # 时间线事件行（不建索引、不进 recent）
+        self.store.insert_message(
+            content=json.dumps(
+                {
+                    "event": "kv_updated",
+                    "key": key,
+                    "chars": len(content),
+                    "digest": hashlib.sha256(content.encode("utf-8")).hexdigest()[:12],
+                },
+                ensure_ascii=False,
+            ),
+            source="event",
+            role="system",
+            key=key,
+        )
 
         # 写入 Recent 层
         self.recent.add(content, source="manual", role="system", key=key)
@@ -315,7 +421,6 @@ class MemoryManager:
 
         供 agent_guide 增强：返回 [{key, summary, updated_at, stale, days_since_update}, ...]
         """
-        import json as _json
         from datetime import datetime as _dt
 
         results = []
@@ -334,18 +439,7 @@ class MemoryManager:
                     pass
 
                 value = meta.get("value", "")
-                summary = value[:80] if value else ""
-                try:
-                    parsed = _json.loads(value)
-                    if isinstance(parsed, dict):
-                        if parsed.get("name"):
-                            summary = parsed["name"]
-                        elif parsed.get("description"):
-                            summary = parsed["description"]
-                        elif parsed.get("title"):
-                            summary = parsed["title"]
-                except (ValueError, TypeError):
-                    pass
+                summary = index_summary_from_value(value)
 
                 results.append({
                     "key": key,
@@ -513,17 +607,22 @@ class MemoryManager:
 
             # 检查 consumption_contexts 匹配
             matched_context = False
+            matched_specific = False   # 由具体 task_type / scope.* 命中（不是 "*"）
+            matched_wildcard = False   # 仅由 "*" 命中
             for ctx in contexts:
                 if ctx == "*":
                     matched_context = True
-                    break
+                    matched_wildcard = True
+                    continue
                 if ctx == task_type:
                     matched_context = True
+                    matched_specific = True
                     break
                 if ctx.endswith(".*"):
                     ctx_scope = ctx[:-2]
                     if ctx_scope == task_scope:
                         matched_context = True
+                        matched_specific = True
                         break
 
             # 检查 trigger_keywords 匹配
@@ -549,7 +648,7 @@ class MemoryManager:
             except (ValueError, TypeError):
                 pass
 
-            summary = value.get("name") or value.get("description") or value.get("title") or value_str[:80]
+            summary = index_summary_from_value(value_str)
 
             if matched_context and matched_keyword:
                 matched_by = "context+keyword"
@@ -567,6 +666,10 @@ class MemoryManager:
                 "matched_by": matched_by,
                 "fact_type": fact.get("fact_type"),
                 "occurred_at": fact.get("occurred_at"),
+                # v5：只靠 "*" 命中的标记，供 agent_guide 给全场景通配限槽。
+                # 实测 35/151 条 fact 声明 "*"（=对所有任务永远相关），任何 task_type
+                # 都被灌进 ~37 条候选；调用方需要能区分"为这个任务写的"和"对所有人说的"。
+                "via_wildcard": matched_wildcard and not matched_specific and not matched_keyword,
             })
 
         return results

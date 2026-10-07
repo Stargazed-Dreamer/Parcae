@@ -17,15 +17,12 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.llm_usage import collect_usage, collect_usage_anthropic  # noqa: E402
 from server.inbound_gateway.call_log import CallLog  # noqa: E402
-from server.inbound_gateway.router import (  # noqa: E402
-    _build_pool_kwargs, _norm_usage, _sse_usage_chunk)
+from server.inbound_gateway.router import _build_pool_kwargs, _norm_usage, _sse_usage_chunk  # noqa: E402
 from server.llm_pool import pool as pool_mod  # noqa: E402
 from server.llm_pool.pool import LLMPool  # noqa: E402
 from server.llm_pool.types import LLMKey  # noqa: E402

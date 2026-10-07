@@ -7,7 +7,7 @@
 
 ## 工具列表
 
-### <data_drive>:\<bilibili_videos>视频分类
+### <data_drive>:/<bilibili_videos>视频分类
 
 两阶段流程：先分类，再按置信度移动文件。
 
@@ -22,7 +22,7 @@ python tools/media_classifier/bilibili_mover.py
 python tools/media_classifier/print_anime.py
 ```
 
-- `bilibili_classifier.py` — 扫描 <data_drive>:\<bilibili_videos>视频目录，提取文件名+弹幕样本，LLM 并发分类（10类），输出 JSONL
+- `bilibili_classifier.py` — 扫描 <data_drive>:/<bilibili_videos>视频目录，提取文件名+弹幕样本，LLM 并发分类（10类），输出 JSONL
 - `bilibili_mover.py` — 读取分类结果，高置信(≥0.8)直接移动，低置信分到"待确认"目录
 - `print_anime.py` — 打印"动漫二次元"分类的详细列表
 
@@ -50,7 +50,7 @@ python tools/media_classifier/count_segments.py
 python tools/media_classifier/mimo_lrc_analyze.py --musearc-db <external_project_root>\MuseArc\realLib\db\musearc.db --musearc-lib <external_project_root>\MuseArc\realLib
 
 :: 分析独立 LRC 文件
-python tools/media_classifier/mimo_lrc_analyze.py --test-dir "E:\<data_drive>:\<projects_root>\歌曲分类\测试文件"
+python tools/media_classifier/mimo_lrc_analyze.py --test-dir "<data_drive>:/<projects_root>\歌曲分类\测试文件"
 ```
 
 - `mimo_lrc_analyze.py` — 使用 LLM 分析歌词的情感、主题、风格等。支持 MuseArc 数据库关联（保证歌词与歌曲对应关系）和独立 LRC 文件

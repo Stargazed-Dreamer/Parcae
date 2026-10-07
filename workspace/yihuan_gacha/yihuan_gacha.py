@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 from collections import deque
 from datetime import datetime
+from typing import Any
 from PIL import Image
 
 API = "http://127.0.0.1:8766"
@@ -37,6 +38,14 @@ OCR_TIMEOUT = 180
 # 骰子图标中心x坐标（v2 修正：通过5张样本图分析确认实际中心x=610，bbox [584,636]）
 # 原 v1 用的 629 也落在骰子区域内但非中心，导致 y 裁切范围偏移截断骰子下半部分
 DICE_CX = 610
+
+# 稀有度待复核区：判不出或权威表里没有的物品，落文本裁片 + 一行索引。
+# 2026-10-07 之前的版本只留文字结果不留像素，09-30 那 6 个新物品因此无源可查。
+PENDING_DIR = OUTPUT_DIR / "pending_rarity"
+PENDING_INDEX = PENDING_DIR / "_index.jsonl"
+PENDING_MAX_PER_RUN = 40
+_pending_saved: set[str] = set()
+_pending_written = 0
 
 
 _window_bbox_cache = None
@@ -190,60 +199,169 @@ def find_text_center(details, target_text, y_min=0, y_max=9999):
     return None
 
 
+def _rarity_crop(image_b64, bbox):
+    """bbox 外扩 3px 并夹到图内，返回 (裁片, (x0,x1,y0,y1))；退化框返回 None。"""
+    import numpy as np
+
+    img = Image.open(io.BytesIO(base64.b64decode(image_b64)))
+    arr = np.array(img)
+    xs = [p[0] for p in bbox]
+    ys = [p[1] for p in bbox]
+    x_min = max(0, int(min(xs)) - 3)
+    x_max = min(arr.shape[1], int(max(xs)) + 3)
+    y_min = max(0, int(min(ys)) - 3)
+    y_max = min(arr.shape[0], int(max(ys)) + 3)
+    if x_max <= x_min or y_max <= y_min:
+        return None
+    return arr[y_min:y_max, x_min:x_max], (x_min, x_max, y_min, y_max)
+
+
+def _text_mean_rgb(crop):
+    """剔掉近白背景与近黑边框后取文本像素均值；有效像素不足 5 个返回 None。"""
+    r, g, b = crop[:, :, 0], crop[:, :, 1], crop[:, :, 2]
+    is_text = ~((r > 200) & (g > 200) & (b > 200)) & ~((r < 40) & (g < 40) & (b < 40))
+    px = crop[is_text]
+    if len(px) < 5:
+        return None
+    return float(px[:, 0].mean()), float(px[:, 1].mean()), float(px[:, 2].mean())
+
+
+def _classify_rarity(avg_rgb):
+    """按均值 RGB 归档。分支顺序不可动：B 档那条要排在第二组 S/A 之前。"""
+    avg_r, avg_g, avg_b = avg_rgb
+    if avg_r > 200 and avg_g > 100 and avg_b < 80:
+        return "S"
+    if avg_r > 180 and avg_b > 100 and avg_g < 100:
+        return "A"
+    if abs(avg_r - avg_g) < 30 and abs(avg_g - avg_b) < 30 and avg_r < 180:
+        return "B"
+    if avg_r > 200 and avg_g > 80 and avg_b < 100:
+        return "S"
+    if avg_r > 150 and avg_b > 80 and avg_g < avg_b:
+        return "A"
+    return "?"
+
+
 def detect_rarity_by_color(image_b64, bbox):
     """通过裁切文本区域检测颜色来判断稀有度
     S级=金黄色(253,181,11), A级=粉紫色(231,63,189), B级=灰色(106,106,106)
     """
     try:
-        from PIL import Image
-        import numpy as np
-
-        img_data = base64.b64decode(image_b64)
-        img = Image.open(io.BytesIO(img_data))
-        img_array = np.array(img)
-
-        x_min = int(min(p[0] for p in bbox))
-        x_max = int(max(p[0] for p in bbox))
-        y_min = int(min(p[1] for p in bbox))
-        y_max = int(max(p[1] for p in bbox))
-
-        x_min = max(0, x_min - 3)
-        x_max = min(img_array.shape[1], x_max + 3)
-        y_min = max(0, y_min - 3)
-        y_max = min(img_array.shape[0], y_max + 3)
-
-        if x_max <= x_min or y_max <= y_min:
+        cropped = _rarity_crop(image_b64, bbox)
+        if cropped is None:
             return "?"
-
-        crop = img_array[y_min:y_max, x_min:x_max]
-        r, g, b = crop[:,:,0], crop[:,:,1], crop[:,:,2]
-        is_bg = (r > 200) & (g > 200) & (b > 200)
-        is_border = (r < 40) & (g < 40) & (b < 40)
-        is_text = ~is_bg & ~is_border
-
-        text_pixels = crop[is_text]
-        if len(text_pixels) < 5:
+        avg = _text_mean_rgb(cropped[0])
+        if avg is None:
             return "?"
-
-        avg_r = text_pixels[:, 0].mean()
-        avg_g = text_pixels[:, 1].mean()
-        avg_b = text_pixels[:, 2].mean()
-
-        if avg_r > 200 and avg_g > 100 and avg_b < 80:
-            return "S"
-        elif avg_r > 180 and avg_b > 100 and avg_g < 100:
-            return "A"
-        elif abs(avg_r - avg_g) < 30 and abs(avg_g - avg_b) < 30 and avg_r < 180:
-            return "B"
-        elif avg_r > 200 and avg_g > 80 and avg_b < 100:
-            return "S"
-        elif avg_r > 150 and avg_b > 80 and avg_g < avg_b:
-            return "A"
-        else:
-            return "?"
+        return _classify_rarity(avg)
     except Exception as e:
         print(f"  颜色检测失败: {e}")
         return "?"
+
+
+_clean_module = None
+
+
+def _clean_mod() -> Any:
+    """按需加载同目录的 yihuan_clean（权威表 RARITY_MAP 与名称清洗在它那一侧）。
+
+    用 importlib 而不是 import：本脚本既可以 `python workspace/.../yihuan_gacha.py`
+    跑，也可以被 tests 用 spec_from_file_location 装载，后一种情况下同目录不在 sys.path。
+    """
+    global _clean_module
+    if _clean_module is None:
+        try:
+            import importlib.util
+
+            path = Path(__file__).resolve().parent / "yihuan_clean.py"
+            spec = importlib.util.spec_from_file_location("yihuan_clean_sidecar", path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError(f"cannot load spec for {path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _clean_module = module
+        except Exception as e:
+            print(f"  [!] 无法加载 yihuan_clean.py，权威表判据不可用: {e}")
+            _clean_module = False
+    return _clean_module if _clean_module else None
+
+
+def _safe_filename(name):
+    """Windows 文件名安全化：非法字符换下划线，限长 48。"""
+    cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip(" .")
+    return (cleaned or "unnamed")[:48]
+
+
+def note_rarity_evidence(image_b64, bbox, raw_name, time_str, rarity, is_weapon=False):
+    """稀有度要人复核时，把文本裁片和一行索引落到 PENDING_DIR。
+
+    触发两条：颜色判不出；或颜色判得出但权威表里没有这个键（09-30 那 6 项就是这条，
+    当时只留了个 [?] 而没有像素，事后无从复核）。同一键只存一张，单次运行封顶。
+    """
+    global _pending_written
+
+    mod = _clean_mod()
+    key = raw_name
+    if mod is not None:
+        prefixed = f"弧盘·{raw_name}" if (is_weapon and not raw_name.startswith("弧盘·")) else raw_name
+        key = mod.clean_name(prefixed)
+    if rarity == "?":
+        reason = "color_indeterminate"
+    elif mod is not None and key not in mod.RARITY_MAP:
+        reason = "not_in_rarity_map"
+    else:
+        return
+
+    if key in _pending_saved:
+        return
+    if _pending_written >= PENDING_MAX_PER_RUN:
+        if _pending_written == PENDING_MAX_PER_RUN:
+            _pending_written += 1
+            print(f"  [!] 待复核裁片已达上限 {PENDING_MAX_PER_RUN} 张，本进程内不再落盘")
+        return
+
+    entry = {
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "record_time": time_str,
+        "raw_name": raw_name,
+        "rarity_key": key,
+        "detected": rarity,
+        "reason": reason,
+        "bbox": [[int(p[0]), int(p[1])] for p in bbox] if bbox else None,
+        "crop_box": None,
+        "avg_rgb": None,
+        "png": None,
+    }
+
+    try:
+        cropped = _rarity_crop(image_b64, bbox) if image_b64 and bbox else None
+        if cropped is not None:
+            crop, box = cropped
+            entry["crop_box"] = list(box)
+            avg = _text_mean_rgb(crop)
+            if avg is not None:
+                entry["avg_rgb"] = [round(v, 1) for v in avg]
+            PENDING_DIR.mkdir(parents=True, exist_ok=True)
+            # rarity 可能是 "?"，而它在 Windows 文件名里非法，所以整段再过一遍安全化
+            stem = (f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{rarity}_{_safe_filename(key)}")
+            png_name = _safe_filename(stem)[:80] + ".png"
+            Image.fromarray(crop).save(PENDING_DIR / png_name, format="PNG")
+            entry["png"] = png_name
+    except Exception as e:
+        print(f"  [!] 待复核裁片落盘失败（仍记索引）: {e}")
+
+    try:
+        PENDING_DIR.mkdir(parents=True, exist_ok=True)
+        with io.open(PENDING_INDEX, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"  [!] 待复核索引写入失败: {e}")
+        return
+
+    _pending_saved.add(key)
+    _pending_written += 1
+    print(f"  [待复核] {key} 检测={rarity} 原因={reason} → {entry['png'] or '(无裁片，仅索引)'}")
+
 
 
 def detect_dice_points(image_b64, name_cy, name_h, ocr_details=None):
@@ -620,6 +738,7 @@ def parse_page_records(details, image_b64=None):
         name_h = 0
         if name_box and image_b64:
             rarity = detect_rarity_by_color(image_b64, name_box)
+            note_rarity_evidence(image_b64, name_box, name, time_str, rarity)
             name_ys = [p[1] for p in name_box]
             name_cy = sum(name_ys) / 4
             name_h = max(name_ys) - min(name_ys)
@@ -748,6 +867,7 @@ def parse_weapon_page_records(details, image_b64=None):
         rarity = "?"
         if name_box and image_b64:
             rarity = detect_rarity_by_color(image_b64, name_box)
+            note_rarity_evidence(image_b64, name_box, name, time_str, rarity, is_weapon=True)
 
         records.append({
             "name": name,

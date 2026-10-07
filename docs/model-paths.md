@@ -77,6 +77,39 @@ config.toml [models].external_dir
 > 只在 `get_models_config()` 里返回正确路径、不在 paddlex import 前设置 `PADDLE_PDX_CACHE_HOME`，
 > 模型会静默下载到 `~/.paddlex/official_models`，配置形同失效。详见 CHANGELOG Unreleased。
 
+> **坑（modelscope 缓存根不对称 → 同一 repo 静默存两份）**：`modelscope/hub/utils/utils.py` 的
+> `get_cache_dir()` 是 `base_path = os.getenv('MODELSCOPE_CACHE', os.path.join(~/.cache/modelscope, 'hub'))`
+> 再 `join(base_path, model_id)`。注意**默认值自带 `hub`、设了环境变量就没有 `hub` 这层**：
+> 不设 → `~/.cache/modelscope/hub/<org>/<repo>/`；设了 → `<MODELSCOPE_CACHE>/<org>/<repo>/`。
+> SDK 会尝试自动搬家（`modelscope/hub/file_download.py` 的 `move_legacy_cache_to_standard_dir()`），
+> 但条件是「legacy 存在**且**目标不存在」——**两边都在时它什么都不做**，于是
+> `<cache>\hub\models\<org>\<repo>` 与 `<cache>\models\<org>\<repo>` 各留一份，旧那份从此不被解析、只占盘。
+> 本项目把 `MODELSCOPE_CACHE` 指到 `<data_drive>:\ai_models\modelscope`，正是走"没有 hub 层"的那条分支。
+
+> **坑（HF 缓存里"目录名在"不等于"模型在"）**：`HF_HOME\hub\models--<org>--<name>\` 可能只剩
+> `refs\main`（下载中断留下的引用壳，整个目录约 1KB），也可能权重是
+> `blobs\<sha>.*.incomplete` 而 `snapshots\<hash>\` 里只有 README——后者缺 `config.json`，
+> 用 `local_files_only=True` 加载必然抛异常，看起来却"模型已就位"。
+> 判断是否重复、是否可用，要看 `blobs\` 与 `snapshots\<hash>\` 的实存文件，**不能只看目录名是否存在**。
+
+## 缓存目录里"哪一份是活的"怎么判
+
+同一模型在多个缓存根下并存时（`embeddings/` vs `huggingface/` vs `modelscope/`），按下面顺序判，
+不要凭目录名或 `du` 的大小下结论：
+
+1. **先定解析规则**：查消费方实际用的 SDK 拼路径函数（上面两条坑就是解析规则的来源），
+   确定它这次跑起来会读哪一份。
+2. **比对元数据写入时间**：`.mdl` / `.msc` / `.mv`（modelscope）、`refs/main` + `blobs/` mtime（HF）。
+   停更的那份通常是历史布局。
+3. **列消费方引用的相对路径清单，逐条比对实存**：只有某一份独有的子目录，
+   若消费方代码里 0 引用（去它的模型路径常量/枚举里 grep），就是旧版本遗留而非必需分片。
+4. **确认没有第三条路径**：环境变量是否设了、有没有本地配置文件覆盖
+   （如 MinerU 的 `mineru.json` → `get_local_models_dir()` 会绕过缓存根）。
+   同一 SDK 有多个安装时，要逐个 venv 看版本，别假设只有一个。
+
+> 第 3 步最容易漏：一份"看起来更大更全"的缓存，多出来的部分往往是**上一代消费方的依赖**，
+> 当代版本已经不引用了；反过来，"两份内容一样、留哪份都行"的判断也要走这一步才成立。
+
 ## 新增模型引用时的规范
 
 1. **禁止硬编码绝对路径**（如 `r"<data_drive>:\ai_models\xxx"`）
@@ -87,8 +120,8 @@ config.toml [models].external_dir
 
 ## 环境变量与配置的关系
 
-`start.bat` 设置的环境变量（`HF_HOME`、`MODELSCOPE_CACHE`）用于第三方库的缓存重定向，
-与 `get_models_config()` 是互补关系：
+`HF_HOME`、`MODELSCOPE_CACHE` 用于第三方库的缓存重定向，与 `get_models_config()` 是互补关系。
+⚠️ **`start.bat` 并不设置这两个变量**（实测它只 `set PYTHONIOENCODING=utf-8`，见 `start.bat:37`）——它们需要由用户在系统/用户环境变量里指定，本项目只约定把缓存落到 `weights/huggingface/`、`weights/modelscope/`：
 
 - **环境变量**：控制第三方库（HuggingFace/ModelScope SDK）的下载缓存位置
 - **`get_models_config()`**：控制本项目代码加载模型的路径

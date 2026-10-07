@@ -452,3 +452,55 @@ class TestMemorySetMergePreservesFields:
         parsed = json.loads(fact["value"])
         assert parsed["consumption_contexts"] == ["recurring.accounting"]
         assert parsed["trigger_keywords"] == ["退款"]
+
+
+class TestSummarySharesIndexHelper:
+    """动态路的摘要必须与 get_memory_index 同源（防两条路各自实现再漂移）。
+
+    2026-10-05 重启后实测：B3 只改了 get_memory_index，本函数仍写
+    `value.get("name") or ... or value_str[:80]`，注释却写着"复用 get_memory_index
+    的摘要逻辑"。后果是【必读记忆】里 43 条带顶层 summary 的记忆照样回显原始 JSON。
+    """
+
+    SHAPES = [
+        # 只有顶层 summary：静态路能取到人话，旧动态路只会截 JSON 前缀
+        {"type": "project", "summary": "只有 summary 字段的人话标题",
+         "landed": ["机制甲", "机制乙"], "consumption_contexts": ["recurring.accounting"]},
+        # 只有正文键：取正文首行并剥掉行首 #
+        {"content": "## 现象\n真正的第一行正文",
+         "consumption_contexts": ["recurring.accounting"]},
+        # 超长标题：动态路原先不截断，1186 字整条上屏
+        {"name": "长标题" * 200, "consumption_contexts": ["recurring.accounting"]},
+        # 顶层只有嵌套 dict/list：两条路都退化成 JSON，这里只断言"两边一致"
+        {"stock_review_output": {"no_html": True}, "consumption_contexts": ["recurring.accounting"]},
+    ]
+
+    def test_dynamic_summary_equals_index_helper(self, manager, store):
+        from server.memory.manager import index_summary_from_value
+
+        for i, shape in enumerate(self.SHAPES):
+            key = f"project.shape_{i}"
+            value_str = json.dumps(shape, ensure_ascii=False)
+            _set_fact(store, key, shape)
+            got = [r for r in manager.find_consumable_memories("recurring.accounting")
+                   if r["key"] == key][0]["summary"]
+            assert got == index_summary_from_value(value_str), (i, got[:60])
+
+    def test_top_level_summary_not_dumped_as_json(self, manager, store):
+        _set_fact(store, "project.only_summary", {
+            "type": "project",
+            "summary": "只有 summary 字段的人话标题",
+            "consumption_contexts": ["recurring.accounting"],
+        })
+        got = manager.find_consumable_memories("recurring.accounting")[0]["summary"]
+        assert got == "只有 summary 字段的人话标题"
+        assert not got.startswith("{")
+
+    def test_summary_capped_at_120(self, manager, store):
+        _set_fact(store, "project.long_name", {
+            "name": "长标题" * 200,
+            "consumption_contexts": ["recurring.accounting"],
+        })
+        got = manager.find_consumable_memories("recurring.accounting")[0]["summary"]
+        assert len(got) == 120
+

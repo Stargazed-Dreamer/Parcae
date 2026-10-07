@@ -344,7 +344,8 @@ class TestRowToDictWhitelist:
         expected = {
             "messages", "facts", "summaries", "vector_index",
             "bm25_inverted", "bm25_stats", "schema_info", "memory_meta",
-            "evidence_ledger", "search_traces",  # v3 新增
+            "evidence_ledger", "search_traces",      # v3 新增
+            "context_projections",                    # v4 新增（投影留痕）
         }
         assert expected == MemoryStore._ALLOWED_TABLES
 

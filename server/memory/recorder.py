@@ -166,6 +166,8 @@ class InteractionRecorder:
                         logger.info(f"记忆压缩: {result}")
                 elif task == "cleanup_vectors":
                     self._cleanup_old_vectors()
+                    # v6：同一"索引该跟着失效走"的纪律，把已被取代的旧全文副本也摘掉
+                    self._cleanup_superseded_index()
                 elif task == "update_bm25":
                     self.semantic.bm25.rebuild_stats()
                 elif task == "maintain":
@@ -217,6 +219,41 @@ class InteractionRecorder:
             """)
             self.store.conn.commit()
             return cur.rowcount
+
+    def _cleanup_superseded_index(self) -> int:
+        """把"已被取代的旧全文副本"从 BM25 / 向量索引里摘掉（v6）。
+
+        与 ``_cleanup_old_vectors`` 同源纪律：**只清索引，不删 messages 行**。
+        行必须留着 —— ``metrics._superseded`` 的 ``superseded_message_versions``
+        正是按这些行算出来的（本项验收判据是 ``bm25_term_rows_on_superseded == 0``，
+        不是行数归零），而"失效 ≠ 消失"是 ADR-0040 同源的纪律。
+        因此用 ``compressed = 1`` 表示"这份内容不再参与召回"，与既有的
+        "压缩即删向量"语义保持一致。
+
+        定位方式是**结构性的、不是启发式猜测**：只清 ``fact_revisions.source_message_id``
+        指到的那些消息行 —— 它们正是 v6 迁移判定为"已被取代"并转存为历史的那些。
+        运行期新写入的历史行 ``source_message_id`` 为 NULL（D2 之后不再往 messages
+        追全文），所以本方法天然只作用于存量、且越跑越空。
+
+        T06：DELETE / UPDATE + commit 包入 ``_write_lock``。
+        返回：本次清除的 BM25 倒排行数。
+        """
+        superseded = (
+            "SELECT source_message_id FROM fact_revisions WHERE source_message_id IS NOT NULL"
+        )
+        with self.store._write_lock:
+            cur = self.store.conn.execute(
+                f"DELETE FROM bm25_inverted WHERE message_id IN ({superseded})"
+            )
+            removed = cur.rowcount
+            self.store.conn.execute(
+                f"DELETE FROM vector_index WHERE message_id IN ({superseded})"
+            )
+            self.store.conn.execute(
+                f"UPDATE messages SET compressed = 1 WHERE id IN ({superseded})"
+            )
+            self.store.conn.commit()
+        return removed
 
     @staticmethod
     def _summarize_args(args: dict, max_len: int = 200) -> str:

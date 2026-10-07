@@ -35,7 +35,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import httpx
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 
 CDP_PORT = 9222
 

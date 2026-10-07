@@ -1,6 +1,6 @@
 """STT 重试策略（照抄 stt-main main.py:86-244，Ticket 17）
 
-源码：E:\\<data_drive>:\<working_root>\\- 工作中项目\\视频配字幕\\stt-main\\main.py
+源码：<data_drive>:/<working_root>\\- 工作中项目\\视频配字幕\\stt-main\\main.py
 
 照抄内容：
 - normalize_lufs：LUFS 归一化（pyloudnorm）

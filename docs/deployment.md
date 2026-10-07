@@ -48,6 +48,22 @@ OCR、本地嵌入模型、语音转写、GUI 面板全部是阶段 3 的可选�
 
 PaddlePaddle / Playwright / 调试浏览器实例的兼容性约束详见 [docs/environment-constraints.md](environment-constraints.md)。
 
+**GPU 采样只支持 NVIDIA（迁移机器时务必核对）**：后端的显存/利用率采样走驱动自带的 NVML 库
+（`nvml.dll` / `libnvidia-ml.so.1`），不是 pip 依赖。目标机器没有 NVIDIA 驱动时，
+`gpu_mem` / `gpu_util` 探针判为 `absent`——**这是正常降级路径，不是部署失败**：GPU 压力监控失效、
+模型准入直接放行，OCR 等功能照常（建议同时把 `[models] paddle_device` 设为 `"cpu"`）。
+AMD / Intel 集显 / Apple 同样落到这条路径；要支持它们需要新增一个探针实现（扩展点见
+[docs/environment-constraints.md](environment-constraints.md) 的「资源采样中枢」）。
+
+自检一条命令：
+
+```powershell
+uv run python -c "import ctypes; ctypes.CDLL('nvml.dll'); print('NVML ok')"   # Linux 换 libnvidia-ml.so.1
+```
+
+加载失败 = 这台机器没有 NVIDIA 驱动，会走 `absent` 放行；启动日志里 `资源采样中枢已启动` 后面的
+`gpu_mem=absent(...)` 就是证据，`GET /models/pressure` 的 `gpu.probe_status` 同样可见。
+
 ---
 
 ## 2. 阶段 0 — clone 与前置自检（不装任何依赖）
@@ -167,7 +183,7 @@ external_dir = ""        # 空字符串 = 用项目内 weights/ 目录；设绝�
 
 ### 3.3 创建 data/llm/keys.json
 
-LLM / VL 密钥统一存在这里（schema v9）。**最小可用只需 1 个 LLM provider**：
+LLM / VL 密钥统一存在这里（结构由 `server/llm_pool/key_store.py` 解析，**字段以该文件为准，不在本文写死版本**）。**最小可用只需 1 个 LLM provider**：
 
 ```json
 {
@@ -576,7 +592,7 @@ GUI 面板由 `PanelRegistry` 扫描 `client/panels/` 自动发现，按 main / 
 
 ## 10. public 版能力边界
 
-本包是**完全开源版**（除个人数据外全发），包含核心代码与下列 10 个 workspace 组件：
+本包是**完全开源版**（除个人数据外全发），包含核心代码与下列 workspace 组件：
 
 | 组件 | 说明 |
 |------|------|
@@ -586,7 +602,7 @@ GUI 面板由 `PanelRegistry` 扫描 `client/panels/` 自动发现，按 main / 
 | `accounting` | 记账（识别 + 审核） |
 | `dev_toolkit` | 工程化开发工具集 |
 | `life_design` | 人生设计对话 |
-| `arknights_gacha` / `wuwa_gacha` / `endfield_gacha` / `yihuan_gacha` | 4 个抽卡记录采集模块 |
+| `arknights_gacha` / `wuwa_gacha` / `endfield_gacha` / `yihuan_gacha` | 抽卡记录采集模块 |
 
 **不在本包内的内容**：原作者的**个人业务模块**（如股票 / 社群内容 / 图文整理 / 求职 / 考试复习等个人场景的 skill 与工作区）、
 个人运行数据、浏览器登录态、密钥、Git 历史、内部发布流程文件。

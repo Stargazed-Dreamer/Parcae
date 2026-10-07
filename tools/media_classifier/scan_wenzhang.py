@@ -4,7 +4,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-ROOT = Path(r"E:\<data_drive>:\<articles_root>")
+ROOT = Path(r"<data_drive>:/<articles_root>")
 
 # 统计文件类型
 ext_count = defaultdict(int)

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import docx
 
-ROOT = Path(r"E:\<data_drive>:\<articles_root>")
+ROOT = Path(r"<data_drive>:/<articles_root>")
 
 docx_files = []
 for dirpath, dirnames, filenames in os.walk(ROOT):

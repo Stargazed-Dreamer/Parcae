@@ -6,8 +6,8 @@ ADR-0027: load_config/save_config/CONFIG_PATH/缓存状态已迁移到 lib/confi
 client 不再依赖 server.config，直接从 lib.config_reader 读取配置。
 """
 
-from pathlib import Path
 import threading
+from pathlib import Path
 from typing import Any
 
 from pydantic import Field
@@ -343,8 +343,9 @@ def get_browser_config() -> dict:
         debug_port = 9222
         user_data_dir = "<project_root>\\chrome_debug"
         feedback_vl_enabled = true
-        session_idle_timeout_secs = 900   # 持久 session idle 超时（15min，留足 agent 多步操作余量）
-        session_max_count = 20            # 持久 session 数量上限（防内存泄漏）
+        session_idle_timeout_secs = 900   # 有主 session idle 租约（15min，owner 每次操作即续租）
+        session_anon_idle_timeout_secs = 300  # 无主(anonymous) session 租约（没人续租，更快回收）
+        session_max_count = 32            # 全局 session 上限（2026-10-02 按 4 agent 并发观测上调；LRU 只淘汰 anonymous）
 
     向后兼容：若未配置 [browser] 段，会回退读取旧的 [chrome] 段。
     """
@@ -358,9 +359,10 @@ def get_browser_config() -> dict:
         "user_data_dir": browser.get("user_data_dir", ""),
         # 浏览器原子操作 VL 反馈闭环总开关（agent 传 verify_prompt 时是否真的调 VL）
         "feedback_vl_enabled": browser.get("feedback_vl_enabled", True),
-        # 持久 session 配置（评估文档 P0 第 1 项）
+        # 持久 session 配置（评估文档 P0 第 1 项；2026-10-02 租约化分有主/无主）
         "session_idle_timeout_secs": int(browser.get("session_idle_timeout_secs", 900)),
-        "session_max_count": int(browser.get("session_max_count", 20)),
+        "session_anon_idle_timeout_secs": int(browser.get("session_anon_idle_timeout_secs", 300)),
+        "session_max_count": int(browser.get("session_max_count", 32)),
         # 浏览器选择器调用统计 DB 路径；留空则用 data/browser_stats.db
         "stats_db_path": browser.get("stats_db_path", ""),
     }
@@ -377,6 +379,10 @@ def get_server_config() -> dict:
     return {
         "host": server.get("host", "127.0.0.1"),
         "port": server.get("port", 8766),
+        # Host 白名单（DNS rebinding 防护）：始终额外放行 127.0.0.1/localhost/::1
+        # 与监听地址本身；只有当 host 写成 0.0.0.0（有意暴露局域网）时才需要显式
+        # 列出允许访问的主机名/IP。改动需重启后端（server/core/middleware.py 有缓存）。
+        "host_whitelist": server.get("host_whitelist", []),
         # v16: exec_python 内联等待秒数。子进程在 N 秒内完成则直接返回完整结果
         # (status=done)，否则返回 terminal_id (status=running) 让 agent 调 exec_inspect。
         # 0=禁用，回退 v15 立即返回行为。默认 10s 覆盖 ~80% 短任务。
@@ -761,7 +767,8 @@ class BrowserConfigSchema(BaseSchema):
     stats_db_path: str = ""
     feedback_vl_enabled: bool = True
     session_idle_timeout_secs: int = Field(default=900, ge=60)
-    session_max_count: int = Field(default=20, ge=1)
+    session_anon_idle_timeout_secs: int = Field(default=300, ge=30)
+    session_max_count: int = Field(default=32, ge=1)
 
 
 # 向后兼容别名
@@ -876,6 +883,28 @@ class ModelManagerConfigSchema(BaseSchema):
     cpu: ModelManagerResourceSchema = Field(default_factory=ModelManagerResourceSchema)
 
 
+class ResourceProbeEntrySchema(BaseSchema):
+    """[resource_probe.probes.<id>] 单探针开关与周期"""
+
+    enabled: bool = True
+    interval_sec: float | None = Field(default=None, gt=0)
+
+
+class ResourceProbeConfigSchema(BaseSchema):
+    """[resource_probe] 段 schema（常驻资源采样中枢，server/resource_probe/）
+
+    GPU 侧只支持 NVIDIA：NVML 库由 NVIDIA 驱动提供，非 NVIDIA 机器上 gpu_mem/gpu_util
+    探针判 absent（= 本机没有可采的 NVIDIA 卡），GPU 压力监控随之失效并放行准入。
+    其它 GPU 需要新增 Probe 实现，见 docs/environment-constraints.md「资源采样中枢」。
+    """
+
+    enabled: bool = True
+    poll_interval_sec: float = Field(default=5.0, gt=0)
+    stale_multiplier: float = Field(default=3.0, ge=1.0)
+    absent_retry_sec: float = Field(default=300.0, gt=0)
+    probes: dict[str, ResourceProbeEntrySchema] = Field(default_factory=dict)
+
+
 _CONFIG_SCHEMAS: dict[str, type[BaseSchema]] = {
     "server": ServerConfigSchema,
     "logging": LoggingConfigSchema,
@@ -887,6 +916,7 @@ _CONFIG_SCHEMAS: dict[str, type[BaseSchema]] = {
     "ocr": OcrConfigSchema,
     "inbox": InboxConfigSchema,
     "model_manager": ModelManagerConfigSchema,
+    "resource_probe": ResourceProbeConfigSchema,
 }
 
 

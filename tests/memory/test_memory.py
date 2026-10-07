@@ -873,3 +873,59 @@ class TestKeyPatternValidation:
         })
         # 接受 = 200（手动记录不要求 key 字段）
         assert resp.status_code == 200
+
+
+class TestMemorySetFactTypeGuidance:
+    """写入端点把"这条没 fact_type、按类型过滤不到它"回显给写入方（可见，不拦阻）。
+
+    起因（2026-10-03 实测）：25/155 条 fact 的 `fact_type` 是 NULL 且还在新增。原因不是
+    校验漏了——`_validate_fact_type` 只在收到**非法值**时落 NULL——而是调用方压根没传。
+    """
+
+    def test_missing_fact_type_echoes_guidance(self, client):
+        key = _make_key("no_type")
+        try:
+            resp = client.post(f"/memory/{key}", json={"data": {"content": "x"}})
+            assert resp.status_code == 200
+            guidance = resp.json().get("guidance")
+            assert guidance and "fact_type" in guidance
+            # 回显之外不改变结果：写入仍然成功、类型仍然为空
+            got = client.get(f"/memory/{key}").json()
+            assert not got.get("fact_type")
+        finally:
+            _cleanup_key(client, key)
+
+    def test_given_fact_type_has_no_guidance(self, client):
+        key = _make_key("typed")
+        try:
+            resp = client.post(f"/memory/{key}",
+                               json={"data": {"content": "x"}, "fact_type": "project"})
+            assert resp.status_code == 200
+            assert "guidance" not in resp.json()
+        finally:
+            _cleanup_key(client, key)
+
+    def test_merge_update_inherits_existing_type_no_guidance(self, client):
+        """判据按**落库后的行**读，不按请求参数猜：merge 时旧行已有类型就不该报"为空"。"""
+        key = _make_key("merge_inherit")
+        try:
+            client.post(f"/memory/{key}",
+                        json={"data": {"content": "v1"}, "fact_type": "reference"})
+            resp = client.post(f"/memory/{key}",
+                               json={"data": {"extra": "v2"}, "merge": True})
+            assert resp.status_code == 200
+            assert "guidance" not in resp.json()
+        finally:
+            _cleanup_key(client, key)
+
+    def test_guidance_is_not_a_rejection(self, client):
+        """这条钉的是取舍：提醒 ≠ 拦截。缺 fact_type 的写入必须照样成功。"""
+        key = _make_key("still_writes")
+        try:
+            resp = client.post(f"/memory/{key}", json={"data": {"content": "y"}})
+            assert resp.status_code == 200
+            assert resp.json().get("status") == "ok"
+            listed = client.get("/memory/list").json()["keys"]
+            assert [k for k in listed if k["key"] == key]
+        finally:
+            _cleanup_key(client, key)

@@ -176,7 +176,6 @@ class TestSessionManager:
         - False：单例无 worker 线程，且 grant 后仍无——授权状态机照常、
           线程不再随测试生灭（spec: temp/sdd/qt-segfault-conftest/）
         """
-        from server.screen.session.manager import SessionManager
 
         try:
             # 默认 True：grant 后起线程（生产语义；worker 在 grant 时才启动）
@@ -977,12 +976,15 @@ class TestAuthorizedControlPolicy:
         assert response.json()["status"] == "blocked"
         assert confirmations["count"] == 0
 
-    def test_watchdog_keeps_confirm_level_actions_fail_closed(
+    def test_watchdog_auto_skips_confirm_level_action(
         self, client, monkeypatch
     ):
-        """watchdog 模式下 danger_level=confirm 自动跳过确认，但 confirm mock 返回 cancelled 时不执行"""
-        # 注：T14 实现中 watchdog 模式下 confirm 自动跳过（不弹窗直接执行），
-        # 所以这个测试改语义：watchdog 下 confirm 操作应直接执行（不弹窗）
+        """watchdog 模式下 danger_level=confirm **自动跳过弹窗直接执行**（ADR-0026），不消耗确认窗。
+
+        旧名字/旧注释写作 "keeps_confirm_level_actions_fail_closed"，把行为说成"仍弹窗=超时 deny"，
+        与代码和 ADR-0026 都对撞（2026-09-30 状态机审计 B 项）；断言本身就是真源：
+        `confirm_action` 计数为 0 + 动作执行成功。
+        """
         import server.screen.action_endpoints as endpoint
 
         session = get_session_manager()
@@ -1509,6 +1511,7 @@ class TestDialogResultPropagation:
         assert status["shutdown_permitted"] is True
         assert session.can_shutdown() is True
 
+
     def test_dialog_max_duration_none_falls_back_to_agent_request(self, client, monkeypatch):
         """弹窗未返回 max_duration_hours（None）→ fallback 到 agent 请求参数 8h。"""
         overlay = server.overlay_client.overlay_client
@@ -1634,3 +1637,795 @@ class TestDialogResultPropagation:
         # 重调后仍应保持 watchdog（不被 normal 请求降级）
         assert response.status_code == 200
         assert session.status()["mode"] == "watchdog"
+
+
+# ========== T9: 重复请求（skipped）不得改写已生效授权（2026-09-30 回归） ==========
+
+
+class TestSkippedRequestDoesNotMutateGrant:
+    """会话已 active 时，脚本的重复 request 只是"沿用现有授权"，不能动状态。
+
+    2026-09-30 异环夜采实测：用户睡前批准 watchdog + 允许关机后，采集脚本自己调
+    `/screen/control/request`（mode=normal）走 skipped 分支（弹窗根本没出现、无人做
+    新决策），routes 却照样 `session.grant()` —— grant 整体替换 SessionState，于是
+    `shutdown_permitted` 被擦成 False、watchdog 的 10h 硬上限时钟被重置、
+    `task_description` 换成脚本那句，最终 `/auto_shutdown/trigger` 403
+    shutdown_not_permitted。修法：只有 `status=="confirmed"`（用户真做了新选择）才 grant。
+    """
+
+    def _grant_watchdog_with_shutdown(self):
+        session = get_session_manager()
+        session.grant(
+            mode=SessionMode.WATCHDOG,
+            task_description="睡前盯着任务跑完",
+            source="agent",
+            max_duration_hours=10,
+            shutdown_permitted=True,
+        )
+        return session, session.status()
+
+    def test_normal_request_while_watchdog_keeps_shutdown_permission(self, client):
+        """走 conftest 的与生产同构 mock：active watchdog + 低权限请求 → 状态原样保留。"""
+        session, before = self._grant_watchdog_with_shutdown()
+        assert before["shutdown_permitted"] is True
+
+        resp = client.post(
+            "/screen/control/request",
+            json={"task_description": "采集脚本自动翻页", "source": "yihuan_gacha", "mode": "normal"},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["status"] == "authorized"
+        assert body["mode"] == "watchdog"
+        after = session.status()
+        assert after["mode"] == "watchdog"
+        assert after["shutdown_permitted"] is True, "低权限重复请求不得擦掉用户勾选的关机权限"
+        assert after["granted_at"] == before["granted_at"], "watchdog 硬上限时钟不得被续命"
+        assert after["task_description"] == before["task_description"]
+        assert session.can_shutdown() is True
+
+    def test_route_ignores_production_shaped_skipped_result(self, client, monkeypatch):
+        """不依赖 conftest：直接按 overlay_client.py 的 skipped 返回形状钉住 routes 行为。
+
+        真实的 skipped 字典里 `shutdown_permitted` 是写死的 False
+        （server/overlay_client.py 的 ensure_takeover_approved），这正是旧代码把权限擦掉的原因。
+        """
+        overlay = server.overlay_client.overlay_client
+        session, before = self._grant_watchdog_with_shutdown()
+
+        monkeypatch.setattr(
+            overlay,
+            "ensure_takeover_approved",
+            lambda *args, **kwargs: {
+                "status": "skipped",
+                "reason": "",
+                "task_authorization": True,
+                "requested_mode": "normal",
+                "authorized_mode": "watchdog",
+                "max_duration_hours": None,
+                "shutdown_permitted": False,
+            },
+        )
+
+        resp = client.post(
+            "/screen/control/request",
+            json={"task_description": "采集脚本自动翻页", "source": "agent", "mode": "normal"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "authorized"
+        assert "沿用现有授权" in resp.json()["message"], "skipped 必须自解释：没重新弹窗、状态未改写"
+        after = session.status()
+        assert after["shutdown_permitted"] is True
+        assert after["granted_at"] == before["granted_at"]
+        assert after["task_description"] == before["task_description"]
+
+    def test_confirmed_request_still_overwrites(self, client, monkeypatch):
+        """反向用例：用户真在新弹窗里做了选择（confirmed）时，覆盖语义必须保留。
+
+        否则 normal→watchdog 升级、改任务描述、重置 idle 这些决策 17 的正当用途会被一起砍掉。
+        """
+        overlay = server.overlay_client.overlay_client
+        session, before = self._grant_watchdog_with_shutdown()
+
+        monkeypatch.setattr(
+            overlay,
+            "ensure_takeover_approved",
+            lambda *args, **kwargs: {
+                "status": "confirmed",
+                "reason": "",
+                "task_authorization": True,
+                "requested_mode": "watchdog",
+                "authorized_mode": "watchdog",
+                "max_duration_hours": 2,
+                "shutdown_permitted": False,
+            },
+        )
+
+        resp = client.post(
+            "/screen/control/request",
+            json={"task_description": "用户重新批准", "source": "gui_panel", "mode": "watchdog"},
+        )
+
+        assert resp.status_code == 200
+        assert "沿用现有授权" not in resp.json()["message"], "confirmed 路径不该被说成沿用旧授权"
+        after = session.status()
+        assert after["task_description"] == "用户重新批准"
+        assert after["max_duration_seconds"] == 2 * 3600
+        assert after["granted_at"] != before["granted_at"]
+
+
+# ========== T10: 关机位是可升级维度（needs_shutdown，2026-09-30） ==========
+
+
+def _bare_gui_client():
+    """不启动 GUI 子进程的 OverlayClient 实例，只验 ensure_takeover_approved 的短路判定。"""
+    gui = object.__new__(server.overlay_client.OverlayClient)
+    gui._overlay_visible = False
+    return gui
+
+
+class TestShutdownBitIsUpgradable:
+    """已有 watchdog 但缺关机位时，带 needs_shutdown 的请求是**升级**，要重新弹窗。
+
+    T9 关掉"skipped 改状态"是安全的一半，代价是脚本补申请关机权限这条路被堵死
+    （只能 release 把用户批的 watchdog 一起丢掉再重批）。本类钉住补齐的另一半：
+    缺什么才弹什么，什么都不缺就继续 skipped。
+    """
+
+    def _grant_watchdog(self, *, shutdown: bool) -> tuple:
+        session = get_session_manager()
+        session.grant(
+            mode=SessionMode.WATCHDOG,
+            task_description="睡前盯着任务跑完",
+            source="agent",
+            max_duration_hours=10,
+            shutdown_permitted=shutdown,
+        )
+        return session, session.status()
+
+    def _stub_dialog(self, monkeypatch, *, shutdown_permitted: bool = True):
+        """返回 (gui, calls)；calls 记录弹窗是否真被调用（= 没走 skipped）。"""
+        gui = _bare_gui_client()
+        calls: list[dict] = []
+
+        def fake_wait(msg: dict, timeout: float) -> dict:
+            calls.append(msg)
+            return {
+                "status": "confirmed",
+                "reason": "",
+                "task_authorization": True,
+                "requested_mode": msg.get("requested_mode", "normal"),
+                "authorized_mode": msg.get("requested_mode", "normal"),
+                "max_duration_hours": 10,
+                "shutdown_permitted": shutdown_permitted,
+            }
+
+        monkeypatch.setattr(gui, "_send_confirm_start_and_wait", fake_wait)
+        return gui, calls
+
+    def test_missing_shutdown_bit_reopens_dialog(self, monkeypatch):
+        """watchdog 已生效 + 缺关机位 + needs_shutdown=True → 弹窗，不是 skipped。"""
+        session, before = self._grant_watchdog(shutdown=False)
+        gui, calls = self._stub_dialog(monkeypatch)
+
+        result = gui.ensure_takeover_approved(
+            "挂机关机：采集跑完", requested_mode="watchdog", needs_shutdown=True
+        )
+
+        assert len(calls) == 1, "缺关机位属权限升级，必须重新弹窗"
+        assert calls[0]["requested_mode"] == "watchdog"
+        assert result["status"] == "confirmed"
+        assert result["shutdown_permitted"] is True
+        # 弹窗只负责问；改状态由 routes 的 grant 执行（决策 17 + T9）
+        assert session.status()["shutdown_permitted"] is False
+        assert session.status()["granted_at"] == before["granted_at"]
+
+    def test_watchdog_request_without_needs_shutdown_stays_skipped(self, monkeypatch):
+        """平级 watchdog 请求（没声明要关机）不弹第二次窗，也不改状态。"""
+        session, before = self._grant_watchdog(shutdown=False)
+        gui, calls = self._stub_dialog(monkeypatch)
+
+        result = gui.ensure_takeover_approved("采集脚本自动翻页", requested_mode="watchdog")
+
+        assert calls == [], "未声明 needs_shutdown 的平级请求不得骚扰用户"
+        assert result["status"] == "skipped"
+        assert session.status()["granted_at"] == before["granted_at"]
+
+    def test_already_permitted_shutdown_makes_it_skipped(self, monkeypatch):
+        """关机位已经有了 → needs_shutdown=True 也不算升级，不重复弹窗。"""
+        session, _ = self._grant_watchdog(shutdown=True)
+        gui, calls = self._stub_dialog(monkeypatch, shutdown_permitted=False)
+
+        result = gui.ensure_takeover_approved(
+            "挂机关机：采集跑完", requested_mode="watchdog", needs_shutdown=True
+        )
+
+        assert calls == []
+        assert result["status"] == "skipped"
+        # skipped 如实回报现值，不再写死 False（否则调用方以为权限丢了）
+        assert result["shutdown_permitted"] is True
+        assert session.can_shutdown() is True
+
+    def test_normal_mode_needs_shutdown_is_not_an_upgrade(self, monkeypatch):
+        """关机位只在 watchdog 模式存在：normal 会话带 needs_shutdown 仍走 skipped。
+
+        否则会弹一个"看门狗控件不可见、复选框读不到"的窗，用户点了也拿不到关机权限。
+        """
+        session = get_session_manager()
+        session.grant(
+            mode=SessionMode.NORMAL, task_description="普通任务", source="agent"
+        )
+        gui, calls = self._stub_dialog(monkeypatch)
+
+        result = gui.ensure_takeover_approved("普通任务", requested_mode="normal", needs_shutdown=True)
+
+        assert calls == []
+        assert result["status"] == "skipped"
+        assert session.status()["mode"] == "normal"
+
+    def test_route_upgrades_shutdown_on_fresh_confirmation(self, client, monkeypatch):
+        """端点级：needs_shutdown 请求经用户新批准后，关机位落到 session。"""
+        session = get_session_manager()
+        session.grant(
+            mode=SessionMode.WATCHDOG,
+            task_description="睡前盯着任务跑完",
+            source="agent",
+            max_duration_hours=10,
+            shutdown_permitted=False,
+        )
+        overlay = server.overlay_client.overlay_client
+        seen: dict = {}
+
+        def fake_ensure(*args, **kwargs):
+            seen.update(kwargs)
+            return {
+                "status": "confirmed",
+                "reason": "",
+                "task_authorization": True,
+                "requested_mode": "watchdog",
+                "authorized_mode": "watchdog",
+                "max_duration_hours": 10,
+                "shutdown_permitted": True,
+            }
+
+        monkeypatch.setattr(overlay, "ensure_takeover_approved", fake_ensure)
+
+        resp = client.post(
+            "/screen/control/request",
+            json={
+                "task_description": "挂机关机：采集跑完",
+                "source": "yihuan_gacha",
+                "mode": "watchdog",
+                "needs_shutdown": True,
+            },
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert seen.get("needs_shutdown") is True, "端点要把 needs_shutdown 透传给弹窗判定"
+        assert body["status"] == "authorized"
+        assert body["mode"] == "watchdog"
+        assert "沿用现有授权" not in body["message"]
+        assert session.status()["shutdown_permitted"] is True
+        assert session.can_shutdown() is True
+
+    def test_route_skipped_message_points_at_needs_shutdown(self, client, monkeypatch):
+        """skipped 的响应要自解释：告诉 agent 升级权限的正确姿势，而不是让它去 release。"""
+        session = get_session_manager()
+        session.grant(
+            mode=SessionMode.WATCHDOG,
+            task_description="睡前盯着任务跑完",
+            source="agent",
+            max_duration_hours=10,
+            shutdown_permitted=True,
+        )
+        overlay = server.overlay_client.overlay_client
+
+        monkeypatch.setattr(
+            overlay,
+            "ensure_takeover_approved",
+            lambda *args, **kwargs: {
+                "status": "skipped",
+                "reason": "",
+                "task_authorization": True,
+                "requested_mode": kwargs.get("requested_mode", "normal"),
+                "authorized_mode": "watchdog",
+                "max_duration_hours": None,
+                "shutdown_permitted": True,
+            },
+        )
+
+        resp = client.post(
+            "/screen/control/request",
+            json={"task_description": "采集脚本自动翻页", "source": "yihuan_gacha", "mode": "normal"},
+        )
+
+        assert resp.status_code == 200
+        message = resp.json()["message"]
+        assert "沿用现有授权" in message
+        assert "needs_shutdown" in message, "提示走升级参数，不再要求先 release"
+        assert "先 screen_release_control" not in message
+        assert session.status()["shutdown_permitted"] is True
+
+
+# ========== T11: 升级判据的唯一真源 = SessionManager.needs_new_approval（E 项收口） ==========
+
+
+class TestNeedsNewApprovalPredicate:
+    """渲染层与测试替身都消费这一个判据，不再各自抄条件（同一条规则写两遍正是漂移的源头）。"""
+
+    def _mgr(self):
+        return get_session_manager()
+
+    def test_no_authorization_always_asks(self):
+        reset_session_manager(start_worker=False)
+        assert self._mgr().needs_new_approval("normal") is True
+        assert self._mgr().needs_new_approval("watchdog", True) is True
+
+    def test_normal_request_while_active_is_not_upgrade(self):
+        mgr = self._mgr()
+        mgr.grant(mode=SessionMode.NORMAL, task_description="t", source="test")
+        assert mgr.needs_new_approval("normal") is False
+
+    def test_normal_to_watchdog_is_upgrade(self):
+        mgr = self._mgr()
+        mgr.grant(mode=SessionMode.NORMAL, task_description="t", source="test")
+        assert mgr.needs_new_approval("watchdog") is True
+
+    def test_watchdog_repeat_is_not_upgrade(self):
+        mgr = self._mgr()
+        mgr.grant(
+            mode=SessionMode.WATCHDOG, task_description="t", source="test", max_duration_hours=1
+        )
+        assert mgr.needs_new_approval("watchdog") is False
+
+    def test_missing_shutdown_bit_is_upgrade_only_when_declared(self):
+        mgr = self._mgr()
+        mgr.grant(
+            mode=SessionMode.WATCHDOG,
+            task_description="t",
+            source="test",
+            max_duration_hours=1,
+            shutdown_permitted=False,
+        )
+        assert mgr.needs_new_approval("watchdog", False) is False
+        assert mgr.needs_new_approval("watchdog", True) is True
+
+    def test_existing_shutdown_bit_is_not_upgrade(self):
+        mgr = self._mgr()
+        mgr.grant(
+            mode=SessionMode.WATCHDOG,
+            task_description="t",
+            source="test",
+            max_duration_hours=1,
+            shutdown_permitted=True,
+        )
+        assert mgr.needs_new_approval("watchdog", True) is False
+
+    def test_needs_shutdown_on_normal_mode_is_not_upgrade(self):
+        """关机位只存在于 watchdog：normal 会话带 needs_shutdown 也不能算升级。
+
+        否则会弹一个"看门狗控件不可见、用户无从勾选关机"的窗，点了也拿不到权限。
+        """
+        mgr = self._mgr()
+        mgr.grant(mode=SessionMode.NORMAL, task_description="t", source="test")
+        assert mgr.needs_new_approval("normal", True) is False
+
+
+# ========== T12: 被动 takeover 闸门是纵深防御，不是授权入口（A/D 项） ==========
+
+
+class TestPassiveGateIsDefenseInDepth:
+    """无授权时副作用端点 403 在前面，接管弹窗根本弹不出来——别把账面兜底当实际兜底。
+
+    ⚠️ conftest 默认把 `routes._ensure_takeover_approved` 整体 stub 成 `(True, "")`
+    （否则测试环境没有 GUI 子进程，fail-closed 会挡掉所有键鼠端点用例）。
+    本类必须先把它换回真函数（`_ensure_takeover_approved_orig`），否则
+    "闸门有没有弹窗"的断言全是假绿灯。
+    """
+
+    SIDE_EFFECT_PATHS = [
+        ("/screen/action", {"action": "click", "x": 10, "y": 10}),
+        ("/screen/batch-actions", {"actions": [{"action": "click", "x": 10, "y": 10}]}),
+    ]
+
+    def _real_gate(self, monkeypatch):
+        import server.screen.routes as routes
+
+        real = getattr(routes, "_ensure_takeover_approved_orig", routes._ensure_takeover_approved)
+        monkeypatch.setattr(routes, "_ensure_takeover_approved", real)
+        return real
+
+    def test_no_permission_403s_without_popping_takeover_dialog(self, client, monkeypatch):
+        reset_session_manager(start_worker=False)
+        self._real_gate(monkeypatch)
+        overlay = server.overlay_client.overlay_client
+        pops: list = []
+        monkeypatch.setattr(
+            overlay,
+            "ensure_takeover_approved",
+            lambda *args, **kwargs: pops.append(kwargs) or {
+                "status": "cancelled",
+                "reason": "不该被调用",
+                "task_authorization": False,
+            },
+        )
+
+        for path, payload in self.SIDE_EFFECT_PATHS:
+            resp = client.post(path, json=payload)
+            assert resp.status_code == 403, f"{path} 应被会话权限检查拦下"
+            assert resp.json()["detail"]["error"] == "unauthorized"
+
+        assert pops == [], "无授权时端点先 403，被动闸门不可达（唯一授权入口是 /control/request）"
+
+    def test_active_session_passes_gate_without_dialog(self, client, monkeypatch):
+        """会话 active 时 gate 第一行就放行：这就是 watchdog '不弹窗' 的实现点。"""
+        import server.screen.action_endpoints as endpoint
+
+        self._real_gate(monkeypatch)
+        get_session_manager().grant(
+            mode=SessionMode.WATCHDOG,
+            task_description="盯任务",
+            source="test",
+            max_duration_hours=1,
+        )
+        overlay = server.overlay_client.overlay_client
+        pops: list = []
+        monkeypatch.setattr(
+            overlay,
+            "ensure_takeover_approved",
+            lambda *args, **kwargs: pops.append(kwargs) or {
+                "status": "cancelled",
+                "reason": "不该被调用",
+                "task_authorization": False,
+            },
+        )
+        monkeypatch.setattr(
+            endpoint, "_execute_action", lambda **kwargs: {"success": True, "message": "stub"}
+        )
+
+        resp = client.post("/screen/action", json={"action": "click", "x": 10, "y": 10})
+
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+        assert pops == [], "已授权时 gate 应静默放行，不弹接管窗"
+
+    def test_gate_grant_branch_still_grants_when_called_directly(self, monkeypatch):
+        """兜底分支本身语义不变：confirmed + task_authorization 才 grant（纵深防御保留）。
+
+        生产里这条分支只在"某端点漏掉 403 检查"或两次调用之间授权到期的竞态下才走到。
+        """
+        gate = self._real_gate(monkeypatch)
+
+        reset_session_manager(start_worker=False)
+        overlay = server.overlay_client.overlay_client
+        monkeypatch.setattr(overlay, "overlay_visible", False)
+        monkeypatch.setattr(
+            overlay,
+            "ensure_takeover_approved",
+            lambda *args, **kwargs: {
+                "status": "confirmed",
+                "reason": "",
+                "task_authorization": True,
+                "authorized_mode": "normal",
+            },
+        )
+
+        approved, _ = gate({"takeover_confirm_enabled": True}, "兜底测试")
+
+        assert approved is True
+        assert get_session_manager().status()["mode"] == "normal", "兜底分支应完成 grant"
+
+        # active 后重复调用直接放行，不再弹窗（删掉不可达的 watchdog 分支后语义不变）
+        get_session_manager().grant(
+            mode=SessionMode.WATCHDOG,
+            task_description="盯任务",
+            source="test",
+            max_duration_hours=1,
+        )
+        calls: list = []
+        monkeypatch.setattr(
+            overlay,
+            "ensure_takeover_approved",
+            lambda *args, **kwargs: calls.append(kwargs) or {"status": "cancelled"},
+        )
+        approved, _ = gate({"takeover_confirm_enabled": True}, "盯任务")
+        assert approved is True and calls == []
+
+
+# ========== T13: /health 的空闲时长上报必须来自两阶段真源 ==========
+
+
+class TestHealthIdleTimeoutReporting:
+    """遗留 `takeover_idle_timeout_seconds`（300）不再决定撤销时机，就不能被报成"空闲超时"。"""
+
+    def _persistent(self) -> dict:
+        from server.core.health import _get_persistent_status
+
+        return _get_persistent_status()
+
+    def test_inactive_reports_two_phase_total_not_legacy_300(self):
+        reset_session_manager(start_worker=False)
+        status = self._persistent()
+        assert status["idle_timeout_seconds"] == (
+            status["idle_warning_seconds"] + status["idle_grace_seconds"]
+        )
+        assert status["idle_timeout_seconds"] != status["configured_idle_timeout_seconds"], (
+            "遗留展示值不应等于真实空闲撤销时长，否则面板/文档会把它读成空闲超时"
+        )
+
+    def test_normal_reports_policy_total(self):
+        get_session_manager().grant(
+            mode=SessionMode.NORMAL, task_description="t", source="test"
+        )
+        status = self._persistent()
+        assert status["idle_timeout_seconds"] == (
+            status["idle_warning_seconds"] + status["idle_grace_seconds"]
+        )
+
+    def test_watchdog_reports_zero(self):
+        """watchdog 不因空闲撤销：idle_timeout_seconds 必须是 0，不能落到两阶段值上。"""
+        get_session_manager().grant(
+            mode=SessionMode.WATCHDOG,
+            task_description="t",
+            source="test",
+            max_duration_hours=1,
+        )
+        status = self._persistent()
+        assert status["mode"] == "watchdog"
+        assert status["idle_timeout_seconds"] == 0
+
+
+# ========== T14: 紧急停止撤销授权（F 项：撤销永久 + 失败不静默） ==========
+
+
+class TestEmergencyStopRevokesAuthorization:
+    def _reset_cooldown(self, emergency):
+        emergency._stopped = False
+        emergency._cooldown_until = 0.0
+
+    def test_emergency_stop_releases_watchdog_and_shutdown(self):
+        from server.screen.security import emergency
+
+        self._reset_cooldown(emergency)
+        mgr = get_session_manager()
+        mgr.grant(
+            mode=SessionMode.WATCHDOG,
+            task_description="睡前盯任务",
+            source="test",
+            max_duration_hours=1,
+            shutdown_permitted=True,
+        )
+        try:
+            emergency._trigger()
+            assert mgr.is_active() is False
+            assert mgr.can_operate() is False
+            assert mgr.can_shutdown() is False
+            assert mgr.status()["mode"] == "no_permission"
+            assert mgr.status()["revoked_reason"] == "emergency_stop"
+        finally:
+            self._reset_cooldown(emergency)
+            reset_session_manager(start_worker=False)
+
+    def test_release_failure_is_logged_loudly_not_swallowed(self, monkeypatch, caplog):
+        """release 抛异常时过去是 `except: pass`——按了 panic 键却没人知道授权还在。"""
+        import logging
+
+        from server.screen import security
+        from server.screen.session.manager import SessionManager
+
+        self._reset_cooldown(security.emergency)
+        hide_calls: list = []
+        overlay = server.overlay_client.overlay_client
+        monkeypatch.setattr(
+            overlay, "hide_overlay", lambda *a, **k: hide_calls.append(True), raising=False
+        )
+
+        def boom(self, reason: str = "manual") -> bool:  # noqa: ARG001
+            raise RuntimeError("session 模块炸了")
+
+        try:
+            with caplog.at_level(logging.ERROR):
+                monkeypatch.setattr(SessionManager, "release", boom)
+                security.emergency._trigger()
+            assert hide_calls, "撤销失败时应尽力隐藏顶栏，不留「已授权」假象"
+            assert any(
+                r.levelno >= logging.ERROR and "撤销任务授权" in r.getMessage()
+                for r in caplog.records
+            ), "撤销失败必须记 ERROR，不能静默 pass"
+        finally:
+            self._reset_cooldown(security.emergency)
+
+
+
+class TestGatedSideEffectListIsDerived:
+    """/health 的 protected_endpoints 改为现场扫描路由表（routes.gated_side_effect_operations）。
+
+    手写名单已经两次失真：`modes.py` 的 ENDPOINTS_SIDE_EFFECT/ENDPOINTS_READONLY 全仓
+    零消费、还漏掉实际被把关的剪贴板读写与 scroll_capture（2026-09-30 已删除）；
+    `health.py` 的 protected_endpoints 硬编码 4 项，让人以为只有 4 个端点受保护。
+    把关清单是安全行为的一部分，集合变化时这里必须红，逼着改动者意识到。
+    """
+
+    def test_gated_list_covers_all_known_side_effect_handlers(self):
+        from server.screen.routes import gated_side_effect_operations
+
+        gated = set(gated_side_effect_operations())
+        must_gate = {
+            "execute_action",
+            "batch_actions",
+            "screen_desktop_transaction",
+            "screen_semantic_action",
+            "focus_window",
+            "screen_window_minimize",
+            "screen_window_restore",
+            "screen_window_raise",
+            "screen_window_close",
+            "screen_app_launch",
+            "read_clipboard",
+            "write_clipboard",
+            "scroll_capture",
+        }
+        missing = must_gate - gated
+        assert not missing, (
+            "这些端点的 handler 源码里没有 _enforce_session_permission()："
+            f"要么把关被漏掉，要么端点改名了——两条路都必须有人类决策，不能让清单静默漂移: {sorted(missing)}"
+        )
+        assert gated, "扫描得到空清单：路由表扫描本身坏了"
+
+    def test_readonly_endpoints_are_not_gated(self):
+        from server.screen.routes import gated_side_effect_operations
+
+        gated = set(gated_side_effect_operations())
+        leaked = gated & {"screen_capture", "screen_ocr", "screen_snapshot", "screen_list_windows"}
+        assert not leaked, f"只读端点不该被权限闸门把关（否则无授权连截图都做不了）: {sorted(leaked)}"
+
+    def test_health_protected_endpoints_serves_derived_list(self):
+        from server.core import health
+        from server.screen.routes import gated_side_effect_operations
+
+        served = health._gated_side_effect_operations()
+        assert served == gated_side_effect_operations()
+        assert served, "/health 的 protected_endpoints 不应为空"
+
+
+class TestRequestedHoursReachDialog:
+    """max_duration_hours 必须下传到弹窗，作为时长 spinbox 的初值。
+
+    2026-09-30 实机 4 次"请求 1 小时"全部被授权成 36000 秒（10 小时）：
+    confirm_start 消息里根本不带时长，GUI 子进程端 spinbox 从默认 10 起步，
+    用户没动就按 10 小时授权——agent 拿到的授权比它请求的更宽。
+    修复后：请求值进 confirm_start 载荷（用户仍可上调），未传时保持默认 10。
+    """
+
+    @staticmethod
+    def _bare_client(monkeypatch, result: dict, captured: dict):
+        client = server.overlay_client.OverlayClient.__new__(server.overlay_client.OverlayClient)
+        monkeypatch.setattr(client, "_overlay_visible", False, raising=False)
+
+        def fake_send(msg, timeout):  # noqa: ARG001
+            captured.update(msg)
+            # 真实 GUI 子进程 _finish 会回传 spinbox 当前值；用户没动即载荷里的请求值
+            echoed = dict(result)
+            echoed["max_duration_hours"] = msg.get("max_duration_hours")
+            return echoed
+
+        monkeypatch.setattr(client, "_send_confirm_start_and_wait", fake_send, raising=False)
+        return client
+
+    def test_confirm_start_payload_carries_requested_hours(self, monkeypatch):
+        captured: dict = {}
+        client = self._bare_client(
+            monkeypatch,
+            {
+                "status": "confirmed",
+                "task_authorization": True,
+                "requested_mode": "watchdog",
+                "authorized_mode": "watchdog",
+                "shutdown_permitted": True,
+                "max_duration_hours": None,  # 会被 fake_send 的回传覆盖：真实弹窗回传 spinbox 值
+            },
+            captured,
+        )
+        result = client.ensure_takeover_approved(
+            "测试任务",
+            force_prompt=True,
+            requested_mode="watchdog",
+            needs_shutdown=True,
+            max_duration_hours=2,
+        )
+        assert captured.get("max_duration_hours") == 2, (
+            "请求时长必须进 confirm_start 载荷（GUI 子进程端以它初始化 spinbox）"
+        )
+        assert result["max_duration_hours"] == 2
+
+    def test_hours_absent_defaults_to_none_in_payload(self, monkeypatch):
+        captured: dict = {}
+        client = self._bare_client(
+            monkeypatch,
+            {
+                "status": "confirmed",
+                "task_authorization": True,
+                "requested_mode": "watchdog",
+                "authorized_mode": "watchdog",
+                "shutdown_permitted": True,
+                "max_duration_hours": 10,  # 弹窗默认 10
+            },
+            captured,
+        )
+        client.ensure_takeover_approved(
+            "测试任务", force_prompt=True, requested_mode="watchdog"
+        )
+        assert captured.get("max_duration_hours") is None, (
+            "未传时长时载荷应保持 None，由 GUI 子进程沿用默认 10"
+        )
+
+
+class TestSkippedRequestIsMachineReadable:
+    """`reused_approval` 字段：skipped（沿用旧授权）对外必须机器可读。
+
+    修复前对外 status 一律是 "authorized"，"这次有没有新的用户批准"只能靠
+    message 文本猜——agent 判断不了"用户刚刚是否在场做过决定"。
+    """
+
+    def _grant_watchdog(self):
+        session = get_session_manager()
+        session.grant(
+            mode=SessionMode.WATCHDOG,
+            task_description="睡前盯着任务跑完",
+            source="agent",
+            max_duration_hours=10,
+            shutdown_permitted=True,
+        )
+        return session
+
+    def test_skipped_request_reports_reused_approval(self, client):
+        session = self._grant_watchdog()
+        resp = client.post(
+            "/screen/control/request",
+            json={"task_description": "采集脚本自动翻页", "source": "yihuan_gacha", "mode": "normal"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["reused_approval"] is True, (
+            "skipped（无新批准）必须以 reused_approval=True 机器可读，不能只靠 message 文本"
+        )
+        assert session.status()["shutdown_permitted"] is True
+
+    def test_fresh_grant_reports_new_approval(self, client):
+        session = get_session_manager()
+        if session.is_active():
+            session.release("agent_release")
+        resp = client.post(
+            "/screen/control/request",
+            json={"task_description": "新批准", "mode": "normal"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["reused_approval"] is False, "弹窗里真的做了新批准 → reused_approval=False"
+        session.release("agent_release")
+
+
+class TestFileLogIsolatedFromPytest:
+    """pytest 进程内不得挂 server.log 文件 handler。
+
+    2026-09-30 实测：server/main.py 模块级 _setup_logging() 把 RotatingFileHandler
+    挂上根 logger，测试的 ERROR（紧急停止单测的假异常"session 模块炸了"）落进生产
+    data/logs/server.log 6 组，污染运维判读。修法：under_pytest 时跳过文件 handler。
+    """
+
+    def test_no_rotating_file_handler_in_pytest_process(self):
+        import logging
+        from logging.handlers import RotatingFileHandler
+
+        import server.main  # noqa: F401  模块级 _setup_logging() 随 import 执行
+
+        file_handlers = [
+            h for h in logging.getLogger().handlers if isinstance(h, RotatingFileHandler)
+        ]
+        assert not file_handlers, (
+            "pytest 进程里挂着 server.log 文件 handler——测试日志会写进生产日志文件"
+        )

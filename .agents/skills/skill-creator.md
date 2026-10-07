@@ -81,6 +81,14 @@ Skill 由两类内容构成：**steps** 与 **reference**。核心决策是把�
 - **No-op** - 模型默认就会做的 instruction。测试：它是否改变默认 behavior？弱 leading word（如 _be thorough_，当 agent 已经大致 thorough）就是 no-op；修法是换更强的词（如 _relentless_）。
 - **Negation** - 用禁止来引导会适得其反：_don't think of an elephant_ 点名了 elephant，让它更容易浮现。应 prompt **positive**：直接说明目标 behavior，让被禁止的行为不进入表述；只有无法正向表达的 hard guardrail 才保留 prohibition，而且仍要配上应该怎么做。
 
+## 准入判断（该不该建）
+
+**默认不建。** 先确认这个 skill 值得存在，再往下走流程。判据见 `AGENTS.md`「Skill 编写」——**同时**满足才建：① **高频**（会反复发生，不是一次性）；② **有坑**（没有指导就会反复踩、试错多次才走通）。
+
+不满足时的去处：一次性成功又不常做的 → 记日志或 `docs/` 专题文档；已有 skill 能覆盖 → 直接路由过去。
+
+只满足一条、或两条都不满足仍建 skill，是**负资产**——多一个要维护、要同步索引（`_index.md` / `GUIDE_REGISTRY`）、还会在路由时抢触发词的东西。
+
 ## 工作流程
 
 ### 阶段 1：意图捕获

@@ -19,18 +19,22 @@ task_type: system.wip_archive
 ### step_1: 筛选 completed WIP
 
 ```
-wip_list(summary=true)  # 只看摘要：id/title/status/priority/progress
+wip_list(status='completed')  # 默认轻量模式：已完结条目只给 id/截断标题/status/updated_at + closed=true
 ```
 
-筛选 `status='completed'` 的条目。若没有 completed 的，告知用户无需归档并结束。
+这里**只用于拿 id**——默认轻量模式下已完结条目的标题被截断（超 24 字加 `…`），不能靠它读内容。
+若没有 completed 的，告知用户无需归档并结束。
 
-> 注意 `wip_list` 直连 MCP 工具，免审批。但 `wip_get`/`wip_delete` 走 `localagent_advanced_tool` 网关。
+> `wip_list` / `wip_get_many` 是直连 MCP 工具，免审批。`wip_delete` 走 `localagent_advanced_tool` 网关。
 
 ### step_2: 逐条提炼经验
 
+先用 `wip_get_many(ids=[...])` 一次把 step_1 收集到的 id 全部取回完整字段
+（不要逐条 `wip_get`，也不要把 `summary` 关掉整表拉取——后者体积约为轻量模式一个数量级以上）。
+
 对每条 completed WIP：
 
-1. `localagent_advanced_tool(tool="wip_get", params={"task_id": "<id>"})` 读详情
+1. 从批量结果里取该条的 goal/next_steps/current_state/related_files
 2. 评估可归档性：
    - **可归档**：含跨会话复用价值的项目状态、决策约束、踩坑经验、工程约定
    - **不归档**：一次性临时任务、已被代码/git 记录覆盖、AGENTS.md 已记录的内容
@@ -106,8 +110,8 @@ active ──暂停──> paused
 
 | 依赖 | 路径/接口 | 说明 |
 |------|----------|------|
-| 待办模块 | `wip_list`（MCP 直连，免审批） | 筛选 completed WIP |
-| 待办模块 | `localagent_advanced_tool(wip_get)` （网关，GET 免审批） | 读 WIP 详情 |
+| 待办模块 | `wip_list(status='completed')`（MCP 直连，免审批） | 取已完结清单（默认轻量，标题截断，仅用于拿 id） |
+| 待办模块 | `wip_get_many`（MCP 直连，免审批） | 按 id 批量取回完整详情 |
 | 记忆模块 | `memory_set`（MCP 直连） | 写入结构化记忆 |
 | 待办模块 | `localagent_advanced_tool(wip_delete)`（网关，DELETE） | 物理删除 WIP 记录 |
 

@@ -97,12 +97,29 @@ class EmergencyStopManager:
         logger.warning(f"紧急停止已触发！{self._cooldown_seconds}秒内禁止Agent操作")
         # T16：撤销授权改调 SessionManager（替代 overlay_client.release_task_control）
         # hide_overlay 由 OverlayClient._on_session_event 订阅 release 事件自动处理，
-        # 不在此处重复调用（避免冗余 + 维持会话管理层与 GUI 渲染层职责分离）
+        # 正常路径不在此处重复调用（避免冗余 + 维持会话管理层与 GUI 渲染层职责分离）。
+        # ⚠️ 冷却只挡"新操作"若干秒，**撤销才是永久闸门**：撤销没做成却静默 pass，
+        # 用户按了 panic 键而顶栏还亮着、副作用端点照旧放行（2026-09-30 状态机审计发现）。
         try:
             from server.screen.session import get_session_manager
-            get_session_manager().release("emergency_stop")
-        except Exception:
-            pass
+            session = get_session_manager()
+            was_active = session.is_active()
+            session.release("emergency_stop")
+            if was_active and session.is_active():
+                logger.error(
+                    "紧急停止：release 后授权仍 active，副作用端点还会放行——"
+                    "请立即在 GUI 面板收回授权或重启后端"
+                )
+        except Exception as e:
+            logger.error(
+                f"紧急停止：撤销任务授权异常（{e}），无法确认授权已清除；"
+                "请用 GET /health 的 screen.takeover_persistent 复核，或在 GUI 面板收回/重启后端"
+            )
+            try:  # 尽力让顶栏先消失，别让界面继续挂着"已授权"的假象
+                from server.overlay_client import overlay_client
+                overlay_client.hide_overlay()
+            except Exception:
+                pass
 
     def can_operate(self) -> bool:
         """检查当前是否允许Agent操作"""

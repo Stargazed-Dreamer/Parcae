@@ -50,7 +50,7 @@
 - 构想期文档（`00-overview.md`、`NN-*.md`、`design-decisions.md`、`grill-me.md`）在 SDD 之前产出，作为 grill-me 的输入
 - SDD 产物（`spec.md`、`tickets.md`、`checklist.md`）在 grill-me → to-spec → to-tickets 流程中产出，与构想期文档同处一个文件夹
 - **不写 wip 记录**：不调 `wip_create`，文档文件本身是真源，implement skill 直接从路径读取
-- **temp/ 不进 git**：`temp/` 在 `.gitignore` 中整体排除，SDD 文档不纳入版本控制。SDD 文档属"工作记忆"，跨会话恢复依赖文件本身存在；如需长期归档，由用户决策迁入 `workspace/sdd_archive/` 或类似位置
+- **`temp/` 的 ignore 姿势（别当成"整体不进 git"）**：`.gitignore` 写的是 `temp/*`（**不是** `temp/` —— 写成 `temp/` 时 git 无法重新纳入被排除目录下的文件，下方按名豁免会全成死规则），再按名 `!` 豁免。默认不入库的是当轮 SDD 产物（`temp/sdd/` 被豁免后又按名重新挡掉）与各类临时脚本；**长期归档 `temp/planning_archive/`（含其下的 `sdd/<slug>/`）随仓库跟踪**——SDD 收尾时由用户决定是否把该轮产物迁入归档，迁进去就进版本库。豁免清单以 `.gitignore` 为准，**要确认某个产物还在不在库里，用 `git ls-files temp/<子路径>` 或 `git check-ignore -v <path>` 实测，不要凭"temp 被忽略"下结论**（2026-09-28 就因此把"路径消失"误判成"内容丢失"，见 `docs/chat-engine.md` 开头与 ADR-0017 的指针更正）
 
 ### `planning_notes/` 的现状
 
@@ -113,11 +113,19 @@ uv run pyright
 ### 3. 硬化规则检查（2026-08-31 新增，"说过三遍的规则"→"会变红的构建"）
 
 ```
-uv run python tools/check_hard_rules.py            # 全量（pytest 已挂 quick 层：tests/test_hard_rules.py）
+uv run python tools/check_hard_rules.py            # 全量（pytest 已挂 quick 层：tests/test_hard_rules.py + tests/test_hard_rules_dead_refs.py）
 uv run python tools/check_hard_rules.py --staged   # staged（pre-commit hook 自动跑，已生效）
 ```
 
-四项：C1 tracked `.py/.md/.toml/.json` 无 UTF-8 BOM ｜ C2 源码无硬编码密钥字面量 ｜ C3 文档路径越界（.html 只许白名单位置、根目录 .md 锁定）｜ C4 import 边界（client↔server 互不许 import，白名单除外）。规则真源与白名单都在 `tools/check_hard_rules.py` 常量内——**白名单变更必须显式改代码并 commit**（这正是"硬化"的含义），不支持任何配置文件旁路。hook 安装：`uv run python tools/check_hard_rules.py install`（重克隆/换机后需重跑一次）。
+六项：C1 tracked `.py/.md/.toml/.json` 无 UTF-8 BOM ｜ C2 源码无硬编码密钥字面量 ｜ C3 文档路径越界（.html 只许白名单位置、根目录 .md 锁定）｜ C4 import 边界（client↔server 互不许 import，白名单除外）｜ C5 MCP 工具名（文档里写的 `mcp__localagent__X` 必须在第一层直连表 `server/mcp_whitelist.py` 的 `DIRECT_TOOLS` 内——只有 `DIRECT_TOOLS` 里列出的那些会以该形式存在（**条数以该常量为准，不在本文写死**），其余只能走 `localagent_advanced_tool(tool="X")`；同行含 `not found`/`不是`/`禁止` 等反例语境自动豁免）｜ **C6 死链**（在用文档引用的仓库内路径必须解析得到）。
+
+C6 的口径与豁免（2026-10-07 上闸；三基准实测见 `temp/20261007_dead_ref_scan.py`）：
+- **基准=仓库根**，但沿 md 的**各级祖先目录**能解析的也算数（`workspace/` 下是各自独立的子项目，homework 的文档按 `tools/hw_*.py` 这种"自己根"写法引用是合法风格；只按 md 自己那格判会把这些全读成死链）。
+- **只扫在用文档面**：`CHANGELOG.md`、`docs/changelog-archive.md`、`.agents/wip/`、`.workbuddy/`、`planning_notes/`、`workspace/*/records|logs/` 整份豁免——它们提到已删除的路径是正当职责（记的是"曾经有过"），拦它们等于逼文档说谎。实测这两类之外还剩 154 处，其中通配/占位（`models/*`、`<file>`、`_template.md`）任何基准都判不了，也豁免。
+- **存量走 `DEAD_DOC_PATH_BASELINE` 名单**：闸门只挡**新增**；名单里每一条都还是待修的死链，不是"已认可的写法"。全量跑会反查名单——条目修好了却不删行，会报 `C6 基线陈旧`。条数不在本文写死，看 `tools/check_hard_rules.py` 那份常量。
+- ⚠️ 洗存量时别只改路径：这些引用里有一批带**行号**（那批引用指向 tests 目录下的 conftest，而真实文件在仓库根），实测行号也已过时（根 `conftest.py` 现 852 行，且那段不是它说的 `mock_overlay_client`）。只换路径等于造出一条"看起来很确定的假引用"——要么把行号一起复验，要么改成符号锚点。
+
+规则真源与白名单都在 `tools/check_hard_rules.py` 常量内——**白名单变更必须显式改代码并 commit**（这正是"硬化"的含义），不支持任何配置文件旁路。hook 安装：`uv run python tools/check_hard_rules.py install`（重克隆/换机后需重跑一次）。
 
 配套工具：`tools/gen_feature_map.py` 生成 `data/feature_map.json`（GUI 面板→入口/控件/验证方式地图，改 client GUI 后重跑并回填手写字段）；guide 路由改动必跑 `uv run python tests/guide_eval/run_eval.py` 盲测集（<85% 红，见 `.trae/rules/project_rules.md` "Guide 关键词维护"）。
 
@@ -327,7 +335,7 @@ ruff check --fix --unsafe-fixes server client tests  # 修了 19 个
 
 # ✅ 正确：--unsafe-fixes 后必须跑全测试套件
 ruff check --fix --unsafe-fixes server client tests
-uv run python -m pytest tests/ -v --tb=short  # 验证没破坏功能
+uv run python tools/run_tests_batched.py  # 验证没破坏功能（分批全量，见"发版全量为什么用分批器"）
 ```
 
 #### 案例 4：代码修复后没验证生效
@@ -439,12 +447,45 @@ uv run python -m pytest tests/ -v --tb=short  # 验证没破坏功能
 |------|------|------|
 | **`tests/run_all.py`**（推荐） | 分层跑（quick 排除外部资源 / full 全跑），报告含失败复现命令 | `uv run python tests/run_all.py --quick` |
 | **`tools/run_tests_collect.py`** | 一次性收集全部失败（与 run_all 共用 test_runner 层） | `uv run python tools/run_tests_collect.py` |
+| **`tools/run_tests_batched.py`** | **发版全量**：按目录分批、每批独立进程、慢目录 2 路并行（真动桌面的批走独占段）+ 内存护栏 | `uv run python tools/run_tests_batched.py` |
 | **直接 pytest** | 单文件/单目录调试（看详细 traceback） | `uv run python -m pytest tests/memory -v --tb=short` |
 
 **收集范围**（2026-08-27 起）：脚本层经 `lib.component_manifest.collect_test_dirs()`
 自动扫描各组件 `manifest.toml` 的 `[tests]` 段，把 `workspace/<skill>/tests/` 一并纳入。
 所以脚本命令只写 `tests/` 也会自动带上 workspace 组件测试（当前 6 个目录），
 不要再手动拼 workspace 路径。
+
+**发版全量为什么用分批器（2026-09-29 本机实测）**：单进程跑完整套会把 RSS 推到 11-12 GB，
+而本机可用内存常态 8-9 GB，跑法本身会把测试打断。`tools/run_tests_batched.py` 把套件切成
+独立进程批次，每批跑完即释放：
+
+- **批次由 `discover_batches()` 现算**（`tests/` 各子目录 + 根平铺 `test_*.py` 逐个成批 +
+  各组件 `manifest.toml` 的 `[tests]` 目录），文档不写死批次数量。
+- **慢目录走并行、其余串行**：`SLOW_BATCHES` 按"真起 GUI / 真连 CDP 的单批墙钟"挑，
+  不看测试条数（纯逻辑目录几百条也只跑几秒，并行省不下进程启动开销）。实测同一台干净机器：
+  慢目录 4 批串行合计 650s，2 路并行墙钟 348s；整套约 10.5 分钟（单进程跑法约 12.7 分钟）。
+- **`SOLO_BATCHES` 独占段——会真动桌面的批，跑的时候不与其他任何批并行**：
+  `tests/approval_screen` 多数用例走 in-process `TestClient`，但服务端代码在测试进程里**真执行**
+  （`SetForegroundWindow` / `SendInput` / 起并杀 calc、notepad），`tests/browser` 驱动 CDP 上的
+  Chrome——本机只有一个前台槽。2026-10-03 实测两批同段并行会互相打红（各 1 真红），
+  且 `tests/browser` 那批因此被拖出 88 个静默 skip（同一批用例独占段跑是 362 passed / 3 skipped）。
+  代价是慢目录段墙钟变长（约 326s → 503s），换的是"闸门结果可信"。
+- **内存门槛按"同时在飞几个重进程"给，不按目录名给**（`_min_gb_for()`）：独占批和普通批用串行
+  门槛，只有真的要两路共存时才用并行门槛。踩过的坑：给独占批套 6.0 GB 并行闸后，可用内存
+  只剩 3.97 GB 时每个独占批都白等满 `WAIT_LIMIT_S=900s` 才放行。
+- **并行安全与否按"相对增量"判，不按绝对可用内存判**：2 路重叠期实测多吃约 4.7 GB
+  （起跑 20.6 GB → 谷底 15.9 GB）。看到"可用只剩 5 GB"先回头看起跑基线——那大概率是游戏/
+  大模型占着机器，不是并行批次吃掉的；基线本来就低时直接 `--serial`。
+- **退出码**：任一批非 0 即整体返回 1（含进程崩溃），不会因"多数批次绿"报绿灯。
+- **产出** `temp/batch_tests/`：`SUMMARY.md` + `mem_min.log`（内存 5s 采样、出现新低即追加，
+  跑到一半被杀也留得住数据）。每批 `.log`/`.xml` **只在该批非零时保留**——`_run_batch()`
+  解析完 JUnit XML 后把 rc=0 那批的产物自删，所以全绿的一轮跑完这里只剩上面两个文件。
+  上一轮遗留、本轮已无对应批次的产物（测试目录改名或被删）在起跑时由
+  `purge_orphan_artifacts()` 送进回收站（`tools/disk/recycle.py`，可恢复；送站失败就保留并打印。
+  只有本轮 `_run_batch` 自己造的绿批产物才直接物理删）。⚠️ 判孤儿的输入必须是未经 `--only`
+  过滤的全量批次，否则跑子集会误删别的批次留着待查的红批日志。红批日志文件名由
+  `_slug(批次标签)` 算出，`SUMMARY.md` 的非零明细行直接给出路径。`--only` 部分重跑改写
+  `SUMMARY.partial.md`，不再覆盖整轮那份（红批日志既已跨轮保留，覆盖索引等于丢索引）。
 
 ### 测试目录结构（按功能域分组，加新测试先归组）
 
@@ -518,7 +559,7 @@ uv run python tools\run_tests_collect.py
 
 参数说明（addopts 已配的参数，命令行不重复加）：
 - `-q -ra`（addopts）：安静进度 + 失败/跳过摘要
-- `-m 'not gpu and not ...'`：排除需要外部资源的测试（GPU/浏览器/真实后端/网络/混沌/E2E/GUI/数据迁移），只跑纯单元测试（约 4700 个，7 分钟左右）
+- `-m 'not gpu and not ...'`：排除需要外部资源的测试（GPU/浏览器/真实后端/网络/混沌/E2E/GUI/数据迁移），只跑纯单元测试（**条数与耗时随用例增减，以 pytest 收集结果为准；quick 层历史上按数分钟量级设计**）
 - `--tb=line`（脚本层覆盖 addopts 的 `--tb=short`）：每行一个失败摘要，避免长 traceback 淹没全局
 - `--maxfail=500`（addopts）：不在第一次失败时停，拿到全部失败
 - `--junit-xml=temp/test_results.xml`（脚本层加）：结构化输出，解析 XML 而非文本
@@ -724,7 +765,7 @@ pytest tests/  # 又 3 分钟
 
 1. **全测试套件验证（强制，2026-08-03 教训）**：发版前必须跑全测试套件，**所有测试通过或跳过有合理注释**才能发版。失败测试必须按"测试修复铁律"修复（查根因，禁止绕过）。
    ```
-   uv run python -m pytest tests/ -v --tb=short
+   uv run python tools/run_tests_batched.py     # 分批全量（单进程跑法会吃 11-12 GB 内存，见"发版全量为什么用分批器"）
    ```
    - 测试失败 → 修复（按 `docs/dev-workflow.md` "测试修复铁律"），不能跳过发版
    - 修测试后用了 `ruff --unsafe-fixes` → 必须再跑一次全测试验证
@@ -751,6 +792,7 @@ pytest tests/  # 又 3 分钟
 
 ### 发版关键陷阱
 
+- **本机在 agent 会话里跑全量测试要先关 safe-delete shim**：`CODEBUDDY_SAFE_DELETE_ENABLED=0 uv run python tools/run_tests_batched.py`（手动在终端跑不会被注入 shim，无需此变量）。不关的后果有两个，且都会伪装成"测试坏了"：① shim 的 bulk guard 按 **turn 累计**删除次数，到 500 次即 `SystemExit(1)`，让 `tests/release_ci::test_snapshot_roundtrip_no_line_content` 假红（它的报错只有一行 `SystemExit: 1`，真因在 Captured stderr 的 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`）；② 分批器自删绿批产物（`log_path.unlink()`）同样被拦，脚本会在写 `SUMMARY.md` 之前崩掉，表现为"跑了一半点没报告"。
 - **PowerShell 不支持 `&&` 串联命令语句**：用 `;` 顺序执行或拆成多次调用
 - **PowerShell 不支持 bash HEREDOC**：commit 信息用单个 `-m` 传单行标题，或多个 `-m` 传多段，或写到临时文件用 `git commit -F`
 - **`git add` 不要用 `-A` / `.`**：按目录 add，避免误纳入敏感文件
@@ -764,7 +806,7 @@ pytest tests/  # 又 3 分钟
 
 - 任何删除、清理、递归删除、格式化、强制覆盖、强制终止进程或会丢失用户数据的操作，必须使用 LocalAgent 的 exec_cmd、exec_terminal_spawn 或 exec_python，不要使用 Codex Desktop 的直接 shell/exec_command 路径。
 - 这样做不是为了故意限制或为难 Agent。模型确实可能出现幻觉、参数拼接错误或命令执行工具缺陷；dcg 和后端拦截是避免不可逆损失的最后防线，先询问用户通常没有害处。
-- 直接 shell 路径可能不触发 Codex PreToolUse Hook，因此即使 C:\\Users\\admin\\.codex\\hooks.json 存在，也不能把直接 shell 当作安全路线。
+- 直接 shell 路径可能不触发 Codex PreToolUse Hook，因此即使 `C:\Users\<用户名>\.codex\hooks.json` 存在，也不能把直接 shell 当作安全路线。
 - 返回 blocked=true 时，禁止改写、拆分、编码、写脚本、切换 shell、换工具或改用其他执行路径绕过。必须先说明完整命令、执行原因、目标、影响和更安全替代方案。
 - 平台有原生询问工具时优先询问；否则调用 command_guard_request_approval。用户明确批准后，使用返回的、只绑定原命令/shell/cwd 且只能消费一次的 approval_token 重试。
 - 删除操作必须使用精确路径。涉及 workspace/、weights/、data/、.venv/、server/、tools/、tests/ 或用户文件时，必须先列出清单并获得用户明确批准。
@@ -805,11 +847,11 @@ pytest tests/  # 又 3 分钟
    - 不修原因：单用户场景下加 TLS / user 绑定收益有限，且引入证书管理复杂度
    - 调试入口：`server/http_guard.py:_tokens_http` / `server/command_guard.py:_tokens`（纯内存 dict，重启即吊销所有未消费令牌）
 
-**遇到任务时，优先使用 MCP 工具，而不是自己写 Python 脚本。** 后端提供不超过 40 个直接 MCP 工具，另有高级工具网关（`localagent_advanced_tool` / `localagent_list_tools`）和模板网关（`localagent_template_tool` / `localagent_list_templates`），覆盖大部分常见操作：
+**遇到任务时，优先使用 MCP 工具，而不是自己写 Python 脚本。** 后端只暴露一小组直接 MCP 工具（白名单真源见 `server/mcp_whitelist.py`），另有高级工具网关（`localagent_advanced_tool` / `localagent_list_tools`）和模板网关（`localagent_template_tool` / `localagent_list_templates`），覆盖大部分常见操作：
 
 | 需求 | 正确做法 | 错误做法 |
 |------|---------|---------|
-| 接到任务不知怎么做 | `mcp_localagent_agent_guide(task='...')` 获取指导 + 候选清单 | 读 _index.md 扫描 51 个 skill |
+| 接到任务不知怎么做 | `mcp_localagent_agent_guide(task='...')` 获取指导 + 候选清单 | 读 _index.md 逐个扫描 skill |
 | 识别图片文字 | `mcp_localagent_ocr_*` | 自己写 PaddleOCR 脚本 |
 | 识别 UI 元素 | `mcp_localagent_understand_image`（布局/状态描述）+ `mcp_localagent_vision_locate`（坐标兜底） | 自己写 OmniParser 脚本 |
 | 截图（仅看尺寸） | `mcp_localagent_capture_screen` (format=base64, 只取 width/height) | 自己写 pyautogui 脚本 |
@@ -907,7 +949,7 @@ shutdown/health/config/llm_pool_*/activity_daily_*/user_message_*/inbox_batch/�
 - 禁止通过 PowerShell here-string、管道或 `.bat %*` 向 `apply_patch`、Python、Node 传递包含中文的源码或测试代码。
 - 修改源码优先使用 `exec_apply_patch(patch, cwd, dry_run)`；它直接调用 Codex 补丁入口，支持中文、多文件拆分、dry-run、修改文件清单和失败回滚。
 - `exec_python` 默认使用 LocalAgent 自身 Python。执行其他项目代码时必须传 `cwd` + `environment="workspace_venv"`，或显式传 `python_path`；返回值会显示实际解释器和工作目录。
-- `exec_python` 通过 stdin 管道将代码送入子解释器执行（不落临时文件），并把 `cwd` 注入 `sys.path/PYTHONPATH`，无需 PowerShell 转义。子进程 `__file__` 为 `<stdin>`，依赖 `__file__` 推路径的代码请改用 `exec_cmd` 跑 `python tools/xxx.py` 或 `exec_apply_patch` 写到具体位置。
+- `exec_python` 把代码写入 `temp/exec_<uuid>.py`，由 `server/_exec_runner.py` 在终端会话中执行（支持 top-level await；已替代旧的 stdin 管道方式），并把 `cwd` 插入 `sys.path`，无需 PowerShell 转义。⚠️ 子进程内 `__file__` 指向那个 **temp 脚本**而不是项目根——依赖 `__file__` 推路径的代码会把根算成 `temp/`；要跑仓库内脚本请改用 `exec_cmd` 执行 `python tools/xxx.py`，或用 `exec_apply_patch` 把代码写到具体位置。
 - 请求 `shell="powershell"` 时优先使用 PowerShell 7 (`pwsh.exe`)，不可用才回退 Windows PowerShell；响应会返回实际 shell 路径、家族和版本。
 - Windows PowerShell 5.1 不支持 `&&`；必须使用 `$LASTEXITCODE` 显式判断，或改用 PowerShell 7。
 - 中文断言不要依赖终端显示编码；优先从 UTF-8 源文件读取期望值，必要时使用 Unicode 码点。路径测试优先使用 `pathlib` 或正斜杠。
@@ -981,7 +1023,8 @@ node tools\mcp_bridge.js
 3. （仅 ChatGPT 桥接）`node --version` 应 ≥ 18；`npm ls -g mcp-remote` 应能看到包
 4. 防火墙是否阻止 localhost 连接
 
-> **平台迁移指南**：如需在 CatPaw/Trae/ChatGPT 之间切换或迁移到其他 IDE，请参阅 `.agents/<data_drive>:\Documents/platform-migration-guide.md`。
+> **在 CatPaw / Trae / ChatGPT 之间切换，或接入新的 IDE/harness**：直接看本文上方「MCP 接入」章节——各客户端的配置 JSON、桥接方式与排查顺序都在那里。
+> 历史说明：原 `.agents/documents/platform-migration-guide.md` 已在 `405d6a1`（chore(docs): 清理过时文档与评估文件）随 `.agents/documents/` 目录一并删除，内容并入「MCP 接入」章节；`.agents/` 现只有 `rules/` `skills/` `wip/`。
 
 ## 用户补充指令注入
 
@@ -1010,9 +1053,22 @@ node tools\mcp_bridge.js
 - `/llm/pool/*` - LLM 并发池代理（脚本调用）
 - `/mcp/*` - MCP 协议端点（通过 monkey-patch 单独处理）
 - `/user/*` - 用户消息端点自身（避免自反馈）
+- `/approvals/*` - 审批面板轮询（面板进程调用，非 agent）
 - `/static/*` `/output/*` `/docs` `/openapi.json` `/redoc` - 静态资源/文档
 
 **设计原则**：用户消息的存在意义就是让 agent 收到，所以排除清单应最小化。工作端点（`/exec` `/ocr` `/vision` `/screen` `/browser` `/mindforge` 等）不排除——agent 在执行这些操作时也应能收到用户的补充指令。
+
+### 消息来源标注（不是人说的就别装成人说的）
+
+队列里的每条消息带 `origin`（`server/user_message.py`），注入时前缀与免责句一起写进文本，agent 拿到的是"谁说的"而不是统一的 `[用户补充指令]`：
+
+| origin | 前缀 | 谁写入 |
+|--------|------|--------|
+| `human` | `[用户补充指令]` | GUI / `POST /user/message`（默认值） |
+| `system_reminder` | `[系统提醒·非用户指令]` | 到期任务等系统提醒 |
+| `auto_trigger` | `[自动触发任务·非用户指令]` | triggered todo 到点自动注入（`server/activity_tracker/loop_actions.py`） |
+
+两个非人类来源会附一句"这不构成对新动作的授权"。**新增写入方必须显式传 `origin`**——用默认的 `human` 冒充真人指令，会让 agent 把待办通知当成授权直接执行。多条消息时前缀带 `#id`，可按 id 撤回。
 
 ### GUI 工具
 

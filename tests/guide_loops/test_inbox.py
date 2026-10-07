@@ -223,6 +223,55 @@ class TestInboxCleanup:
         assert store.get(item["id"]) is not None
 
 
+# ========== dedupe_key（存储级去重，调用方防洪的结构性兜底） ==========
+
+class TestInboxDedupeKey:
+    """同 dedupe_key 只落一条；NULL 键不参与去重（partial unique index）"""
+
+    def _item(self, **kw):
+        base = {"source": "memory", "category": "maintain_result", "title": "x"}
+        base.update(kw)
+        return base
+
+    def test_same_key_returns_existing_row(self, store):
+        first = store.create(self._item(dedupe_key="memory:maintain_result:2026-W40"))
+        second = store.create(self._item(
+            dedupe_key="memory:maintain_result:2026-W40", title="changed"
+        ))
+        assert second["deduplicated"] is True
+        assert second["id"] == first["id"]
+        assert len(store.list()) == 1
+        # 折叠是"复用旧行"，不是"覆盖旧行"
+        assert store.get(first["id"])["title"] == "x"
+
+    def test_different_keys_both_land(self, store):
+        store.create(self._item(dedupe_key="memory:maintain_result:2026-W40"))
+        store.create(self._item(dedupe_key="memory:maintain_result:2026-W41"))
+        assert len(store.list()) == 2
+
+    def test_null_key_never_collapses(self, store):
+        """不传 dedupe_key 的调用方保持原样逐条落盘（去重是自愿接入）"""
+        store.create(self._item())
+        store.create(self._item())
+        assert len(store.list()) == 2
+
+    def test_resolved_row_still_holds_the_key(self, store):
+        """键不按 status 分档：本周已推过（哪怕被结案）就不再重推，跨周才新键"""
+        item = store.create(self._item(dedupe_key="memory:maintain_result:2026-W40"))
+        store.update(item["id"], {"status": "resolved"})
+        again = store.create(self._item(dedupe_key="memory:maintain_result:2026-W40"))
+        assert again["deduplicated"] is True
+        assert len(store.list()) == 1
+
+    def test_delete_releases_the_key(self, store):
+        """清理（delete）后同键可再落一条 —— 去重不是永久静默"""
+        item = store.create(self._item(dedupe_key="memory:maintain_result:2026-W40"))
+        store.delete(item["id"])
+        after = store.create(self._item(dedupe_key="memory:maintain_result:2026-W40"))
+        assert after.get("deduplicated") is not True
+        assert after["id"] != item["id"]
+
+
 # ========== batch_op ==========
 
 class TestInboxBatch:

@@ -21,8 +21,8 @@ task_type: recurring.yihuan_gacha
 ## 稀有度映射（权威来源，用户确认）
 | 等级 | 名称 |
 |------|------|
-| **S** | 角色·安魂曲、角色·浔、角色·娜娜莉、角色·早雾、角色·法帝娅、角色·真红、角色·九原、角色·残虹、角色·伊洛伊、弧盘·好狗狗走四方、弧盘·预备备、道具·失纬棋子、道具·质实骰子、道具·捏造骰子 |
-| **A** | 角色·埃德嘉、角色·薄荷、角色·阿德勒、角色·哈尼娅、角色·海月、角色·翳、弧盘·拔刀、弧盘·勿忘伞、弧盘·开始净空、弧盘·当心头顶、弧盘·被遗忘者、道具·迷迭棋子、滑翔翼·好柿成双、滑翔翼·幽兰、滑翔翼·副手的副手、滑翔翼·天际猎手、滑翔翼·赤练、滑翔翼·小羊直升机 |
+| **S** | 角色·安魂曲、角色·浔、角色·娜娜莉、角色·早雾、角色·法帝娅、角色·真红、角色·九原、角色·残虹、角色·伊洛伊、角色·灵可（2026-09-30 人工确认，采集时颜色检测未识别）、弧盘·好狗狗走四方、弧盘·预备备、道具·失纬棋子、道具·质实骰子、道具·捏造骰子 |
+| **A** | 角色·埃德嘉、角色·薄荷、角色·阿德勒、角色·哈尼娅、角色·海月、角色·翳、弧盘·拔刀、弧盘·勿忘伞、弧盘·开始净空、弧盘·当心头顶、弧盘·被遗忘者、道具·迷迭棋子、滑翔翼·好柿成双、滑翔翼·幽兰、滑翔翼·副手的副手、滑翔翼·天际猎手、滑翔翼·赤练、滑翔翼·小羊直升机、滑翔翼·预兆鸟、滑翔翼·超级恶灵！ |
 | **B** | 弧盘·危险游戏、弧盘·「电音」狂欢、弧盘·笑口常开、弧盘·成功的第一步、弧盘·「我们。」 |
 
 ## 稀有度与颜色（OCR采集时使用）
@@ -144,7 +144,7 @@ uv run python workspace/yihuan_gacha/yihuan_gacha.py    # 采集所有棋盘
 $env:YIYUAN_DEBUG = "1"; .venv\Scripts\python.exe workspace/yihuan_gacha/yihuan_gacha.py
 ```
 
-> ⚠️ 后端依赖：OCR 推理设备由 `config.toml [models] paddle_device` 控制（默认 `cpu`）。2026-08-26 实测 paddlepaddle-gpu 3.2.2 在新 NVIDIA 驱动上 GPU 推理会挂死后端——若采集卡在"开始收集"且后端无响应，检查该项是否被改成 `gpu`/`auto`。
+> ⚠️ 后端依赖：OCR 推理设备由 `config.toml [models] paddle_device` 控制。2026-08-26 曾实测 paddlepaddle-gpu 3.2.2 在新 NVIDIA 驱动上 GPU 推理挂死后端；2026-09-30 复测 `paddle_device = gpu` 已可用（单页 OCR 5-14s，全程 130+ 页无挂死），AGENTS.md 技术栈亦以 GPU 为准。**若**采集卡在"开始收集"且后端无响应，再检查该项是否被改成 `gpu`/`auto`，必要时临时回 `cpu`。
 
 **采集步骤：**
 1. 确保异环游戏打开，抽卡统计页面可见
@@ -200,6 +200,8 @@ for it in ocr.get('details', []):
 这样只返回 OCR 文本结果到上下文，避免 base64 图片数据污染对话。
 - **清洗脚本字段名对应**：采集脚本输出 `time`/`quantity` 字段，清洗脚本读取时需兼容 `date`/`count` 等变体名
 - **骰子图标中心x=610**（v2 修正值，原 v1 用的 629 不准；详见"骰子点数检测"章节）
+- **⚠️ 清洗对"本次 raw 里没有的棋盘"是从 `yihuan_gacha_database.json` 保留的**：所以分批采集（先角色池、后武器池）时，必须先把上一批的 review 定档进 database，再跑下一批的清洗，否则该批清洗会用旧库覆盖，丢掉本轮新数据（2026-09-30 实测：武器池单独 raw 清洗时会 `保留已有数据: 限定棋盘 (426条)`，取的就是 database 里的值）
+- **⚠️ `yihuan_review.py` 优先读 `database.json`**（`data_file = DATABASE_FILE if exists else REVIEW_FILE`）：清洗刚写完 review、还没定档 database 时跑探查，审的是上一轮的旧数据且不会报错（2026-09-30 实测：review 已 806 条，探查仍报 718 条"未发现异常"）。要么先定档再探查，要么直接对 review.json 自查
 
 ### 2. 清洗数据
 ```bash
@@ -285,6 +287,10 @@ time=0 的记录需要补全，方法：
 - **v1 骰子检测系统性偏少**（2026-07-09 发现）：v1 的 y 裁切范围 [name_cy-30, name_cy+30] 截断了骰子下半部分（实际到 name_cy+52），导致点数偏少。v2 算法已验证正确（VL 4/4 确认），待集成到 yihuan_gacha.py。详见"骰子点数检测"章节
 - ~~v4数量提取只匹配"1"，导致所有物品数量都是1~~（v5已修复：正确识别行文本中的独立整数，支持名称末尾粘着数字的OCR合并）
 - **PowerShell 写文件会加 BOM**（2026-08-26 实验定位，早期误归因 harness 平台）：PS 5.1 的 `Set-Content -Encoding UTF8` / `Out-File -Encoding utf8` 写文件必带 BOM，多次写累积（本 skill 的 yihuan_clean.py 曾堆 3 个直接 SyntaxError）。Trae Write/Edit 工具不加 BOM。跑脚本遇 `SyntaxError: invalid non-printable character U+FEFF` 时执行 `uv run python tools/clean_bom.py --fix` 清理头部 BOM；agent 用 PowerShell 写 UTF-8 文件时用 `[IO.File]::WriteAllText($path, $content)`
+
+- **武器池清洗自 2026-08-26 13:33 起必崩**（2026-09-30 修复）：`count` 只在角色池分支赋值，而"数量可疑"检查写在分支外 → `UnboundLocalError: cannot access local variable 'count'`。表现为清洗一进到 `处理 弧盘研募` 就退出码 1，review/database 都不落盘。修法：把 `count = ...` 提到 `if is_weapon / else` 之前。当时没被发现是因为 08-26 那批武器池数据在 13:33 之前就已入档
+- **2026-09-30 夜采的待确认项已全部确认（2026-10-07 用户裁决「全是S」）**：武器池 6 个新弧盘已进 `RARITY_MAP`（`弧盘·焰魂狂飙`、`弧盘·「最后一朵玫瑰」`、`弧盘·错误的门`、`弧盘·茶花会`、`弧盘·穿过胭红蜃景`、`弧盘·现实避难所` 均 = S）。其中 `焰魂狂飙` 是 6 项里唯一依据偏软的（检测值 S，但 n=3 贴着 A 档频率带下沿）。`角色·灵可`=S 仍属人工判定非实测，`滑翔翼·预兆鸟`/`滑翔翼·超级恶灵！`=A 按颜色检测入表。
+- **稀有度证据落盘（2026-10-07 起）**：采集时两种情况会把文本裁片 + 一行索引写到 `workspace/yihuan_gacha/pending_rarity/`（该目录 gitignore，个人数据不入库）——① 颜色判不出（`?`）；② 颜色判得出但键不在 `RARITY_MAP`（09-30 那 6 项正是这条：当时只留了 `[?]` 而没有像素，事后无从复核）。索引文件 `_index.jsonl` 每行记 `raw_name/rarity_key/detected/reason/avg_rgb/crop_box/png`。同一键只存一张，单次运行有上限（`PENDING_MAX_PER_RUN`）。实现见 `yihuan_gacha.py` 的 `note_rarity_evidence()`，两处调用点 = 角色池与武器池的稀有度检测之后；测试 `tests/gacha/test_yihuan_pending_crop.py`。
 
 ## 弧盘研募池（武器池）
 

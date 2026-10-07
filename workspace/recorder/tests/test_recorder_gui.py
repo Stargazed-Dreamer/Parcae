@@ -43,6 +43,7 @@ def _load_module(module_name: str, file_path: Path):
     if module_name in sys.modules:
         return sys.modules[module_name]
     spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+    assert spec is not None and spec.loader is not None, f"无法为 {file_path} 创建模块 spec"
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
@@ -443,8 +444,8 @@ class TestHotkeyManager:
             def stop(self):
                 pass
 
-        fake_keyboard_mod.GlobalHotKeys = FakeListener
-        fake_pynput_mod.keyboard = fake_keyboard_mod
+        setattr(fake_keyboard_mod, "GlobalHotKeys", FakeListener)
+        setattr(fake_pynput_mod, "keyboard", fake_keyboard_mod)
         monkeypatch.setitem(sys.modules, "pynput", fake_pynput_mod)
         monkeypatch.setitem(sys.modules, "pynput.keyboard", fake_keyboard_mod)
 
@@ -788,9 +789,11 @@ class TestRecorderApp:
             on_auto_stop=lambda: auto_stop_called.__setitem__(0, True),
         )
         app.start()
-        # 等待自动停止（最长 3 秒）
+        # 轮询回调标志，不轮询 is_running：_handle_auto_stop 是先 stop()（翻 _is_running）
+        # 再调 _on_auto_stop，两步之间有空窗；并行段有 CPU 争抢时 break 会抢在回调前，
+        # 得到 "assert False is True" 的假红（2026-09-29 与 tests/browser 并行时实测翻红）。
         for _ in range(30):
-            if not app.is_running:
+            if auto_stop_called[0]:
                 break
             time.sleep(0.1)
         assert auto_stop_called[0] is True

@@ -17,9 +17,18 @@
 """
 
 import argparse
+import io
 import re
 import sys
 from pathlib import Path
+
+# 中文 Windows 控制台默认 cp936，而本脚本的进度行含 ✓/✗/⊘：第一条 print 就能抛
+# UnicodeEncodeError，且崩在写文件**之后**——于是第 1 个目标已改、后 2 个没改，
+# 留下"版本号只同步了一半"的中间态（2026-09-28 实跑撞到）。先包一层 utf-8/replace。
+for _name in ("stdout", "stderr"):
+    _stream = getattr(sys, _name, None)
+    if _stream is not None and hasattr(_stream, "buffer"):
+        setattr(sys, _name, io.TextIOWrapper(_stream.buffer, encoding="utf-8", errors="replace"))
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 

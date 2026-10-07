@@ -387,20 +387,25 @@ paths = ["data.db", "user_notes.json"]
         ]
 
     def test_web_archive_backup_parsed(self):
-        """web_archive [backup] 段正确解析：urls*.json + index*.json（随存档源扩展）"""
+        """web_archive [backup] 段解析出备份声明，且"只备数据、不越组件目录"。
+
+        刻意不断言字面清单：2026-09-17 该组件把备份源迁到 inputs/ + reports/ + state/ 之后，
+        写死的 8 条路径让此测试**单跑即红**——"改 manifest 必红"的测试没人会去修，只会被忽略，
+        反而挡住真正的解析回归。这里改断性质：含 urls_* 与 index_* 两族、不含 .py、
+        不含绝对路径或上跳（备份消费方 tools/backup_workspace.py 按组件目录相对解析）。
+        """
         manifests = _reload_manifests()
         m = manifests["web_archive"]
         assert m.backup is not None, "web_archive 未声明 [backup] 段"
-        assert m.backup.paths == [
-            "urls.json",
-            "urls_unique.json",
-            "urls_custom.json",
-            "urls_feishu.json",
-            "urls_tencent.json",
-            "index.json",
-            "index_tencent.json",
-            "index_xiaolin.json",
-        ]
+        paths = m.backup.paths
+        assert paths, "web_archive [backup].paths 为空"
+        bases = [p.replace("\\", "/").rstrip("/").split("/")[-1] for p in paths]
+        assert any(b.startswith("urls_") for b in bases), f"URL 收藏未进备份: {paths}"
+        assert any(b.startswith("index_") for b in bases), f"归档索引未进备份: {paths}"
+        assert not any(b.endswith(".py") for b in bases), f"备份声明混进源码: {paths}"
+        assert not any(
+            p.startswith(("/", "\\")) or ".." in p.replace("\\", "/").split("/") for p in paths
+        ), f"备份声明越出组件目录: {paths}"
 
     def test_gh_mirror_backup_decoupled_from_watch(self):
         """gh_mirror [backup] 段与 [watch] 段解耦：backup 只含 repos.json 不含模板"""

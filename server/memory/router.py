@@ -277,6 +277,12 @@ async def memory_reindex():
 class MaintainRequest(BaseSchema):
     """手动触发维护请求"""
     force: bool = Field(False, description="是否强制运行（忽略 should_run 检查）")
+    force_revalidate: bool = Field(
+        False,
+        description="先把所有已验证标签（keep/update/archive）重置为 pending 再跑一轮。"
+                    "用于验证器改版后重判存量记忆；会按 batch_limit 逐轮消耗 cheap 池，"
+                    "所以只接受显式调用",
+    )
 
 
 @router.post("/maintain", operation_id="memory_maintain",
@@ -286,13 +292,17 @@ async def memory_maintain(req: MaintainRequest):
 
     通常自动触发（每 maintain_interval_hours 小时），也可手动调用。
     force=True 时忽略 should_run 检查立即执行。
+    force_revalidate=True 时先把全部已验证标签重置为 pending（验证器改版后重判存量）。
     """
     mgr = get_memory_manager()
+    requeued = None
+    if req.force_revalidate:
+        requeued = await asyncio.to_thread(mgr.maintainer.requeue_all_validated)
     if not req.force and not mgr.maintainer.should_run():
         return {"status": "skipped", "reason": "not_due_yet",
                 "last_run": mgr.maintainer.get_status().get("last_run")}
     result = await mgr.maintainer.run()
-    return {"status": "ok", "result": result}
+    return {"status": "ok", "result": result, "requeued": requeued}
 
 
 @router.get("/maintain/status", operation_id="memory_maintain_status",
@@ -317,6 +327,46 @@ async def memory_search_traces_list(
         mgr.search_tracer.get_recent, limit=limit, since_id=since_id
     )
     return {"traces": traces, "total": len(traces)}
+
+
+# ─── Context Projection 端点 (v4, unknown-outcome-evidence T15) ───────
+# 回答"召回之后到底上了什么"：入选/丢弃/前后两序/内容指纹/有效性标记。
+# 纯观测——这些端点不改变任何检索或注入行为。
+
+@router.get("/projections", operation_id="memory_projections_list",
+            summary="上下文投影留痕列表")
+async def memory_projections_list(
+    limit: int = Query(20, ge=1, le=100, description="返回数量"),
+    since_id: int | None = Query(None, description="游标分页（仅返回 id > since_id）"),
+    task_type: str | None = Query(None, description="按消费场景过滤"),
+    surface: str | None = Query(None, description="按注入面过滤，如 agent_guide.must_read"),
+):
+    """列出最近的上文投影记录（轻量列，详情走单条端点）"""
+    from server.memory import projection as _proj
+
+    mgr = get_memory_manager()
+    items = await asyncio.to_thread(
+        _proj.list_projections,
+        mgr.store.conn,
+        limit=limit,
+        since_id=since_id,
+        task_type=task_type,
+        surface=surface,
+    )
+    return {"projections": items, "total": len(items)}
+
+
+@router.get("/projections/{projection_id}", operation_id="memory_projections_detail",
+            summary="单条上下文投影详情")
+async def memory_projections_detail(projection_id: int):
+    """取一条投影：selected/dropped/rank_before/rank_after/validation_flags/digest"""
+    from server.memory import projection as _proj
+
+    mgr = get_memory_manager()
+    detail = await asyncio.to_thread(_proj.get_projection, mgr.store.conn, projection_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"projection_id={projection_id} 不存在")
+    return detail
 
 
 @router.get("/search/traces/{trace_id}", operation_id="memory_search_traces_detail",
@@ -395,15 +445,77 @@ async def memory_evidence_cleanup(
 
 # ─── 动态 key 端点必须放在固定路径之后 ───────────────────────
 
+def _normalize_as_of(as_of: str) -> str:
+    """把 ``as_of`` 规范化成与 ``fact_revisions`` 时间列可比的定长文本。
+
+    只给日期（10 字符）时按 **当日 23:59:59** 解释：用户问"9 月 30 日是什么值"，
+    要的是那一天**结束时**的状态；按零点解释会把当天发生的所有变化都排除掉，
+    是这类查询最常见的错解。
+    """
+    s = as_of.strip()
+    if len(s) == 10:
+        return s + " 23:59:59"
+    if len(s) == 16 and " " in s:
+        return s + ":00"
+    return s
+
+
+def _memory_get_as_of(mgr, key: str, as_of: str) -> dict:
+    """查 key 在 ``as_of`` 时刻"当时为真"的版本（v6 P2 版本模型）。
+
+    返回的是**历史视图**，因此形状与默认路径不同：默认路径把 value 的字段平铺在
+    顶层（客户端详情页依赖），而这里显式区分 ``value``（原文）与 ``data``（解析后的
+    dict），并附 ``origin`` 说明这条是从历史表取的、还是"当前值在当时就已经为真"。
+    """
+    import json
+
+    norm = _normalize_as_of(as_of)
+    hit = mgr.store.resolve_fact_as_of(key, norm)
+    if hit is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"记忆 '{key}' 在 {norm} 为止没有任何版本（as_of 早于本 key 的全部历史）",
+        )
+    value, origin, rev = hit
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        parsed = None
+    return {
+        "key": key,
+        "as_of": norm,
+        "origin": origin,   # 'revision' = 取自历史表；'current' = 当前值当时已为真
+        "value": value,
+        "data": parsed if isinstance(parsed, dict) else None,
+        "revision": (
+            {"id": rev["id"], "valid_at": rev["valid_at"], "invalid_at": rev["invalid_at"]}
+            if rev else None
+        ),
+    }
+
+
 @router.get("/{key}", operation_id="memory_get",
             summary="读取记忆")
-async def memory_get(key: str = Path(..., pattern=_KEY_PATTERN, description="记忆 key（仅字母、数字、下划线、连字符）")):
+async def memory_get(
+    key: str = Path(..., pattern=_KEY_PATTERN, description="记忆 key（仅字母、数字、下划线、连字符）"),
+    as_of: str | None = Query(
+        None,
+        description="查'当时为真'的版本（v6）：'YYYY-MM-DD' 按当日 23:59:59 解释，"
+                    "也接受 'YYYY-MM-DD HH:MM:SS[.ffffff]'。不传则返回当前值，默认路径不变",
+    ),
+):
     """按 key 读取记忆（兼容旧 KV 接口，同时搜索 facts 和 messages）
 
     v6.1 T31：返回结果追加 staleness 字段（memory_age / staleness_warning / trust_recall_hint）。
     仅当 fact_type 在 5 类 closed 内且超阈值时填 staleness_warning。
+
+    v6（P2 版本模型）：传 ``as_of`` 时改查 ``fact_revisions``，返回**当时为真**的版本；
+    不传时行为与改动前逐字一致（走 ``mgr.get``），以免动到按 key 读 facts 的所有既有代码。
     """
     mgr = get_memory_manager()
+    if as_of is not None:
+        return await asyncio.to_thread(_memory_get_as_of, mgr, key, as_of)
+
     data = await asyncio.to_thread(mgr.get, key)
     if data is None:
         raise HTTPException(status_code=404, detail=f"记忆 '{key}' 不存在")
@@ -430,9 +542,24 @@ async def memory_set(key: str = Path(..., pattern=_KEY_PATTERN), req: MemorySetR
     # 5-6: merge 读 + ONNX 侧写入为同步重活，包 to_thread（与 memory_status/search 一致）
     def _do_set() -> dict:
         if req.merge:
-            # 深度合并模式
-            existing = mgr.get(key)
-            merged = _deep_merge(existing, req.data) if existing and isinstance(existing, dict) else req.data
+            # 深度合并模式。
+            # ⚠️ 不能用 mgr.get() 当"现有值"：它把 facts.value 的 dict **平铺在顶层**，
+            # 再挂上 source / updated_at / access_count / confidence / created_at /
+            # fact_type 等一整套**信封键**。拿它去深合并，这些元数据会被抄进 value
+            # 并落库（实测 66/151 条受害，value 里混着 "source":"manual" 这类与内容
+            # 无关的字段）。这里直接取 facts.value **原文**来合并，从源头避开信封。
+            # 用 get_fact_meta 而非 get_fact：后者会顺带把 access_count +1，
+            # 而"写一次"不应该被算作"读一次"。
+            raw = mgr.store.get_fact_meta(key)
+            existing = None
+            if raw and raw.get("value"):
+                try:
+                    import json as _json
+                    parsed = _json.loads(raw["value"])
+                    existing = parsed if isinstance(parsed, dict) else None
+                except (ValueError, TypeError):
+                    existing = None
+            merged = _deep_merge(existing, req.data) if existing else req.data
         else:
             merged = req.data
 
@@ -447,7 +574,23 @@ async def memory_set(key: str = Path(..., pattern=_KEY_PATTERN), req: MemorySetR
         if req.trigger_keywords is not None:
             structured["trigger_keywords"] = req.trigger_keywords
 
-        return mgr.set(key, merged, structured=structured or None)
+        result = mgr.set(key, merged, structured=structured or None)
+
+        # 可见性（不是拦截）：写入方没填 fact_type 时，把"这条因此过滤不到"回显给他自己看。
+        # NULL 的成因不是校验漏了，而是调用方压根没传（`_validate_fact_type` 只在收到非法值时才落
+        # NULL）。存量已于 2026-10-05 收口：key 前缀即类型命名（reference_/preference_/project_/
+        # feedback_）或 value 自证过类型的都补标了，剩 4 条交用户判断。实际数字用
+        # `SELECT COALESCE(fact_type,'<NULL>'), COUNT(*) FROM facts GROUP BY 1` 现查。
+        # 判据按落库后的行读，不按请求参数猜：merge 更新时旧行可能本来就有类型。
+        meta = mgr.store.get_fact_meta(key) or {}
+        if not meta.get("fact_type"):
+            result["guidance"] = (
+                "这条记忆的 fact_type 为空：按类型过滤（find_consumable_memories 的 SQL、"
+                "staleness 阈值表、验证器的分型判据）都不会命中它。"
+                f"候选取值 {VALID_FACT_TYPES}，下次写入带上 fact_type=…；"
+                "留空不会导致写入失败。"
+            )
+        return result
 
     return await asyncio.to_thread(_do_set)
 

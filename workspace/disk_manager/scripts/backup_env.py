@@ -9,6 +9,11 @@
   uv run python workspace/disk_manager/scripts/backup_env.py --games       # 只备份游戏存档
   uv run python workspace/disk_manager/scripts/backup_env.py --system      # 只备份系统设置
   uv run python workspace/disk_manager/scripts/backup_env.py --software    # 只备份软件列表
+  uv run python workspace/disk_manager/scripts/backup_env.py --credentials  # 凭据/WiFi/SSH/浏览器隐私(明文!)
+  uv run python workspace/disk_manager/scripts/backup_env.py --appearance   # 壁纸/主题/字体/输入法词库
+  uv run python workspace/disk_manager/scripts/backup_env.py --policy        # 防火墙/计划任务/打印机/VPN
+  uv run python workspace/disk_manager/scripts/backup_env.py --drivers        # 上述系统策略 + 第三方驱动(数GB)
+  uv run python workspace/disk_manager/scripts/backup_env.py --devtools       # IDE/WSL/改键/shell 配置
 """
 
 import os
@@ -20,13 +25,16 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import backup_groups as BG  # noqa: E402  迁移时易漏的凭据/外观/策略/开发配置四组导出
 
-BACKUP_BASE = Path(r"E:\<data_drive>:\<backup_root>\SystemBackup")
+
+BACKUP_BASE = Path(r"<data_drive>:/<backup_root>\SystemBackup")
 TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 BACKUP_DIR = BACKUP_BASE / TIMESTAMP
 
 
-def fmt_size(size: int) -> str:
+def fmt_size(size: float) -> str:
     for unit in ["B", "KB", "MB", "GB"]:
         if size < 1024:
             return f"{size:.1f}{unit}"
@@ -174,8 +182,8 @@ def backup_game_saves():
         safe_copy(steam_userdata, dst / "Steam_userdata", "Steam用户数据")
         backed_up += 1
 
-    # <data_drive>:\Documents/My Games
-    my_games = Path(os.environ.get("USERPROFILE", "")) / "<data_drive>:\Documents" / "My Games"
+    # Documents/My Games
+    my_games = Path(os.environ.get("USERPROFILE", "")) / "Documents" / "My Games"
     if my_games.exists():
         safe_copy(my_games, dst / "My_Games", "My Games")
         backed_up += 1
@@ -201,6 +209,63 @@ def backup_game_saves():
 
 
 # ========== 系统设置备份 ==========
+
+def backup_file_associations(dst_dir: Path) -> None:
+    """备份每用户文件关联：reg export 原始 hive（免管理员）+ 可读清单 inventory.json。
+
+    与独立三件套 assoc_snapshot/assoc_diff/assoc_restore 共用解析逻辑；恢复文件关联的
+    可靠做法（哈希无关：set classic + del UserChoice）见同目录 assoc_restore.py，
+    ⚠️ 不要指望 reg import 旧 UserChoice —— Hash 会校验失败被忽略。
+    """
+    print("\n--- 文件关联 ---")
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import assoc_common as C  # noqa: WPS433
+    except Exception as e:  # noqa: BLE001
+        print(f"  [失败] 无法加载 assoc_common: {e}")
+        return
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    raw = dst_dir / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    reg_export("HKCU\\" + C.FILEEXTS_SUBKEY, raw / "FileExts.reg", "FileExts(UserChoice)")
+    reg_export("HKCU\\Software\\Classes", raw / "HKCU_Classes.reg", "HKCU Classes(经典ProgID)")
+    try:
+        inv = C.build_inventory()
+        ts = TIMESTAMP
+        C.ASSOC_ROOT.mkdir(parents=True, exist_ok=True)
+        # 同时写一份到本次全量备份目录，便于随整机备份归档
+        (dst_dir / "inventory.json").write_text(
+            json.dumps(inv, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        C.save_inventory("fullbackup_" + ts, inv)
+        print(f"  [已备份] 文件关联 {inv['count']} 个后缀 → {dst_dir.relative_to(BACKUP_DIR)}")
+    except Exception as e:  # noqa: BLE001
+        print(f"  [失败] 采集关联清单: {e}")
+
+
+def backup_settings_watch() -> None:
+    """设置看门狗快照：调用统一引擎把所有纳管项（文件关联/PATH/浏览器/协议/自启）采集
+    成一份快照并设为新基线，落在 BACKUP_BASE\\settings_watch\\<ts>（独立于本次全量目录）。
+
+    与手动 `settings_watch/watch.py snapshot --set-baseline` 等价；diff/restore 由该引擎消费。
+    """
+    print("\n--- 设置看门狗（PATH/浏览器/协议/自启 等纳管项）---")
+    watch_py = Path(__file__).resolve().parent.parent / "settings_watch" / "watch.py"
+    if not watch_py.exists():
+        print(f"  [失败] 找不到 {watch_py}")
+        return
+    try:
+        r = subprocess.run(
+            [sys.executable, str(watch_py), "snapshot", "--set-baseline"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+        )
+        for line in (r.stdout or "").splitlines():
+            print("  " + line)
+        if r.returncode != 0:
+            print(f"  [!] 引擎返回码 {r.returncode}: {(r.stderr or '').strip()[:200]}")
+    except Exception as e:  # noqa: BLE001
+        print(f"  [失败] 设置看门狗快照: {e}")
+
 
 def backup_system():
     """备份系统设置"""
@@ -228,6 +293,12 @@ def backup_system():
         dst / "registry" / "desktop_layout.reg",
         "桌面布局",
     )
+
+    # 文件关联（每用户默认程序）—— 无损原件 + 可读清单
+    backup_file_associations(dst / "file_associations")
+
+    # 设置看门狗：PATH/浏览器/协议/自启 等纳管项统一快照 + 设基线
+    backup_settings_watch()
 
     # 电源计划
     run_cmd(f"powercfg /export \"{dst / 'power_plan.pow'}\"", "电源计划")
@@ -449,7 +520,8 @@ def generate_checklist():
 - [ ] 深色/浅色模式
 - [ ] 输入法配置
 - [ ] 默认浏览器
-- [ ] 默认文件关联（.py/.md/.json等）
+- [ ] 默认文件关联：用 assoc_diff.py 看被改了什么，assoc_restore.py --apply 分档恢复
+      （经典关联自动；商店/UWP 类走设置页手动重选，勿指望 reg import UserChoice）
 - [ ] 任务栏位置和固定项
 
 ### 软件
@@ -461,9 +533,35 @@ def generate_checklist():
 ### 其他
 - [ ] VPN/代理设置
 - [ ] Git配置: git config --global user.name/email
-- [ ] SSH密钥: ~/.ssh/
+- [ ] SSH密钥: ~/.ssh/（已备 credentials/dotfiles/.ssh）
 - [ ] 自定义字体
 - [ ] 右键菜单增强工具
+
+## 迁移专用恢复（本轮新增导出组，多数只能在原机导出、新机上按其方式还原）
+
+### 凭据 credentials/
+- [ ] WiFi: 新机 `netsh wlan add profile filename="credentials\\wifi\\*.xml"`（XML 含明文密码）
+- [ ] 浏览器隐私: 用 HackBrowserData 的 `restore` + browser/chrome/*-masterkeys.json 跨机解密；
+      或直接把 browser/chrome/readable/*.csv 当清单手动重录
+- [ ] SSH/AWS/npm/git 凭据: 从 credentials/dotfiles/ 拷回对应 ~ 路径
+- [ ] 凭据管理器: 见 credentials/credential_manager_README.txt（无法批量导，手动核对）
+
+### 外观 appearance/
+- [ ] 壁纸: 拷 appearance/wallpaper/ 图到新机后在设置里指定（wallpaper.json 记了原路径/样式）
+- [ ] 主题: 深浅色/强调色见 theme.json，themes.reg 可导入
+- [ ] 字体: 拷 appearance/user_fonts/ 到新机（系统自带字体无需管）
+- [ ] 输入法词库: 拷 appearance/ime/ 回对应目录，或走输入法云同步重登
+
+### 系统策略 policy/
+- [ ] 防火墙: 提权后 `netsh advfirewall import policy\\firewall.wls`（导出当时可能需管理员）
+- [ ] 计划任务: 见 scheduled_tasks.xml（不含密码，需手动重建带密码任务）
+- [ ] 打印机: 见 printers.json，驱动新机重装
+- [ ] VPN: 拷 policy/vpn_pbk/ 到 %APPDATA%\\Microsoft\\Network\\Connections\\PBK
+
+### 开发工具 devtools/（均为"配置"，软件本体需先装）
+- [ ] 装好 IDE 后，把 devtools/<IDE>/config/ 覆盖回其 User 目录
+- [ ] 按 *_extensions.txt 重装扩展；JetBrains 还原 options/
+- [ ] WSL 发行版/ AutoHotkey / Scancode 改键按各 *_note 手动处理
 """
 
     dst.write_text(content, encoding="utf-8")
@@ -479,13 +577,25 @@ def main():
     parser.add_argument("--system", action="store_true", help="只备份系统设置")
     parser.add_argument("--software", action="store_true", help="只备份软件列表")
     parser.add_argument("--desktop", action="store_true", help="只备份桌面")
+    parser.add_argument("--assoc", action="store_true", help="只备份文件关联（每用户默认程序）")
+    parser.add_argument("--settings", action="store_true", help="只跑设置看门狗快照（PATH/浏览器/协议/自启 等纳管项）")
+    parser.add_argument("--credentials", action="store_true", help="只备份凭据/密钥(明文): WiFi/SSH/浏览器隐私")
+    parser.add_argument("--appearance", action="store_true", help="只备份壁纸/主题/字体/输入法词库")
+    parser.add_argument("--policy", action="store_true", help="只备份防火墙/计划任务/打印机/VPN（不含大驱动）")
+    parser.add_argument("--drivers", action="store_true", help="系统策略 + 第三方驱动导出（可达数 GB）")
+    parser.add_argument("--devtools", action="store_true", help="只备份 IDE/WSL/改键/shell 配置")
     args = parser.parse_args()
 
-    specific = args.browser or args.games or args.system or args.software or args.desktop
+    specific = (args.browser or args.games or args.system or args.software
+                or args.desktop or args.assoc or args.settings
+                or args.credentials or args.appearance or args.policy
+                or args.drivers or args.devtools)
     if not specific:
         print("=" * 60)
         print("⚠️  全面备份功能未经测试！执行过程中可能遇到问题。")
         print("    请全程跟进并记录遇到的任何错误。")
+        print("    注意：全量含凭据组，会以【明文】导出 WiFi 密码/浏览器隐私/token 到备份目录，")
+        print("    filesync 会把它同步到移动硬盘 —— 如不愿明文入盘，请改用分模块备份。")
         print("=" * 60)
 
     print(f"备份目标: {BACKUP_DIR}")
@@ -501,6 +611,23 @@ def main():
         backup_software()
     if args.desktop or not specific:
         backup_desktop()
+    if args.assoc and not args.system:
+        # --system 或全量时 backup_system() 已内含文件关联，避免重复
+        backup_file_associations(BACKUP_DIR / "system" / "file_associations")
+    if args.settings and not args.system:
+        # --system/全量时 backup_system() 已内含看门狗快照，避免重复
+        backup_settings_watch()
+
+    # 迁移易漏项四组（全量默认包含；单独 flag 只跑对应组）
+    if args.credentials or not specific:
+        BG.backup_credentials(BACKUP_DIR)
+    if args.appearance or not specific:
+        BG.backup_appearance(BACKUP_DIR)
+    if args.policy or args.drivers or not specific:
+        # 驱动只有显式 --drivers 才导（数 GB）；全量/ --policy 均不含大驱动
+        BG.backup_policy(BACKUP_DIR, with_drivers=args.drivers)
+    if args.devtools or not specific:
+        BG.backup_devtools(BACKUP_DIR)
 
     if not specific:
         generate_restore_script()

@@ -320,8 +320,10 @@ class TestHealthResponseSchema:
         m = ModelLifecycleManager(cfg=cfg, monitors=monitors)
         summary = m.health_summary()
         # design §10：只低频枚举字段，无高频计数器（避免 client 指纹漂移）
-        expected_keys = {"enabled", "gpu_state", "cpu_state", "loaded_ids",
-                         "reload_degraded_ids", "last_transition_ts"}
+        # probe_absent_resources = 本机没有数据源的资源清单（如非 NVIDIA 卡 → ["gpu"]），
+        # 是枚举不是计数器，符合 §10 约束
+        expected_keys = {"enabled", "gpu_state", "cpu_state", "probe_absent_resources",
+                         "loaded_ids", "reload_degraded_ids", "last_transition_ts"}
         assert set(summary.keys()) == expected_keys, (
             f"health_summary 字段集合应为 {expected_keys}，实际: {set(summary.keys())}"
         )

@@ -301,7 +301,9 @@ class SessionFacade:
             "decision": decision,
             "feedback": feedback,
         }
-        headers = {"X-Agent-Caller": "v6-lite-agent"}
+        from lib.agent_identity import AGENT_CALLER_HEADER, AGENT_CALLER_HEADER_VALUE
+
+        headers = {AGENT_CALLER_HEADER: AGENT_CALLER_HEADER_VALUE}
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(url, json=payload, headers=headers)

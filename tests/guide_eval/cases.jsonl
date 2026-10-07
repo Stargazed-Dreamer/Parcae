@@ -138,3 +138,16 @@
 {"query": "把 GitHub 仓库 claw-codes/wx4py 加到 gh mirror 监控列表并正常监控", "expected_top1": "recurring.gh_mirror_monitor", "source": "history", "note": "history#32 真实 query"}
 {"query": "把这几个飞书文档存档成md", "expected_top1": "adhoc.web_archive", "source": "history", "note": "history#36；语义修正：存档成 md 归 web_archive（历史命中 wip_tracking 是次优）"}
 {"query": "任务做完了帮我清理上下文并收尾", "expected_top1": "system.task_closure", "source": "manual", "note": "串台对：收尾 vs 清理temp"}
+{"query": "先更新一轮作业情况", "expected_top1": "recurring.homework", "source": "manual", "note": "homework 注册（2026-09-22）真实原话：扫砺儒云刷新台账"}
+{"query": "这周还有什么作业没交", "expected_top1": "recurring.homework", "source": "manual", "note": "串台对：学校作业 vs system.task_reminder（注册前被 task_reminder 以 20 分强匹配抢走）"}
+{"query": "帮我做数图实验一", "expected_top1": "recurring.homework", "source": "manual", "note": "口语缩写靠 kw_exact 数图实验 命中，注册前误归 adhoc.deep_research"}
+{"query": "整理数字图像处理复习资料", "expected_top1": "adhoc.exam_prep", "source": "manual", "note": "防回归：7 门课正式课名只进 homework 的 description，不得进 keywords，否则备考请求被 kw_exact 抢走"}
+{"query": "UE5.8 里 Nanite 是什么概念", "expected_top1": "adhoc.ue_copilot", "source": "manual", "note": "ue_copilot 注册（2026-09-23 T08）：UE5.8 kw_exact 命中"}
+{"query": "虚幻引擎的蓝图报错了帮我看看", "expected_top1": "adhoc.ue_copilot", "source": "manual", "note": "虚幻引擎+UE蓝图 两个 kw_exact；防与 life_design 人生蓝图 串台"}
+{"query": "UE学习副驾怎么用", "expected_top1": "adhoc.ue_copilot", "source": "manual", "note": "UE学习/UE副驾/UE学习副驾 多词命中"}
+{"query": "帮我设计一下人生蓝图", "expected_top1": "recurring.life_design", "source": "manual", "note": "防回归：人生蓝图 必须仍归 life_design——ue_copilot 只能用组合词 UE蓝图，不得加单独 蓝图，否则此处被抢"}
+{"query": "帮我把软体实验4改名提交", "expected_top1": "recurring.homework", "source": "manual", "note": "2026-09-28/10-04 两次实测 13-14 分落空（low_confidence），补流程动词 keywords 的锚点用例"}
+{"query": "把软体实验4改名提交上传", "expected_top1": "recurring.homework", "source": "manual", "note": "同上一条的第二种说法（用户原话带'上传'）"}
+{"query": "实验4改名提交", "expected_top1": "recurring.homework", "source": "manual", "note": "最短形式：只靠'改名提交'一个锚点"}
+{"query": "从砺儒云更新一次状态", "expected_top1": "recurring.homework", "source": "manual", "note": "09-28 实测只有 17 分贴阈值，补'更新状态/台账重扫'后应稳定"}
+{"query": "帮我把这个文件夹改名", "expected_top1": null, "source": "manual", "note": "反向守卫：'改名'单独出现不得被'改名提交'带进 homework（防泛词污染）"}

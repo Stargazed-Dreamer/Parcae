@@ -80,19 +80,19 @@ task_type: system.wip_tracking
 
 ### 查询（用户问"有哪些未完成"时）
 
-1. 调用 `GET /wip`（MCP: `wip_list`）— 一次获取所有 WIP 任务
+1. 调用 `GET /wip`（MCP: `wip_list`）— 一次获取所有 WIP 任务。**默认已是轻量模式**：未完结条目给 id/title/status/priority/progress/updated_at，已完结条目压成 id/截断标题/status/updated_at + `closed=true`（标题超 24 字会被截断，别拿它做完整标题匹配）
 2. 可选按状态过滤：`GET /wip?status=active`
 3. 汇总报告：每个任务的标题、进度、状态、下一步
 
 ### 恢复（用户说"继续之前的工作"时）
 
-1. 调用 `wip_list` 获取所有 WIP 任务
-2. 调用 `GET /wip/{task_id}`（MCP 网关: `localagent_advanced_tool(wip_get)`）获取详情
+1. 调用 `wip_list` 获取所有 WIP 任务（默认轻量，够用来挑 id）
+2. 取详情：单条 `wip_get(task_id)`（MCP 直连，免审批），多条一次取回用 `wip_get_many(ids=[...])`（MCP 直连）。**不要为看详情把 `summary` 关掉整表拉取**——体积约为轻量模式一个数量级以上
 3. 从 `next_steps` 继续执行
 
 ### 去重（用户重复提需求时）
 
-1. 调用 `wip_list` 检查是否有 tags 匹配的已有任务
+1. 调用 `wip_list` 检查是否有同名的已有任务（默认轻量模式按 title 匹配；轻量字段不含 `tags`，需要按 tags 比对时用 `wip_get_many(ids=[...])` 取回全文）
 2. 如果有，告知用户已有探索并展示进度
 3. 询问是继续还是重新开始
 
@@ -155,5 +155,5 @@ task_type: system.wip_tracking
 
 | 依赖 | 路径/接口 | 说明 |
 |------|----------|------|
-| 待办模块 | `wip_list` | MCP 直连，获取所有 WIP 任务 |
-| 待办模块 | `localagent_advanced_tool(wip_create/wip_get/wip_update/wip_delete)` | MCP 网关，CRUD 操作 |
+| 待办模块 | `wip_list`（默认轻量）/ `wip_get` / `wip_get_many` | MCP 直连，列 WIP / 单条取详情 / 批量取详情 |
+| 待办模块 | `localagent_advanced_tool(wip_create/wip_update/wip_delete)` | MCP 网关，写操作 |

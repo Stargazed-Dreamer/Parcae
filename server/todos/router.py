@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from server.todos.models import (
     TodoCreate, TodoUpdate, TodoDoneRequest,
-    WipTaskCreate, WipTaskUpdate,
+    WipTaskCreate, WipTaskUpdate, WipBatchGetRequest,
 )
 from server.todos.store import TodosStore
 
@@ -130,19 +130,64 @@ async def todos_check_trigger(todo_id: str, payload: dict):
 
 # ─── WIP 任务（wip_router，prefix=/wip）──────────────────
 
+# 响应首字段：让 agent 先读到用法建议，再看到数据本身
+_WIP_LIST_GUIDANCE = (
+    "默认 summary=true，只返回轻量字段（id/title/status/priority/progress/updated_at）；"
+    "其中已完结条目（completed/done/archived）进一步压成 id/title(截断)/status/updated_at + closed=true，"
+    "这类条目基本无用，不该占据上下文。"
+    "需要详情时不要关掉 summary 整表拉取，改为指定查：单条 wip_get(task_id='wip_xxx')，"
+    "多条 wip_get_many(ids=['wip_a','wip_b',...])。"
+    "注意轻量模式只含上面这些索引字段，tags / next_steps / current_state / extra_data 等富字段不含在内"
+    "（要按 tags 或 extra_data 里的键匹配，先用本接口挑出候选 id 再 wip_get_many 取回）。"
+    "想缩小范围可加 status=active|paused|blocked|completed。"
+)
+_WIP_LIST_FULL_GUIDANCE = (
+    "你正在用 summary=false 全量模式，输出体积约为轻量模式的一个数量级以上。"
+    "若只需个别条目的详情，下次改用 wip_get(task_id) 或 wip_get_many(ids=[...])。"
+)
+
+
 @wip_router.get("", operation_id="wip_list", summary="列出所有 WIP 任务")
 async def wip_list(
     status: Optional[str] = Query(None, description="按状态过滤"),
-    summary: bool = Query(False, description="true=只返回 id/title/status/priority/progress/updated_at 轻量字段，避免长输出污染上下文。需要详情再用 wip_get(task_id) 取"),
+    summary: bool = Query(True, description="默认 true=只返回轻量字段（已完结条目进一步压成 id/title(截断)/status/updated_at + closed=true），避免长输出污染上下文。需要详情用 wip_get(task_id) 单条取或 wip_get_many(ids) 批量取，不要为此关掉本开关"),
 ):
     """列出所有 WIP 任务，可按状态过滤。
 
-    - 默认返回完整字段（goal/next_steps/current_state/related_*/extra_data 等）
-    - summary=true 只返回轻量摘要字段，适合 agent 会话启动快速浏览未完成工作
+    - 默认 summary=true：轻量字段，已完结条目进一步压缩（基本无用，不该占上下文）
+    - summary=false：完整字段（goal/next_steps/current_state/related_*/extra_data 等），输出量约为轻量模式的 10 倍，
+      仅在确实需要对全部条目做批量处理时使用；看个别详情请改用 wip_get / wip_get_many
+    - 响应首字段 guidance 为用法建议，非数据
     """
     store = get_todos_store()
     tasks = await asyncio.to_thread(store.list_wip, status=status, summary=summary)
-    return {"tasks": tasks, "total": len(tasks), "summary": summary}
+    status_counts: dict[str, int] = {}
+    for t in tasks:
+        key = t.get("status") or "unknown"
+        status_counts[key] = status_counts.get(key, 0) + 1
+    return {
+        "guidance": _WIP_LIST_GUIDANCE if summary else _WIP_LIST_FULL_GUIDANCE,
+        "summary": summary,
+        "total": len(tasks),
+        "status_counts": status_counts,
+        "tasks": tasks,
+    }
+
+
+@wip_router.post("/batch", operation_id="wip_get_many", summary="批量获取 WIP 任务详情")
+async def wip_get_many(req: WipBatchGetRequest):
+    """按 id 批量获取 WIP 任务详情（保序；不存在的 id 列在 missing 里）。
+
+    配合 wip_list(summary=true) 的轻量摘要使用：先看摘要挑出关心的几条，再一次性取详情，
+    避免为了看详情把 summary 关掉整表拉取。最多 100 个 id。
+    """
+    store = get_todos_store()
+    result = await asyncio.to_thread(store.get_wip_many, req.ids)
+    return {
+        "total": len(result["tasks"]),
+        "missing": result["missing"],
+        "tasks": result["tasks"],
+    }
 
 
 @wip_router.post("", operation_id="wip_create", summary="创建 WIP 任务")

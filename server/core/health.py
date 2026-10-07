@@ -20,7 +20,7 @@ logger = logging.getLogger("localagent.health")
 
 # 回退默认值：唯一权威来源是 server/main.py 的 VERSION（main 显式传参覆盖此默认，
 # 且 health→main 导入会循环依赖，故此处仅保持同步 + 注明来源）
-VERSION = "0.49.0"
+VERSION = "0.53.0"
 
 
 # ========== 模块错误注册表（last_error 追踪）==========
@@ -83,6 +83,7 @@ class HealthResponse(BaseSchema):
     inbox: dict = {}  # 收件箱状态
     project_structure: dict = {}  # 项目结构映射 baseline 状态
     auto_shutdown: dict = {}  # 自动关机端点状态（trigger_count 等）
+    guard: dict = {}  # 审批闸门自身状态：开着还是关着 + 放行来源分布（T14）
     model_manager: dict = {}  # Model Lifecycle Manager 状态（design §10，低频枚举）
     last_errors: dict = {}  # 各模块最近一次错误（模块名 → {error, exc_type, timestamp}）
 
@@ -291,15 +292,32 @@ def _get_screen_status() -> dict:
             "enabled": screen_cfg.get("takeover_confirm_enabled", True),
             "timeout_seconds": screen_cfg.get("takeover_confirm_timeout_seconds", 30),
             "timeout_action": screen_cfg.get("takeover_timeout_action", "cancel"),
-            "protected_endpoints": [
-                "screen_action", "screen_batch_actions",
-                "screen_desktop_transaction", "screen_focus_window",
-            ],
-            "description": "顶栏 overlay 未显示时，agent 调键鼠端点前弹窗询问用户是否允许接管",
+            # 现场扫描路由表得出，不再手写清单（旧值只列 4 项，与实际把关集合不符）
+            "protected_endpoints": _gated_side_effect_operations(),
+            "description": (
+                "纵深防御兜底闸门：副作用端点 handler 开头先经 SessionManager 权限检查"
+                "（无授权直接 403，见 protected_endpoints），已授权时本闸门静默放行；"
+                "只有漏检或授权在两次调用之间到期才会弹窗询问接管"
+            ),
         },
         # 当前任务授权。health 字段名保留 takeover_persistent 以兼容旧客户端。
         "takeover_persistent": _get_persistent_status(),
     }
+
+
+def _gated_side_effect_operations() -> list[str]:
+    """被 SessionManager 权限闸门（403）把关的副作用端点 operation_id 清单。
+
+    现场扫描路由表得出，不再手写——旧版硬编码 4 项与实际把关集合不符（集合更大，
+    还含剪贴板读写与 scroll_capture）。扫描失败时返回空列表并记模块错误，
+    不让 /health 因展示字段而 500。
+    """
+    try:
+        from server.screen.routes import gated_side_effect_operations
+        return gated_side_effect_operations()
+    except Exception as e:
+        record_module_error("screen.protected_endpoints", str(e), type(e).__name__)
+        return []
 
 
 def _get_persistent_status() -> dict:
@@ -344,15 +362,26 @@ def _get_persistent_status() -> dict:
     except Exception:
         pass
 
+    # 空闲撤销时长的真源是 SessionManager 两阶段策略（warning + grace）。
+    # 不能回退到遗留的 takeover_idle_timeout_seconds（默认 300）：那会把"30 分钟"报成
+    # "5 分钟"（2026-09-30 一批文档失真的同一处根源）；watchdog 不靠空闲撤销，显式给 0。
+    idle_policy_total_seconds = int(status.get("idle_warning_seconds", 0) or 0) + int(
+        status.get("idle_grace_seconds", 0) or 0
+    )
+    reported_idle_timeout = (
+        0
+        if mode == "watchdog"
+        else (int(status.get("idle_timeout_seconds") or 0) or idle_policy_total_seconds)
+    )
+
     return {
         "configured": screen_cfg.get("takeover_persistent_enabled", True),
         "enabled": status["active"],
         **status,
         "mode": mode,
         "max_duration_seconds": max_duration,
-        "idle_timeout_seconds": (
-            status.get("idle_timeout_seconds") or configured_timeout
-        ),
+        "idle_timeout_seconds": reported_idle_timeout,
+        # 遗留展示值：takeover_idle_timeout_seconds 不再决定撤销时机，仅供对照旧配置读数
         "configured_idle_timeout_seconds": configured_timeout,
         "configured_watchdog_max_duration_seconds": screen_cfg.get(
             "takeover_watchdog_max_duration_seconds", 36000
@@ -367,9 +396,11 @@ def _get_vision_status() -> dict:
     """Vision 状态（远程 VL）
 
     含 provider 级额度耗尽 fallback 状态：
-    - providers: 完整 provider 列表（含 cooldown/active_count/last_error）
-    - provider_exhausted: 单 provider 耗尽状态（cooldown_until/reason/kind/source/consecutive_count）
-    - daily_exhausted: 聚合状态（所有 provider 都耗尽时为 True）
+    - providers: 完整 provider 列表（含 cooldown/active_count/last_error/models）。
+      models[] 按模型展开，每项 name/current/dead_today——判死是 (key_id, model) 粒度
+    - provider_exhausted: 单 provider 耗尽状态（cooldown_until/reason/kind/source/
+      consecutive_count/trigger_model）
+    - daily_exhausted: 聚合状态（所有 provider 都耗尽、或所有候选模型当日判死时为 True）
     """
     from server.vl.remote_vl import vl_status_fields
     vision_cfg = get_vision_config()
@@ -665,6 +696,19 @@ def _get_auto_shutdown_status() -> dict:
     return _as_status()
 
 
+def _get_guard_status() -> dict:
+    """审批闸门自身状态（unknown-outcome-evidence T14）。
+
+    包含"闸门是开着还是被 config 关掉了"——不报这一层，来源分档会让人误以为
+    有保护。失败不阻塞 /health，返回 stub。
+    """
+    try:
+        from server.approval_review import guard_status as _guard_status
+        return _guard_status()
+    except Exception as e:
+        return {"gate_open": None, "note": f"{type(e).__name__}: {str(e)[:200]}"}
+
+
 def _get_model_manager_status() -> dict:
     """Model Lifecycle Manager 状态（design §10 低频枚举）
 
@@ -739,6 +783,7 @@ def register_health_routes(app: FastAPI, version: str = VERSION):
             inbox=_get_inbox_status(),
             project_structure=_get_project_structure_status(),
             auto_shutdown=_get_auto_shutdown_status(),
+            guard=_get_guard_status(),
             model_manager=_get_model_manager_status(),
             last_errors=get_module_errors(),
         )

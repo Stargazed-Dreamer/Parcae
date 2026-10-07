@@ -268,6 +268,10 @@ def _to_record(item: dict) -> KeyRecord:
         display_name = m.get("display_name")
         if display_name and isinstance(display_name, str) and display_name.strip():
             model_dict["display_name"] = display_name.strip()
+        # v16：保留 context_window（上游上下文窗口，正整数；缺失/非法=未知，不写入）
+        cw = m.get("context_window")
+        if isinstance(cw, (int, float)) and not isinstance(cw, bool) and int(cw) > 0:
+            model_dict["context_window"] = int(cw)
         models.append(model_dict)
 
     status = item.get("status", {})
@@ -310,7 +314,7 @@ def _to_record(item: dict) -> KeyRecord:
 
 
 def _to_dict(rec: KeyRecord) -> dict:
-    """KeyRecord → dict（v14 格式，含 tier + vision + protocol + display_name；limits 已删除）"""
+    """KeyRecord → dict（写侧；含 tier + vision + protocol + display_name + context_window）"""
     models_out = []
     for m in rec.models:
         m_dict = {
@@ -323,6 +327,11 @@ def _to_dict(rec: KeyRecord) -> dict:
         dn = m.get("display_name")
         if dn and isinstance(dn, str) and dn.strip():
             m_dict["display_name"] = dn.strip()
+        # v16：context_window 必须在写回时一并带上——_to_dict 是 keys.json 的写侧，
+        # 这里漏一个键等于"用户在 keys.json 填的窗口被一次 API 保存静默抹掉"
+        cw = m.get("context_window")
+        if isinstance(cw, (int, float)) and not isinstance(cw, bool) and int(cw) > 0:
+            m_dict["context_window"] = int(cw)
         models_out.append(m_dict)
     return {
         "id": rec.id,
@@ -589,7 +598,8 @@ def migrate_v8_to_v9(data: dict, config_vl_providers: dict | None = None) -> dic
         config_vl_providers: 可选，从 config.toml 读取的 {name: {base_url, max_concurrency,
             timeout, rate_limit_cooldown, ...}} 映射。若为 None 则只补默认值 vision 段
             （不从 config.toml 迁移实际值，用于 _maybe_migrate 自动迁移场景）。
-            手动迁移应通过 tools/migrate_keys_v8_to_v9.py 传入实际 config_vl_providers。
+            手动迁移请在本模块调用 `migrate_v8_to_v9(data, config_vl_providers)`
+            （一次性脚本 `tools/migrate_keys_v8_to_v9.py` 已随仓库清理删除）。
     """
     for rec in data.get("keys", []):
         # 幂等：已有 vision 段则跳过
@@ -726,7 +736,8 @@ def _maybe_migrate(data: dict) -> dict:
     """检测并执行 v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13 → v14 迁移（在 _load_keys_cached 中调用）
 
     v8 → v9 自动迁移只补默认值 vision 段（不从 config.toml 读取实际值）。
-    如需从 config.toml 迁移实际 provider 参数，运行 tools/migrate_keys_v8_to_v9.py。
+    如需从 config.toml 迁移实际 provider 参数，直接调用 `migrate_v8_to_v9(data, config_vl_providers)`
+    （原一次性脚本 `tools/migrate_keys_v8_to_v9.py` 已删除）。
     v9 → v10 → v11 → v12 → v14 迁移在 keys.json 层面只补 protocol 默认值
     （display_name / pool_key / pool 由用户按需设置，不主动写入）。
     """
@@ -816,7 +827,8 @@ def _load_keys_cached(force: bool = False) -> list[KeyRecord]:
 
 
 def _pick_model_for_tier(rec: KeyRecord, tier, required_scope: str,
-                         preferred_model: str | None = None) -> str:
+                         preferred_model: str | None = None,
+                         exclude_models: set[str] | None = None) -> str:
     """从 record 的 models 中选 model（tier 范围匹配 + model 软偏好）：
 
     tier 支持范围：
@@ -828,11 +840,17 @@ def _pick_model_for_tier(rec: KeyRecord, tier, required_scope: str,
     2. 候选 model 按 tier 升序排列（优先更低 tier 省 cost）
     3. preferred_model 在候选中 → 优先返回（软偏好）
     4. 否则返回候选第一个（最低 tier）
+
+    exclude_models：本次调用内已确认"永久失败"的模型名（如上游已下架的模型 ID）。
+    剔除后若无候选则返回 ""，调用方据此跳过该 key——这是同 key 内模型级 fallback 的
+    落点：远程 VL 此前每个 key 只解析出一个模型，400 死模型没有下一个可换。
     """
     min_t, max_t = _normalize_tier_range(tier) if tier is not None else (0, 0)
     candidates = [m for m in rec.models
                   if m.get("enabled", True)
                   and required_scope in m.get("scope", ["llm"])]
+    if exclude_models:
+        candidates = [m for m in candidates if m.get("name") not in exclude_models]
     if max_t > 0:
         candidates = [m for m in candidates
                       if min_t <= int(m.get("tier", 3)) <= max_t]
@@ -871,7 +889,8 @@ def resolved_key_from_record(rec: KeyRecord, model: str) -> ResolvedKey:
     return _to_resolved_key(rec, model)
 
 
-def resolve_keys(use_case: str, tier=None) -> list[ResolvedKey]:
+def resolve_keys(use_case: str, tier=None,
+                 exclude_models: dict[str, set[str]] | None = None) -> list[ResolvedKey]:
     """统一路由入口：按 use_case + tier 筛选可用 key
 
     tier 参数（向后兼容旧调用方）：
@@ -879,6 +898,9 @@ def resolve_keys(use_case: str, tier=None) -> list[ResolvedKey]:
         - str "default"/"cheap"/"powerful": 旧名称，自动转换为 3/2/5
         - tuple/list [min, max]: 范围匹配
         - None: 使用 use_case.default_tier（范围）
+
+    exclude_models：key_id → 本次调用内已确认永久失败的模型名集合，
+    由调用方（远程 VL 的 failover 循环）逐次累积传入。
 
     筛选链：
         1. enabled == True
@@ -925,7 +947,10 @@ def resolve_keys(use_case: str, tier=None) -> list[ResolvedKey]:
             continue
 
         # tier 范围匹配：在 uc.scope 候选中必须有 tier 在范围内的 model
-        chosen_model = _pick_model_for_tier(rec, resolved_range, uc.scope)
+        chosen_model = _pick_model_for_tier(
+            rec, resolved_range, uc.scope,
+            exclude_models=(exclude_models or {}).get(rec.id),
+        )
         if not chosen_model:
             continue
         rk = _to_resolved_key(rec, chosen_model)
@@ -1346,6 +1371,7 @@ def load_llm_keys_for_pool() -> list:
         llm_models: list[str] = []
         model_tiers: dict[str, int] = {}
         model_display_names: dict[str, str] = {}  # v11：model_name → display_name
+        model_context_windows: dict[str, int] = {}  # v16：model_name → 上下文窗口
         for m in rec.models:
             if m.get("enabled", True) and "llm" in m.get("scope", ["llm"]):
                 name = m["name"]
@@ -1355,6 +1381,10 @@ def load_llm_keys_for_pool() -> list:
                 dn = m.get("display_name")
                 if dn and isinstance(dn, str) and dn.strip():
                     model_display_names[name] = dn.strip()
+                # v16：收集 context_window（_to_record 已过滤非法值，这里只可能为正整数）
+                cw = m.get("context_window")
+                if isinstance(cw, int) and cw > 0:
+                    model_context_windows[name] = cw
         if not llm_models:
             continue
         if rec.status.get("works") is False:
@@ -1374,6 +1404,7 @@ def load_llm_keys_for_pool() -> list:
             model_tiers=model_tiers,
             protocol=rec.protocol,  # v11：连接协议
             model_display_names=model_display_names,  # v11：展示名映射
+            model_context_windows=model_context_windows,  # v16：上下文窗口
             pool_key=rec.pool_key,  # v12：上游池去重标识（OmniRoute pool-deduped）
             pool_policy=pool_policy,  # v14：per-key pool 策略
         ))

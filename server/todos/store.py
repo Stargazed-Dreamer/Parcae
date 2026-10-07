@@ -86,6 +86,12 @@ _WIP_JSON_FIELDS = {
     "current_state", "related_memory_keys", "extra_data",
 }
 
+# 已完结的 WIP 状态：summary 模式下这些条目只留最少的字段与最短的标题
+# （active/paused/blocked 之外的历史遗留状态一并纳入，避免漏压缩）
+_CLOSED_WIP_STATUSES = frozenset({"completed", "done", "archived", "cancelled"})
+# summary 模式下已完结条目的标题截断长度
+_CLOSED_WIP_TITLE_MAX = 24
+
 
 class TodosStore:
     """待办存储层（共享 memory.db）"""
@@ -477,13 +483,40 @@ class TodosStore:
             return None
         return self._deserialize_row(row, is_wip=True)
 
-    def list_wip(self, status: Optional[str] = None, summary: bool = False) -> list[dict]:
+    def get_wip_many(self, ids: list) -> dict:
+        """按 id 批量取 WIP 详情（保序；不存在的 id 单独列出）。
+
+        供 agent 在看完 wip_list(summary=True) 摘要后，只取自己真正关心的几条详情，
+        替代"把 summary 关掉全量拉取"的做法。
+
+        Returns:
+            {"tasks": [...], "missing": [...]}
+        """
+        if not ids:
+            return {"tasks": [], "missing": []}
+        uniq = list(dict.fromkeys(ids))  # 去重保序
+        placeholders = ",".join("?" * len(uniq))
+        with self._conn_lock:
+            cur = self.conn.execute(
+                f"SELECT * FROM wip_tasks WHERE id IN ({placeholders})", uniq
+            )
+            rows = cur.fetchall()
+        by_id = {r["id"]: self._deserialize_row(r, is_wip=True) for r in rows}
+        return {
+            "tasks": [by_id[i] for i in uniq if i in by_id],
+            "missing": [i for i in uniq if i not in by_id],
+        }
+
+    def list_wip(self, status: Optional[str] = None, summary: bool = True) -> list[dict]:
         """列出 WIP 任务。
 
-        summary=True 时只返回轻量字段（id/title/status/priority/progress/updated_at），
-        跳过 goal/next_steps/current_state/related_*/extra_data 等大字段和 JSON 反序列化，
-        适用于 agent 会话启动时快速浏览有哪些未完成工作，避免长输出污染上下文。
-        需要详情再用 get_wip(task_id) 单独取。
+        summary=True（默认）只返回轻量字段，其中：
+        - 未完结（active/paused/blocked）→ id/title/status/priority/progress/updated_at
+        - 已完结（completed/done/archived）→ 进一步压到 id/title(截断)/status/updated_at，
+          并带 closed=True 标记。这类条目基本无用，不该占据上下文。
+
+        需要完整字段（goal/next_steps/current_state/related_*/extra_data）时，
+        用 get_wip(task_id) 单条取或 get_wip_many(ids) 批量取，而不是把 summary 关掉全量拉取。
         """
         if summary:
             cols = "id, title, status, priority, progress, updated_at"
@@ -497,7 +530,7 @@ class TodosStore:
                     cur = self.conn.execute(
                         f"SELECT {cols} FROM wip_tasks ORDER BY updated_at DESC"
                     )
-                return [dict(r) for r in cur.fetchall()]
+                return [self._compact_wip_summary(dict(r)) for r in cur.fetchall()]
         with self._conn_lock:
             if status:
                 cur = self.conn.execute(
@@ -510,6 +543,27 @@ class TodosStore:
                 )
             rows = cur.fetchall()
         return [self._deserialize_row(r, is_wip=True) for r in rows]
+
+    @staticmethod
+    def _compact_wip_summary(row: dict) -> dict:
+        """summary 模式下压缩单条记录。
+
+        未完结条目原样返回（6 个轻量字段）；
+        已完结条目只保留 id/status/updated_at + 截断标题，并带 closed=True 标记，
+        让调用方能区分"字段被压缩"与"字段缺失"。
+        """
+        if row.get("status") not in _CLOSED_WIP_STATUSES:
+            return row
+        title = row.get("title") or ""
+        if len(title) > _CLOSED_WIP_TITLE_MAX:
+            title = title[:_CLOSED_WIP_TITLE_MAX].rstrip() + "…"
+        return {
+            "id": row.get("id"),
+            "title": title,
+            "status": row.get("status"),
+            "updated_at": row.get("updated_at"),
+            "closed": True,
+        }
 
     def update_wip(self, task_id: str, updates: dict) -> Optional[dict]:
         if not updates:

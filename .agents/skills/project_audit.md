@@ -139,7 +139,7 @@ task_type: system.project_audit
 | B2 测试缺失 | 对比 `server/*.py` 与 `tests/test_*.py` | 每个 server 模块有对应测试（30+ 模块 vs 39 测试文件） |
 | B3 E2E 测试 | Read `tests/test_e2e.py` | 关键流程（启动→OCR→exec→关闭）有 E2E |
 | B4 测试质量 | Read `tests/conftest.py` + 部分测试 | 无大量 skip；fixture 复用；不依赖外部服务（除非显式 mock） |
-| B5 测试可运行 | `uv run python -m pytest tests/ -v --tb=short` | 全部通过（或失败有明确原因） |
+| B5 测试可运行 | `uv run python tools/run_tests_batched.py` | 全部批次 rc=0（或失败有明确原因） |
 
 ### C. 文档体系（5 子项）
 
@@ -293,7 +293,7 @@ task_type: system.project_audit
 ### 双轨系统注意
 - `.agents/skills/` 项目 skill ↔ `.trae/skills/` Trae IDE skill（两套系统并存）
 - `.agents/rules/project_rules.md` ↔ `.trae/rules/project_rules.md` 镜像（修改需同步）
-- `.agents/<data_drive>:\Documents/` ↔ `.trae/<data_drive>:\Documents/` 镜像
+- `.agents/documents/` ↔ `.trae/documents/` 镜像
 
 ## 恢复指引
 

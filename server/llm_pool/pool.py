@@ -2744,21 +2744,23 @@ class LLMPool:
         from server.llm_pool.types import TIER_NAMES, USE_CASE_REGISTRY
 
         # 1. 收集所有 (model, tier, provider) 三元组（持锁读 keys）
-        entries: list[tuple[str, int, str]] = []
+        entries: list[tuple[str, int, str, int]] = []
         with self.lock:
             for k in self.keys:
                 for m in k.models:
                     tier = k.model_tiers.get(m, 3)
-                    entries.append((m, tier, k.name))
+                    # v16：context_window（0 = keys.json 未填，消费方自己判"未知"）
+                    entries.append((m, tier, k.name, int(k.model_context_windows.get(m, 0) or 0)))
 
         # 2. 按 tier 分组（key 用 TIER_NAMES 的值，如 "tier3-medium"）
         grouped_by_tier: dict[str, list[dict]] = {}
-        for model_name, tier, provider in entries:
+        for model_name, tier, provider, context_window in entries:
             tier_name = TIER_NAMES.get(tier, f"tier{tier}-unknown")
             grouped_by_tier.setdefault(tier_name, []).append({
                 "model": model_name,
                 "tier": tier,
                 "provider": provider,
+                "context_window": context_window,
             })
 
         # 3. 计算 default_tier（agent_chat.default_tier 的 min，对应 TIER_NAMES）

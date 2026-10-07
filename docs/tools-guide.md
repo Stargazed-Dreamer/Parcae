@@ -3,11 +3,11 @@
 
 ## exec_python 统一 terminal 机制 + 3 分钟唤醒 LLM（v15 起，v16 内联等待增强）
 
-**v15 起 exec_python 改为异步 terminal 机制**（SDD 流程 `temp/sdd/exec-terminal-unify/`）。exec_python 不再同步阻塞，而是写 `temp/exec_<uuid>.py` → 调 `terminal_spawn` 起后台子进程 → 返回 `{terminal_id, status, temp_file, pid}`。所有 exec_* 共用 terminal registry，inspect/kill/send_input/wait 4 个工具与 `exec_terminal_*` 行为一致。
+**v15 起 exec_python 改为异步 terminal 机制**（SDD 流程 `temp/sdd/exec-terminal-unify/`）。exec_python 不再同步阻塞，而是写 `temp/exec_<uuid>.py` → 调 `terminal_spawn` 起后台子进程 → 返回 `{terminal_id, status, temp_file, pid}`。所有 exec_* 共用 terminal registry，inspect/kill/send_input/wait 等工具与 `exec_terminal_*` 行为一致。
 
 **v16 内联等待**（`temp/sdd/exec-python-inline-wait/`）：exec_python 在 spawn 成功后默认内联等 `inline_wait_secs` 秒（`[server] exec_python_inline_wait_secs`，默认 10s）。子进程在 N 秒内结束 → 响应 `status="done"` + 完整 `stdout/stderr/exit_code/elapsed`（agent 一步搞定）；超时仍 running → 响应 `status="running"` + `terminal_id`（同 v15）。`0=禁用`回退 v15 立即返回行为。
 
-### 5 个工具（全部 MCP 直连）
+### exec 系列工具（全部 MCP 直连）
 
 | 工具 | 参数 | 行为 | SessionRunner 包装 |
 |------|------|------|---------------------|
@@ -165,9 +165,9 @@ status=running（内联等待超时或禁用，长任务，同 v15）：
 | 明日方舟抽卡 | `workspace/arknights_gacha/arknights_gacha.py` | `uv run python workspace/arknights_gacha/arknights_gacha.py` |
 | 明日方舟导入 | `workspace/arknights_gacha/arknights_import.py` | `uv run python workspace/arknights_gacha/arknights_import.py` |
 | 终末地抽卡 | `workspace/endfield_gacha/endfield_gacha.py` | `uv run python workspace/endfield_gacha/endfield_gacha.py` |
-| <data_drive>:\<bilibili_videos>抽奖 | `workspace/bilibili_gacha/bilibili_gacha.py` | `uv run python workspace/bilibili_gacha/bilibili_gacha.py` |
-| <data_drive>:\<bilibili_videos>抽奖清理 | `workspace/bilibili_gacha/bilibili_cleanup.py` | `uv run python workspace/bilibili_gacha/bilibili_cleanup.py` |
-| <data_drive>:\<bilibili_videos>抽奖核查 | `workspace/bilibili_gacha/bilibili_check_lottery.py` | `uv run python workspace/bilibili_gacha/bilibili_check_lottery.py` |
+| <data_drive>:/<bilibili_videos>抽奖 | `workspace/bilibili_gacha/bilibili_gacha.py` | `uv run python workspace/bilibili_gacha/bilibili_gacha.py` |
+| <data_drive>:/<bilibili_videos>抽奖清理 | `workspace/bilibili_gacha/bilibili_cleanup.py` | `uv run python workspace/bilibili_gacha/bilibili_cleanup.py` |
+| <data_drive>:/<bilibili_videos>抽奖核查 | `workspace/bilibili_gacha/bilibili_check_lottery.py` | `uv run python workspace/bilibili_gacha/bilibili_check_lottery.py` |
 | 社群帖子爬取 | `workspace/community_review/save_community.py` | `uv run python workspace/community_review/save_community.py` |
 | 社群JSON转MD | `workspace/community_review/json_to_md.py` | `uv run python workspace/community_review/json_to_md.py` |
 | 社群增量更新 | `workspace/community_review/update_community.py` | `uv run python workspace/community_review/update_community.py` |
@@ -194,7 +194,7 @@ status=running（内联等待超时或禁用，长任务，同 v15）：
 | 批量代码注释 | `tools/llm/mimo_batch_comment.py` | `uv run python tools/llm/mimo_batch_comment.py --project <目录> --no-check` |
 | 用户消息发送 | `tools/user_message_gui.py` | `uv run python tools/user_message_gui.py` |
 | 图片自动分类 | `tools/image_organizer/organize.py` | `uv run python tools/image_organizer/organize.py` |
-| <data_drive>:\<bilibili_videos>视频分类 | `tools/media_classifier/bilibili_classifier.py` | `uv run python tools/media_classifier/bilibili_classifier.py` |
+| <data_drive>:/<bilibili_videos>视频分类 | `tools/media_classifier/bilibili_classifier.py` | `uv run python tools/media_classifier/bilibili_classifier.py` |
 | 文字篇章整理 | `tools/media_classifier/wenzhang_classifier.py` | `uv run python tools/media_classifier/wenzhang_classifier.py` |
 | 歌词分析 | `tools/media_classifier/mimo_lrc_analyze.py` | `uv run python tools/media_classifier/mimo_lrc_analyze.py` |
 | 帖子批量评分 | `tools/llm/summarize_posts_direct.py` | `uv run python tools/llm/summarize_posts_direct.py` |
@@ -216,13 +216,11 @@ status=running（内联等待超时或禁用，长任务，同 v15）：
 - **工具清单（JSON）**: `tools_manifest.json` - GUI 读取用，包含所有工具的元数据
 - **GUI 面板**: `client/panels/tools.py`（ToolsPanel）+ `client/widgets/tool_runner.py`（工具运行组件）- PySide6 面板，自动读取清单展示工具
 
-> 旧 `tools_launcher.py` / `tools_manifest.md` / `launcher.bat` 已删除，由 `client/panels/tools.py` + `client/widgets/tool_runner.py` 替代。
-
 **维护顺序**：新增或调整工具时，通常先更新 `tools_manifest.json`；只有当 GUI 的布局、分类、队列或运行行为需要变化时，才修改 `client/widgets/tool_runner.py`。
 
 GUI 特点：
 - 各脚本独立运行（subprocess），GUI 关掉也不影响正在运行的脚本
-- 按分类展示工具（社群/抽卡/<data_drive>:\<bilibili_videos>/牛客/磁盘/记账/调试/系统）
+- 按分类展示工具（社群/抽卡/<data_drive>:/<bilibili_videos>/牛客/磁盘/记账/调试/系统）
 - 每个工具显示说明、选项、需求提示（浏览器/管理员权限）
 - 实时显示脚本输出
 
@@ -253,8 +251,8 @@ GUI 特点：
 ```json
 {
   "categories": [
-    {"name": "文档", "path": "<data_drive>:\<data_drive>:\Documents", "extensions": [".pdf", ".doc", ".docx", ".txt", ".md"]},
-    {"name": "图片", "path": "<data_drive>:\<data_drive>:\Pictures", "extensions": [".jpg", ".png", ".gif", ".bmp", ".webp"]},
+    {"name": "文档", "path": "<data_drive>:<data_drive>:\Documents", "extensions": [".pdf", ".doc", ".docx", ".txt", ".md"]},
+    {"name": "图片", "path": "<data_drive>:<data_drive>:\Pictures", "extensions": [".jpg", ".png", ".gif", ".bmp", ".webp"]},
     {"name": "暂存", "path": "", "extensions": []}
   ]
 }
@@ -265,11 +263,11 @@ GUI 特点：
 
 ### 状态持久化
 
-`tools/file_classifier/state.json` 记录：分类即已处理（避免后端重复扫描）、列宽、上次源目录、加载的分类配置。GUI 和后端 <data_drive>:/DownloadscanAction 共享。右键"重置分类"可清除已处理状态。
+`tools/file_classifier/state.json` 记录：分类即已处理（避免后端重复扫描）、列宽、上次源目录、加载的分类配置。GUI 和后端 DownloadScanAction 共享。右键"重置分类"可清除已处理状态。
 
 ### 后端监控
 
-后端 <data_drive>:/DownloadscanAction 每 5 分钟扫描下载文件夹（`config.toml` `[loops.download_watcher]`），文件+文件夹分别分类，读取 state.json 跳过已处理条目，按 disposition（move/inspect/unknown）推送 inbox。
+后端 DownloadScanAction 每 5 分钟扫描下载文件夹（`config.toml` `[loops.download_watcher]`），文件+文件夹分别分类，读取 state.json 跳过已处理条目，按 disposition（move/inspect/unknown）推送 inbox。
 
 ### 启动
 
@@ -340,8 +338,8 @@ uv run python tools/image_organizer/organize.py
 
 | 工具 | 用途 | 说明 |
 |------|------|------|
-| `bilibili_classifier.py` | <data_drive>:\<bilibili_videos>视频分类 | 扫描视频文件+弹幕 → LLM 10类分类 |
-| `bilibili_mover.py` | <data_drive>:\<bilibili_videos>视频移动 | 按分类+置信度分层 move |
+| `bilibili_classifier.py` | <data_drive>:/<bilibili_videos>视频分类 | 扫描视频文件+弹幕 → LLM 10类分类 |
+| `bilibili_mover.py` | <data_drive>:/<bilibili_videos>视频移动 | 按分类+置信度分层 move |
 | `wenzhang_classifier.py` | 文字篇章整理 | txt/docx 解析 → LLM 15类分类 |
 | `mimo_lrc_analyze.py` | 歌词分析 | 情感/主题/风格分析，支持 MuseArc 关联 |
 
@@ -405,7 +403,7 @@ uv run python tools/llm/mimo_batch_comment.py --project <external_project_root>\
 
 **端到端测试说明**：[docs/recorder-test-guide.md](file:///<project_root>/docs/recorder-test-guide.md)（覆盖 L0-L4 全部功能和 GUI 外观验收，含 25 个测试文件索引和设计决策覆盖矩阵）
 
-**工具面板入口**：在 client 工具面板的 `🎥 操作录制` 分类下，含录制器（小模式）、录制器（大模式）、录制包编辑器、时间轴构建 4 个工具条目，可通过选项面板配置参数后直接启动。
+**工具面板入口**：在 client 工具面板的 `🎥 操作录制` 分类下（录制器小模式、录制器大模式、录制包编辑器、时间轴构建等，**条目数以 `tools_manifest.json` 该分类为准**）条目，可通过选项面板配置参数后直接启动。
 
 ### 启动
 
@@ -518,7 +516,7 @@ channels = 1
 [recording.stt]                    # L1 处理层 P1 STT 配置（D037/D038）
 enabled = false                    # 是否启用 STT（默认关，需 GPU）
 model = "large-v3"                 # faster-whisper 模型（可改 large-v3-turbo）
-model_dir = "E:/<data_drive>:\<working_root>/- 工作中项目/视频配字幕/stt-main/models"  # 模型权重目录（复用 stt-main）
+model_dir = "<data_drive>:/<working_root>/- 工作中项目/视频配字幕/stt-main/models"  # 模型权重目录（复用 stt-main）
 language = "zh"                    # 转写语言（zh/en/fr/de/ja/ko 等 15 种）
 vad_threshold = 0.5                # VAD 阈值（0.0-1.0，传给 faster-whisper vad_parameters）
 junk_threshold = 0.3               # 垃圾文本判定阈值（JUNK_PHRASES 占比 > 阈值判垃圾）

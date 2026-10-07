@@ -14,6 +14,8 @@
 | `/mcp/stats` | GET | 查询 MCP 工具调用统计 |
 | `/mcp/stats/reset` | POST | 重置 MCP 工具调用统计 |
 
+> `/health` 的 `guard` 字段是审批闸门自身状态：`command_guard_enabled`/`approval_level`/`llm_review_enabled`/`gate_open`/`note`/`recent_origins`。**`gate_open=false` 时 `note` 会明说"闸门当前关闭"**——审批端点在放行，来源分档没有记录，别把"没有可疑放行"读成"有人看过"。详见 `docs/operations-manual.md` 审批相关章节。
+
 ## OCR
 
 | 路径 | 方法 | 说明 |
@@ -72,10 +74,10 @@
 | `/screen/analyze` | POST | 图像特征分析（颜色/亮度/异常告警） |
 | `/screen/preview/action` | POST | 点击位置预览（红点标记） |
 | `/screen/overlay` | POST | 显示操作提示覆盖层（持久显示，文案/颜色/倒计时由 SessionManager.status 推送 tick 自动刷新；传 message 字段已弃用） |
-| `/screen/control/request` | POST | 请求用户介导的当前任务授权（确认窗复选框默认未勾选） |
+| `/screen/control/request` | POST | 请求用户介导的当前任务授权（`mode=normal|watchdog`；watchdog 弹窗含时长 + 「允许关机」复选框，复选框默认勾选。只有用户新批准才改授权状态；任务需要关机时带 `needs_shutdown=true`，缺关机位才会弹第二次窗） |
 | `/screen/control/release` | POST | 主动收回当前任务授权（幂等） |
 
-> 第一次副作用 Computer Use 操作前优先调 `screen_request_control(task_description=..., source="agent")`。授权只对当前任务普通控制生效，空闲 300 秒自动撤销；危险操作和安全阻断不绕过。`verify_prompt` 仅在高风险/状态难判断时使用。详见 `.agents/skills/computer_use/SKILL.md`。
+> 第一次副作用 Computer Use 操作前优先调 `screen_request_control(task_description=..., source="agent")`。授权只对当前任务普通控制生效；normal 模式按 `[screen] idle_warning_seconds`+`idle_grace_seconds` 两阶段空闲降级（默认 10min 告警 + 20min 降到无权限），watchdog 模式不因空闲降级、只到硬上限降到 normal；危险操作和安全阻断不绕过。`verify_prompt` 仅在高风险/状态难判断时使用。详见 `.agents/skills/computer_use/SKILL.md`。
 
 ## 视觉AI
 
@@ -84,7 +86,8 @@
 | `/vision/status` | GET | 视觉模型状态 |
 | `/vision/understand` | POST | VL 图像描述/状态理解（非坐标定位） |
 | `/vision/locate` | POST | 无文字元素坐标兜底（自动反归一化） |
-| `/vision/providers` | GET | VL provider 列表与运行时状态 |
+| `/vision/providers` | GET | VL provider 列表与运行时状态（含 providers[].models[] 两级视图） |
+| `/vision/reset` | POST | 一键解除当日 VL 不可用标记（模型判死名单 / key 级冷却 / 聚合耗尽） |
 
 ## 记忆
 
@@ -99,6 +102,8 @@
 | `/memory/search/traces` | GET | 检索过程追踪列表 |
 | `/memory/search/traces/{trace_id}` | GET | 单条检索详情 |
 | `/memory/search/traces/cleanup` | DELETE | 清理过期 trace |
+| `/memory/projections` | GET | 上下文投影留痕列表（记忆真正上屏了什么） |
+| `/memory/projections/{id}` | GET | 单条投影留痕详情（上屏顺序/被砍掉的 key/有效性标记） |
 | `/memory/evidence/recent` | GET | 最近证据集列表 |
 | `/memory/evidence/{evidence_id}` | GET | 单条证据详情 |
 | `/memory/evidence/cleanup` | DELETE | 清理过期证据 |
@@ -114,12 +119,13 @@
 | `/todos/{id}` | GET/PUT/DELETE | 待办详情/更新/删除 |
 | `/todos/{id}/done` | POST | 标记完成（自动算 next_due_at） |
 | `/todos/{id}/check_trigger` | POST | 检查 triggered 任务触发条件 |
-| `/wip` | GET/POST | 列出/创建 WIP 任务 |
+| `/wip` | GET/POST | 列出（GET 默认 summary 轻量模式）/创建 WIP 任务 |
+| `/wip/batch` | POST | 按 ids 批量取 WIP 完整详情（`wip_get_many`） |
 | `/wip/{id}` | GET/PUT/DELETE | WIP 详情/更新/删除 |
 
 ## 浏览器
 
-> 重构后共 17 个路由，原 6 个 legacy 端点（`/browser/open`、`/browser/click_element`、`/browser/fill_input`、`/browser/wait_for_load`、`/browser/extract_text`、`/browser/screenshot_element`）已删除，功能由新端点替代。详见 `server/browser/routes.py`。
+> **路由条数以 `server/browser/routes.py` 或运行时 `/docs` 为准，不在本文写死**。
 
 ### Session 管理
 
@@ -151,7 +157,7 @@
 |------|------|------|
 | `/browser/evaluate` | POST | 只读 JS 执行（正则拦截 location/cookie/fetch/XHR/eval/innerHTML= 等写操作） |
 | `/browser/console_logs` | POST | 控制台日志（session 模式持久缓冲 + since_cursor 增量读；无 session 一次性 capture_ms 抓取） |
-| `/browser/screenshot` | POST | 截图（shot_type=viewport/full_page/element；return_base64 控制 base64/仅路径） |
+| `/browser/screenshot` | POST | 截图（shot_type=viewport/full_page/element；**`return_base64` 默认 False 只回 path**，True 才内嵌 base64 并触发 ImageContent 转换。看图优先把 path 交给 `understand_image`/`ocr_path`） |
 | `/browser/match_site` | POST | 按域名匹配 `browser_lessons/sites/*.md` 站点经验库 |
 | `/browser/find_url` | POST | 搜索调试浏览器书签/历史（auto_open=true 一键开 session） |
 | `/browser/selector_stats` | POST | 查询选择器成功率（按 domain/target_type 聚合） |

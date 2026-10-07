@@ -63,7 +63,7 @@ def derive_session_id(messages: list[dict], namespace: str = "") -> str:
     text = _first_user_text(messages)
     if not text:
         text = json.dumps(messages or [], ensure_ascii=False, default=str)
-    digest = hashlib.sha256(f"{namespace}\x00{text}".encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(f"{namespace}\x00{text}".encode()).hexdigest()[:16]
     return f"ocs-{digest}"
 
 

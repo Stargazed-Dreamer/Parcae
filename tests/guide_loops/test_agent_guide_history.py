@@ -20,6 +20,19 @@ from server.agent_guide import (
 )
 
 
+def _drain_saves(timeout: float = 5.0) -> None:
+    """等 agent_guide 的单线程落盘池排空。
+
+    payload 是**提交时**快照的（持锁做 list(_history) 副本），所以前一个用例积压的
+    队列会跨 fixture 边界、把旧快照写进下一个用例刚换好的临时文件——2026-10-03
+    tests/guide_loops 那条 `assert 20 == 1` 的假红就是这么来的（20 条全是上一个
+    容量测试写的 query_N）。用 `sleep(0.1)` 等是不行的：队列长度取决于前一个用例。
+    """
+    import server.agent_guide as ag
+
+    ag._save_executor.submit(lambda: None).result(timeout=timeout)
+
+
 @pytest.fixture(autouse=True)
 def isolate_history(tmp_path, monkeypatch):
     """每个测试用独立 history.json，避免污染真实数据。
@@ -29,13 +42,24 @@ def isolate_history(tmp_path, monkeypatch):
     # 重置模块级状态
     import server.agent_guide as ag
 
+    # 把本文件的模块级别名指回"当前"模块对象里的同名属性：test_component_e2e 会
+    # importlib.reload(server.agent_guide)，reload 复用同一个 module.__dict__ 但把
+    # `_history = []` **重新绑定成新 list**——本文件顶部 from-import 拿到的旧 list 于是
+    # 永久停在空表，同进程跑完 e2e 后这里全部断言 len(_history)==1 都红（单跑各自绿）。
+    # 旧 _record_usage 函数无此问题（它的 __globals__ 就是那份被复用的 dict，运行时读到的
+    # 就是新 list），但一并刷新别名，避免以后有人改成模块内重新绑定式写入。
+    globals()["_history"] = ag._history
+    globals()["_record_usage"] = ag._record_usage
+
     fake_file = tmp_path / "history.json"
     monkeypatch.setattr(ag, "HISTORY_FILE", fake_file)
     monkeypatch.setattr(ag, "_history_loaded", False)
     # 原地清空 _history list（不重新绑定，保持外部引用有效）
     ag._history.clear()
     yield fake_file
-    # 清理：重置状态供下一个测试
+    # 清理：先把本用例留下的落盘队列排空（此时 HISTORY_FILE 还指向本用例的临时文件，
+    # 排空后队列是空的，不会把旧快照带进下一个用例），再重置状态
+    _drain_saves()
     ag._history.clear()
     ag._history_loaded = False
 
@@ -122,9 +146,8 @@ class TestPersistence:
         """记录应写入 history.json 文件。"""
         _record_usage("task", "adhoc.web_archive", "爬一下文章", strong_match=True)
 
-        # 等异步写入完成（threading.Thread daemon）
-        import time
-        time.sleep(0.1)
+        # 等落盘队列排空（不能用 sleep：队列长度取决于前一个用例）
+        _drain_saves()
 
         assert isolate_history.exists()
         data = json.loads(isolate_history.read_text(encoding="utf-8"))
@@ -137,8 +160,7 @@ class TestPersistence:
         """重启后端（重新加载模块）应能读到历史记录。"""
         _record_usage("task", "adhoc.web_archive", "query1")
 
-        import time
-        time.sleep(0.1)
+        _drain_saves()
 
         # 模拟重启：重置 _history_loaded 并重新加载
         import server.agent_guide as ag

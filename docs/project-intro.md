@@ -1232,7 +1232,7 @@ agent 被授权动你的电脑期间，屏幕顶部始终挂着一条小横条�
 
 > *诚实框：映射规则本身的完整性是已登记的安全风险（SECURITY-RISKS.md 第 10 条）——漏写一种路径变体，那个变体就原样进包。这正是"每轮发布前重跑全量扫描、人工核对增量报告"是固定工序而非可选项的原因。*
 
-> 深挖：`release/profiles/friend-full.toml` 的路径映射段（映射表长什么样）→ `SECURITY-RISKS.md` 第 10 条（这条风险的登记原文与应对）
+> 深挖：`release/profiles/public-full.toml` 的路径映射段（映射表长什么样）→ `SECURITY-RISKS.md` 第 10 条（这条风险的登记原文与应对）
 
 ### 15.5 叙事锚点：打包发给朋友的一次构建
 
@@ -1707,7 +1707,7 @@ AI 密钥这边另有专门的**监听守护**：改完 `keys.json`（比如给�
 
 **已做的验证**（第三批，第 10-15 章）：
 - 第 10-12 章：每条技术声明先读代码核实再写，内部实现名收进「深挖」行，与第 6-9 章同标准
-- 第 13-15 章：关机倒计时时长、活动追踪各采集频率与数据保留、overlay 形态、headless 默认关闭、下载分类三档判定阈值、release 门禁清单、路径映射表位置等配置值均逐一查证源码后落笔（对照 `server/auto_shutdown.py`、`server/activity_tracker/`、`tools/file_classifier/predictor.py`、`release/policy.toml`、`release/profiles/friend-full.toml`、ADR-0013/0014、`SECURITY-RISKS.md`）
+- 第 13-15 章：关机倒计时时长、活动追踪各采集频率与数据保留、overlay 形态、headless 默认关闭、下载分类三档判定阈值、release 门禁清单、路径映射表位置等配置值均逐一查证源码后落笔（对照 `server/auto_shutdown.py`、`server/activity_tracker/`、`tools/file_classifier/predictor.py`、`release/policy.toml`、`release/profiles/public-full.toml`、ADR-0013/0014、`SECURITY-RISKS.md`）
 - 零数字规范与零本机盘符复查通过；正文内部实现名仅限读者会真实遇到的名字（`[loops.activity_tracker]`、`headless_session`、`download_watcher` 等配置段名与端点概念）
 
 **已做的验证**（第四批，第 16-20 章 + 附录 A-B）：

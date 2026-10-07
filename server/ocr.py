@@ -284,7 +284,7 @@ class ModelManager:
                 if self._load_started_at is None:
                     self._load_started_at = time.perf_counter()
                 t0 = self._load_started_at
-                # UVDoc improves photographed/scanned <data_drive>:\Documents, but it geometrically
+                # UVDoc improves photographed/scanned documents, but it geometrically
                 # warps ordinary screenshots. PaddleOCR returns boxes in that warped
                 # coordinate space, which makes them unusable for screen actions.
                 self._ocr_engine = PaddleOCR(

@@ -54,7 +54,7 @@ task_type: system.task_reminder
 ### 1. 查询任务（用户问"有什么任务"时）
 
 1. **获取到期任务**：`GET /todos/due`（MCP: `todos_due`）— 返回所有到期的周期任务
-2. **获取 WIP 待办**：`GET /wip`（MCP: `wip_list`）— 返回所有未完成的 WIP 任务
+2. **获取 WIP 待办**：`GET /wip`（MCP: `wip_list`）— 返回 WIP 明细；默认轻量模式（已完结条目压成 id/截断标题/状态），要看完整详情用 `wip_get` 或 `wip_get_many`
 3. **汇总报告**：
 
 **报告格式：**

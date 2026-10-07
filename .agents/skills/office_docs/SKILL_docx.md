@@ -137,7 +137,7 @@ task_type: adhoc.office_docx
 
 每种场景的详细工作流、设计规范、反模式见 `references/`：
 
-- [references/docx_basic.md](file:///<project_root>/.agents/skills/office_docs/references/docx_basic.md) - 基础元素参考（headings/paragraphs/lists/tables/<data_drive>:\Pictures/headers-footers/page-breaks/fields）
+- [references/docx_basic.md](file:///<project_root>/.agents/skills/office_docs/references/docx_basic.md) - 基础元素参考（headings/paragraphs/lists/tables/pictures/headers-footers/page-breaks/fields）
 - [references/docx_academic_paper.md](file:///<project_root>/.agents/skills/office_docs/references/docx_academic_paper.md) - 学术论文场景（APA/Chicago/IEEE/MLA Citation、OMML 公式、SEQ+PAGEREF 交叉引用）
 - [references/docx_word_form.md](file:///<project_root>/.agents/skills/office_docs/references/docx_word_form.md) - Word 表单（SDT 7 types、MERGEFIELD、documentProtection 4 modes）
 - [references/docx_report_recipes.md](file:///<project_root>/.agents/skills/office_docs/references/docx_report_recipes.md) - Report 配方（封面/Page X of Y/表头/财务表/SWOT/TOC）

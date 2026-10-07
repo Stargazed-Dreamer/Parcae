@@ -774,15 +774,25 @@ class MonitoringPanel(PanelBase):
         else:
             authorization_text = "配置禁用"
         c["screen"].set_field("task_authorization", authorization_text)
-        timeout_seconds = (
-            authorization.get("configured_idle_timeout_seconds")
-            or authorization.get("idle_timeout_seconds")
-            or 0
-        )
-        c["screen"].set_field(
-            "authorization_timeout",
-            f"{int(timeout_seconds)} 秒" if timeout_seconds else "—",
-        )
+        # 空闲撤销时长的真源是 SessionManager 两阶段策略（warning + grace）；
+        # 遗留 configured_idle_timeout_seconds（默认 300）早已不决定撤销时机，
+        # 拿它显示会把"30 分钟"报成"5 分钟"（2026-09-30 文档失真的同一处根源）
+        warning_seconds = int(authorization.get("idle_warning_seconds") or 0)
+        grace_seconds = int(authorization.get("idle_grace_seconds") or 0)
+        idle_total_seconds = warning_seconds + grace_seconds
+        if authorization.get("mode") == "watchdog":
+            timeout_text = "空闲不撤销（看门狗）"
+        elif idle_total_seconds:
+            timeout_text = f"{idle_total_seconds} 秒"
+        else:
+            # 兜底：老进程 /health 没带两阶段字段时才退回遗留值（值为 0/缺失则显示 —）
+            legacy_seconds = int(
+                authorization.get("idle_timeout_seconds")
+                or authorization.get("configured_idle_timeout_seconds")
+                or 0
+            )
+            timeout_text = f"{legacy_seconds} 秒（遗留字段）" if legacy_seconds else "—"
+        c["screen"].set_field("authorization_timeout", timeout_text)
 
         # Memory
         mem = h.get("memory", {}) or {}

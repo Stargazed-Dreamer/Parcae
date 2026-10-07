@@ -113,7 +113,7 @@ class VLQuotaManager:
         # 429 分类：真耗尽（quota_exhausted）vs 上游过载（upstream_overload）
         # 两者旧版都按 daily_exhausted 处理，导致恢复后浪费剩余配额。
         # 现在区分记录，便于事后回看配额管理器是否"误判耗尽"。
-        self._exhausted_kind: str | None = None  # "quota_exhausted" | "upstream_overload"
+        self._exhausted_kind: str | None = None  # "quota_exhausted" | "upstream_overload" | "model_unavailable"
         self._last_call_ts: str | None = None
         self._last_call_epoch: float = 0.0
         self._loaded: bool = False
@@ -577,16 +577,23 @@ class VLQuotaManager:
                 )
                 return False, "idle 状态跳过 VL（用户可能挂机/睡觉）", debug
 
-            # 1. 今日已耗尽（来自 429 检测）
+            # 1. 今日已耗尽（成因见 _exhausted_kind，文案必须跟着成因走）
+            #    "额度耗尽"与"模型 ID 全部判死"是完全不同的处置：前者只能等次日重置，
+            #    后者换个模型 ID 或 POST /vision/reset 就能恢复。写死 429 会把人引向下调配额。
             if self._daily_exhausted:
+                deny_reason = (
+                    "今日 VL 模型 ID 全部判死（上游下架；换 ID 或 POST /vision/reset 可解）"
+                    if self._exhausted_kind == "model_unavailable"
+                    else "今日 VL 已耗尽（ModelScope 返回 429）"
+                )
                 debug["decision"] = "deny_exhausted"
                 self._record_decision(
                     decision="deny_exhausted", allow=False,
                     signal=signal_state, focus_changed=focus_changed,
                     pace=expected_pace, used_this_hour=used_this_hour,
-                    reason="今日 VL 已耗尽（ModelScope 返回 429）",
+                    reason=deny_reason,
                 )
-                return False, "今日 VL 已耗尽（ModelScope 返回 429）", debug
+                return False, deny_reason, debug
 
             # 2. 配额用完
             if self._used_today >= self._daily_quota:
@@ -727,11 +734,14 @@ class VLQuotaManager:
 
         Args:
             reason: 人类可读原因
-            kind: 耗尽类型，区分两种根因：
+            kind: 耗尽类型，区分三种根因：
                 - "quota_exhausted"：配额真用完（HTTP 429 + body 明示 quota exceeded）
                   后续即便上游恢复也不会自动可用，等到 reset_hour 重置
                 - "upstream_overload"：上游临时过载（HTTP 429 + body 提示 rate_limited / concurrency）
                   上游恢复后理论可继续用，但旧版按 daily_exhausted 处理，浪费剩余配额
+                - "model_unavailable"：候选 key 的 VL 模型 ID 上游全都不认了
+                  （400/404/422 永久失败）。**不是配额信号**——别据此下调
+                  vl_daily_quota，正确动作是换模型 ID 或 POST /vision/reset
                 记录 kind 便于事后回看是否"误判耗尽"
             source: 429 来源 provider 标识（如 "ModelScope" / "OpenAI"），用于 quota_429_sources 细分
         """
@@ -752,6 +762,29 @@ class VLQuotaManager:
         with self._lock:
             self._load_if_needed()
             return self._daily_exhausted
+
+    def clear_daily_exhausted(self) -> bool:
+        """手动解除"今日已耗尽"标记（POST /vision/reset 的配额侧）。
+
+        只解耗尽三件套（flag/at/reason/kind）。used_today、by_hour、decision_counts
+        等真实消耗与统计一律不动——复位是"重新给一次机会"，不是把账擦了。
+
+        Returns:
+            True 原本处于耗尽态（这次真的解除了）；False 本来就是可用状态。
+        """
+        with self._lock:
+            self._load_if_needed()
+            was = self._daily_exhausted
+            if not was and self._exhausted_kind is None:
+                return False
+            self._daily_exhausted = False
+            self._daily_exhausted_at = None
+            self._daily_exhausted_reason = None
+            cleared_kind = self._exhausted_kind
+            self._exhausted_kind = None
+            self._persist()
+            logger.warning("VL 耗尽标记已手动解除（原 kind=%s）", cleared_kind)
+            return was
 
     def status(self) -> dict:
         """返回配额状态（供 /health 和监控面板使用）"""
@@ -795,7 +828,7 @@ class VLQuotaManager:
                 "daily_exhausted": self._daily_exhausted,
                 "daily_exhausted_at": self._daily_exhausted_at,
                 "daily_exhausted_reason": self._daily_exhausted_reason,
-                "exhausted_kind": self._exhausted_kind,  # "quota_exhausted" | "upstream_overload" | None
+                "exhausted_kind": self._exhausted_kind,  # "quota_exhausted" | "upstream_overload" | "model_unavailable" | None
                 "last_call_ts": self._last_call_ts,
                 "reset_hour": self._reset_hour,
                 "min_interval_seconds": self._min_interval,

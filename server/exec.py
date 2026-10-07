@@ -1,6 +1,7 @@
 """代码执行路由 - 通过子进程实时运行Python代码片段
 
-Python 片段默认通过 stdin 送入子解释器执行，不落临时脚本文件。
+exec_python 把代码写入 temp/exec_<uuid>.py，交 server/_exec_runner.py 在终端会话中执行
+（支持 top-level await；已替代旧的 stdin 管道方式），故子进程内 __file__ 指向该临时脚本。
 输出超过阈值时自动截断，保留完整输出供后续按需查看。
 """
 
@@ -23,6 +24,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Request
 
+from lib.agent_identity import get_caller_id as _get_caller_id
 from lib.schema import BaseSchema
 from server.command_guard import AGENT_BLOCK_MESSAGE, check_command
 
@@ -58,6 +60,50 @@ _TERMINAL_DETAIL_DEFAULT_CHARS = 8000
 _TERMINAL_OUTPUT_MAX_BYTES = 256 * 1024
 TERMINAL_DIR = TEMP_DIR / "terminals"
 TERMINAL_DIR.mkdir(exist_ok=True)
+
+# unknown-outcome-evidence T06：崩溃执行证据的归档处与保留上限。
+# 孤儿文件不再被启动清理直接删掉——它们是"那一步到底跑没跑过"的唯一物证。
+# 上限份数是我替领导拍的板（spec），代价由 prune + temp/ 目录性质兜住。
+EXEC_EVIDENCE_DIR = TEMP_DIR / "exec_evidence"
+EXEC_EVIDENCE_KEEP = 3
+
+
+def _archive_orphan(path: Path, kind: str) -> bool:
+    """把孤儿文件移进证据目录。返回是否归档成功。"""
+    try:
+        EXEC_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+        target = EXEC_EVIDENCE_DIR / f"{kind}_{int(path.stat().st_mtime)}_{path.name}"
+        shutil.move(str(path), str(target))
+        return True
+    except Exception as e:
+        logger.warning("归档崩溃证据失败 %s: %s", path, e)
+        return False
+
+
+def prune_exec_evidence(keep: int = EXEC_EVIDENCE_KEEP) -> int:
+    """只保留最近 keep 组证据，更早的物理删除。返回删除个数。
+
+    证据目录里全是本进程生成的 temp 脚本与日志（非用户数据），按 AGENTS.md
+    临时文件规则可直接清理，无需拉清单审核。
+    """
+    if not EXEC_EVIDENCE_DIR.exists():
+        return 0
+    pruned = 0
+    try:
+        entries = sorted(
+            (p for p in EXEC_EVIDENCE_DIR.iterdir() if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for stale in entries[keep:]:
+            try:
+                stale.unlink(missing_ok=True)
+                pruned += 1
+            except Exception:
+                logger.debug("清理过期证据失败: %s", stale, exc_info=True)
+    except Exception:
+        logger.debug("prune_exec_evidence 扫描失败", exc_info=True)
+    return pruned
 
 
 def get_status() -> dict:
@@ -280,19 +326,31 @@ def _truncate_output(text: str, label: str = "输出") -> tuple[str, bool, int]:
 
 
 def _find_codex_executable() -> Path:
+    """定位 Codex 可执行文件。
+
+    显式配置（`CODEX_EXECUTABLE`）永远优先。自动发现时**避开 shell 垫片**：
+    Windows 上 npm 全局安装会生成 `codex.cmd`，而补丁是以**多行参数**传入的，
+    cmd.exe 按行解析会把补丁截断（实测报
+    "The last line of the patch must be '*** End Patch'"），因此优先选真正的
+    可执行文件，`.cmd` / `.bat` 仅作兜底（2026-10-04 实测：npm 装的 codex
+    垫片会遮蔽 ChatGPT 桌面端自带的可用 codex.exe）。
+    """
     configured = os.environ.get("CODEX_EXECUTABLE", "")
-    candidates = [Path(configured)] if configured else []
+    if configured and Path(configured).is_file():
+        return Path(configured).resolve()
+    candidates: list[Path] = []
     discovered = shutil.which("codex")
     if discovered:
         candidates.append(Path(discovered))
     if sys.platform == "win32":
-        candidates.extend(Path(r"C:\Program Files\WindowsApps").glob(
+        candidates.extend(sorted(Path(r"C:\Program Files\WindowsApps").glob(
             r"OpenAI.Codex_*\app\resources\codex.exe"
-        ))
-    executable = next((path.resolve() for path in candidates if path.is_file()), None)
-    if not executable:
+        )))
+    files = [path.resolve() for path in candidates if path.is_file()]
+    if not files:
         raise ValueError("未找到 Codex 可执行文件；可通过 CODEX_EXECUTABLE 指定")
-    return executable
+    files.sort(key=lambda path: path.suffix.lower() in {".cmd", ".bat"})
+    return files[0]
 
 
 def _parse_patch_targets(patch: str, work_dir: Path) -> list[Path]:
@@ -640,7 +698,7 @@ async def exec_python(req: ExecRequest):
             timeout=0,  # no timeout (spec D5: exec_python has no timeout parameter)
             approval_token=req.approval_token,
         )
-        spawn_result = await terminal_spawn(spawn_req)
+        spawn_result = await _terminal_spawn_impl(spawn_req, None)
 
         if not spawn_result.get("success"):
             # terminal_spawn failed (guard reject / capacity / spawn error)
@@ -1239,13 +1297,20 @@ def _verify_terminal_owner(tid: str, owner_token: str) -> bool:
 def _is_gui_request(request: Request | None) -> bool:
     """判断请求是否来自 GUI/用户（而非 agent）。
 
-    agent 请求带 X-Agent-Caller: true 头；GUI/用户请求不带此头。
+    agent 请求带 X-Agent-Caller 头（实际值是客户端的 "v6-lite-agent"，判据真源见
+    lib.agent_identity）；GUI/用户请求不带此头。
     GUI 请求免 owner_token 检查（已有自己的确认弹窗）。
-    request 为 None 时（内部/测试直接调用）视为可信，免 owner_token 检查。
+    request 为 None 时（内部/测试直接调用，不经过 HTTP 层）视为可信，免 owner_token 检查。
+
+    unknown-outcome-evidence T06：旧判据写死 `== "true"`，而客户端发的是
+    "v6-lite-agent"，导致 agent 对 terminal 的 input/kill/delete 被当成 GUI 请求免检
+    ——owner_token 那道防线事实上从未对 agent 生效过。
     """
     if request is None:
         return True
-    return request.headers.get("X-Agent-Caller", "").lower() != "true"
+    from lib.agent_identity import is_agent_caller
+
+    return not is_agent_caller(request.headers)
 
 
 def _check_terminal_permission(tid: str, owner_token: str, request: Request | None, action: str) -> dict | None:
@@ -1266,15 +1331,19 @@ def _terminal_approval_required(tid: str, action: str) -> dict:
     """owner_token 不匹配时返回审批要求（不是不给过，是走审批流程）。
 
     agent 丢失 token 或非 agent 调用时，创建 approval_id 让用户审批。
+    2026-10-02：用户裁决维持此审批口子（T10 不改拒绝），但 message 附 owner
+    信息，让"这是谁的终端"可追溯。
     """
     from server.http_guard import create_pending
     approval_id = create_pending("POST", f"/terminals/{tid}/{action}", b"")
+    t = _terminals.get(tid) or {}
+    owner_hint = f"（owner_caller={t.get('owner_caller', 'unknown')}）" if t else ""
     return {
         "success": False,
         "error": "owner_token_required",
         "approval_id": approval_id,
         "message": (
-            f"终端 {tid} 的 owner_token 不匹配或缺失。"
+            f"终端 {tid} 的 owner_token 不匹配或缺失{owner_hint}。"
             "若您是 agent，请使用 spawn 返回的 owner_token；"
             "否则请调用 command_guard_request_approval 获取批准后重试。"
         ),
@@ -1282,7 +1351,7 @@ def _terminal_approval_required(tid: str, action: str) -> dict:
 
 
 @terminal_router.post("/spawn", operation_id="exec_terminal_spawn")
-async def terminal_spawn(req: TerminalSpawnRequest):
+async def terminal_spawn(req: TerminalSpawnRequest, request: Request):
     """启动一个后台终端会话，立即返回终端 ID。
 
     命令在后台异步执行，通过 /terminals/{tid} 轮询状态和输出。
@@ -1291,7 +1360,15 @@ async def terminal_spawn(req: TerminalSpawnRequest):
     支持两种命令模式：
     - cmd + shell：传统模式，通过 shell 解析 cmd 字符串（cmd.exe/powershell/bash/python）
     - cmd_list：直接传命令列表，绕过 shell 解析（避免 cmd.exe 引号陷阱，exec_python 内部用）
+
+    2026-10-02 归属记录：owner_caller = X-Agent-Caller 头（GUI 记 "gui"、
+    内部调用记 "anonymous"），"谁杀了谁的终端"从此可追溯。
     """
+    return await _terminal_spawn_impl(req, request)
+
+
+async def _terminal_spawn_impl(req: TerminalSpawnRequest, request: Request | None) -> dict:
+    """spawn 实现（可内部调用）：request=None 时 owner_caller 记 anonymous。"""
     tid = f"term_{uuid.uuid4().hex[:12]}"
     try:
         work_dir = _resolve_work_dir(req.cwd)
@@ -1392,6 +1469,8 @@ async def terminal_spawn(req: TerminalSpawnRequest):
         "output_version": 0,
         "timeout": req.timeout,
         "owner_token": owner_token,  # 后续 kill/delete/input 凭此 token 免审
+        # 2026-10-02 归属记录：谁 spawn 的（caller id），"谁杀了谁的终端"可追溯
+        "owner_caller": _get_caller_id(request.headers if request is not None else None),
         "_proc": proc,  # 保留进程引用，用于 stdin 写入
         "_stdout_path": _terminal_log_path(tid, "stdout"),
         "_stderr_path": _terminal_log_path(tid, "stderr"),
@@ -1957,16 +2036,23 @@ async def _terminal_ttl_cleanup_loop():
 
 
 def cleanup_orphan_temp_files() -> dict:
-    """启动时清理孤儿临时文件（修复 bug：后端重启后 temp/exec_*.py 和 term_*.log 累积）。
+    """启动时归档孤儿临时文件（不再直接删除）。
 
-    TTL 清理依赖内存中的 _terminals dict，但后端重启后内存丢失，磁盘上的孤儿文件
-    永远无法被清理。本函数在启动时扫描磁盘，删除所有不在当前 _terminals dict 中的
-    exec_*.py 和 terminals/term_*.log 文件。
+    历史行为：后端重启后内存丢失，磁盘上的 temp/exec_*.py 与 term_*.log 成为孤儿，
+    启动时一律 unlink。问题是这恰好**销毁了"那一步到底跑没跑过"的唯一物证**——
+    unknown-outcome-evidence T06 要修的就是这个：结局不明时，脚本内容与 stdout/stderr
+    是我们区别于"猜测"的全部依据。
+
+    现在改为归档到 `temp/exec_evidence/`，只保留最近 EXEC_EVIDENCE_KEEP 组，超出的
+    才物理删除（这些都是本进程自己生成的 temp 文件，非用户数据）。
 
     Returns:
-        统计字典：{deleted_exec_files, deleted_term_logs, skipped, errors}
+        统计字典：{archived_exec_files, archived_term_logs, pruned, skipped, errors}
     """
-    stats = {"deleted_exec_files": 0, "deleted_term_logs": 0, "skipped": 0, "errors": 0}
+    stats = {
+        "archived_exec_files": 0, "archived_term_logs": 0,
+        "pruned": 0, "skipped": 0, "errors": 0,
+    }
 
     # 收集当前 _terminals dict 中跟踪的所有文件路径
     tracked_temp_files = set()
@@ -1985,8 +2071,10 @@ def cleanup_orphan_temp_files() -> dict:
         for path in TEMP_DIR.glob("exec_*.py"):
             try:
                 if path.resolve() not in tracked_temp_files:
-                    path.unlink(missing_ok=True)
-                    stats["deleted_exec_files"] += 1
+                    if _archive_orphan(path, "exec"):
+                        stats["archived_exec_files"] += 1
+                    else:
+                        stats["errors"] += 1
                 else:
                     stats["skipped"] += 1
             except Exception:
@@ -1999,8 +2087,10 @@ def cleanup_orphan_temp_files() -> dict:
         for path in TERMINAL_DIR.glob("term_*.log"):
             try:
                 if path.resolve() not in tracked_term_logs:
-                    path.unlink(missing_ok=True)
-                    stats["deleted_term_logs"] += 1
+                    if _archive_orphan(path, "term"):
+                        stats["archived_term_logs"] += 1
+                    else:
+                        stats["errors"] += 1
                 else:
                     stats["skipped"] += 1
             except Exception:
@@ -2008,11 +2098,15 @@ def cleanup_orphan_temp_files() -> dict:
     except Exception:
         stats["errors"] += 1
 
-    if stats["deleted_exec_files"] or stats["deleted_term_logs"]:
+    stats["pruned"] = prune_exec_evidence()
+
+    if stats["archived_exec_files"] or stats["archived_term_logs"]:
         logger.info(
-            "启动清理孤儿临时文件: exec_*.py=%d, term_*.log=%d, skipped=%d, errors=%d",
-            stats["deleted_exec_files"], stats["deleted_term_logs"],
-            stats["skipped"], stats["errors"],
+            "启动归档孤儿临时文件: exec_*.py=%d, term_*.log=%d, pruned=%d, skipped=%d, errors=%d "
+            "(证据目录 %s)",
+            stats["archived_exec_files"], stats["archived_term_logs"],
+            stats["pruned"], stats["skipped"], stats["errors"],
+            EXEC_EVIDENCE_DIR,
         )
     return stats
 

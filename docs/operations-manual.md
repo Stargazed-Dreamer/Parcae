@@ -87,6 +87,32 @@ env -u PYTHONPATH PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m server.main
 - 或用 `Invoke-RestMethod`：`Invoke-RestMethod -Uri http://127.0.0.1:8766/health`
 - **绝对不要**在 PowerShell 中直接用 `curl -s ...`，会卡住终端
 
+### Git Bash 里 `curl.exe --data-urlencode` 传中文会把查询变成 GBK 字节（假故障，2026-09-28 实测）
+
+**症状**：`curl.exe -G ... --data-urlencode "task=开虚拟机装系统"` 得到的响应像"功能没生效"，
+而同一时刻用 ASCII 参数（`task=VMware`）却正常命中。极易误判成"后端注册了条目但匹配逻辑坏了"。
+
+**根因**：Git Bash 的 locale 不是 UTF-8，`--data-urlencode` 按当前 locale 把中文编成 **GBK 字节**再百分号编码，
+服务端按 UTF-8 解出来的是一串乱码，自然匹配不到任何中文关键词。ASCII 字符两种编码一致，所以看起来"一半能用"。
+
+**同一条请求的对照实测**（同一个后端、同一时刻、同一句话）：
+
+```
+curl.exe -s "http://127.0.0.1:8766/guide?task=%E5%BC%80%E8%99%9A%E6%8B%9F%E6%9C%BA%E8%A3%85%E7%B3%BB%E7%BB%9F"
+→ {"mode":"task","task_type":"adhoc.vm_ops", ...}                  # UTF-8 预编码：正常命中
+curl.exe -s -G "http://127.0.0.1:8766/guide" --data-urlencode "task=开虚拟机装系统"
+→ {"mode":"low_confidence", ...}                                    # 经 shell 编码：判为不匹配
+```
+
+**避免方法**：
+- 判协议层行为优先走 **MCP 工具**（`mcp_localagent_agent_guide` 等），JSON 传输不经 shell 编码
+- 或 `python -c` / `urllib` 自己拼 UTF-8 查询
+- 必须用 curl 时：**自己按 UTF-8 预先把中文百分号编码好**写进 URL（如上面那串 `%E5%BC%80...`），
+  不要用 `--data-urlencode` 让 shell 编码
+- 与 POST 侧同族：中文 JSON body 走 `--data-binary @文件`（文件用 Write 工具落盘，UTF-8 无 BOM），
+  不要在命令行里内联中文
+- **推论**：任何"中文参数不生效而 ASCII 生效"的现象，先怀疑探针编码，再怀疑服务端
+
 ### PowerShell 不支持 `&&` 串联命令语句（反复踩坑！）
 
 Windows PowerShell 5.1 不支持 `&&`（管道链运算符），用 `cmd1 && cmd2` 会报 `The token '&&' is not a valid statement separator`。
@@ -138,6 +164,16 @@ AGENTS.md / _index.md / skill 文件中的注释可能过时（如"XX 尚未创�
 - 截图+OCR：优先 `localagent_advanced_tool(tool="screen_ocr", params={...})`，直接返回文字和 bbox，不经过 base64
 - 文件读取：用 `docviewer_read` 或 `exec_python` 提取文本，绝不返回 base64
 - **违反此规则会导致上下文窗口被数 MB 的 base64 字符串撑爆，LLM 无法继续工作**
+
+### REST 读写 `/wip` 的三个形状坑（做"读—改—写"合并更新前必读）
+
+`workspace/homework` 那条线常用脚本直接打 REST 更新 WIP（MCP 不可用时的通路），四个坑实测确认：
+
+- **`GET /wip/{id}` 返回的是扁平对象**，顶层就是 `title/status/current_state/...`，**没有 `task` 包装**。写 `json.load(r).get("task", {})` 会静默拿到 `{}`，于是"读旧值→合并→写回"变成"用空底座写回"，**旧 `current_state` 键、`next_steps`、`related_files` 全被覆盖丢失**（2026-09-28 实测踩过，一次覆盖两条 WIP，靠事先 dump 的原始快照才并回去）。列表接口 `GET /wip` 才有 `tasks` 数组，别把两者的形状混用。
+- **`PUT/POST /wip` 的 `current_state` 必须是 dict**，传字符串直接 422。
+- **`POST /wip`（新建）必须带 `goal`**，且**不接受 `progress` / `status`**（`extra_forbidden`）；这两个字段只在 `WipTaskUpdate`（PUT）里有。
+- **`GET /wip?status=...` 只认 `active|paused|blocked|completed`**，传 `open` 之类非法值不报错、返回 `total=0` 空表（看着像"没有待办"）。
+- **合并式写回的纪律**：先 `GET` 落到临时 JSON 文件留底，脚本里断言 `读到的旧键数 > 0` 再写；写完立刻回读一次核对键数（`steps=N(期望N)`），别信"PUT 返回 200"等于写对了。
 
 ### 截图+OCR 的正确流程（重要！）
 
@@ -213,6 +249,8 @@ Pydantic 验证失败时返回 422，响应体包含 `detail` 数组，每项有
 
 终端输出以 `temp/terminals/` 下的日志文件为真源，内存只保留每通道最近 64 KiB；stdout/stderr 会并发排空，避免高输出命令因管道写满死锁。运行中终端默认上限为 10 个，防止 Agent 无界创建后台进程。
 
+**崩溃证据不再被启动清理抹掉**（`unknown-outcome-evidence` T04，`server/exec.py`）：后端启动时的孤儿清理（`cleanup_orphan_temp_files()`）过去对上一进程遗留的 `temp/exec_*.py` / `temp/terminals/term_*.log` 直接 `unlink()`——那正好抹掉"上次崩在哪条命令上"的唯一现场。现改为**归档**到 `temp/exec_evidence/`（`EXEC_EVIDENCE_DIR`，每类保留最近 `EXEC_EVIDENCE_KEEP=3` 份，超出才裁剪），统计键相应为 `archived_exec_files` / `archived_term_logs` / `pruned` / `skipped` / `errors`（旧名 `deleted_*` 已不存在，别照抄）。这不是磁盘清理，也不涉及用户目录。
+
 **终端监控**：通过 GUI 客户端（`start_client.bat`）的 Monitoring 面板查看终端管理标签页，实时查看所有终端输出
 
 ## 日总结功能（用户问"总结今日"时触发）
@@ -223,7 +261,7 @@ Pydantic 验证失败时返回 422，响应体包含 `detail` 数组，每项有
 
 1. **首选：[data/activity/hourly/](file:///<project_root>/data/activity/hourly) 目录下的 `YYYYMMDD_HH.md` 文件** — 这是本功能的本源数据，由 `hourly_summarize` loop 任务每整点自动生成。**先读这些文件，不要先查 git log**。
 2. **补全缺失时段**：用 `git log --since="YYYY-MM-DD 05:00" --until="now"` 补全 hourly summary 缺失或失败的时段（注意 since 用 05:00 不是 00:00，与日期划分规则一致）。
-3. **memory 仅作参考**：`c:\<user_home>\.trae-cn\memory\projects\-f-project-temp-localAgent\YYYYMMDD\topics.md` 提供会话级上下文，但**不是主要数据源**。
+3. **memory 仅作参考**：`<user_home>\.trae-cn\memory\projects\-f-project-temp-localAgent\YYYYMMDD\topics.md` 提供会话级上下文，但**不是主要数据源**。
 
 **易踩的坑**：
 - hourly summary 文件可能整小时缺失（LLM 失败、后端重启）— 此时必须用 git log 补全
@@ -332,10 +370,35 @@ localagent_advanced_tool(
 常见误区：
 - "我把 `enabled` 关了怎么还弹审批？" → 端点审批由 `approval_level` 控制，两者独立。
 - "GUI 点按钮也被拦？" → GUI 直连请求不带 `X-Agent-Caller` 头，天然放行；被拦的是 agent 链路（chat 引擎直连 REST / MCP 网关调用）。
+- **"审批日志里没有可疑放行" ≠ "有人看过"** → 见下方「放行来源分档」。闸门关闭时日志本就是空的。
+
+### 调用方身份判据（`lib/agent_identity.py` 是唯一真源）
+
+客户端发 `X-Agent-Caller: v6-lite-agent`，服务端判据是 `is_agent_caller(headers)`：**头存在且值不是明确否定词（`""`/`false`/`0`/`no`/`gui`/`user`）即算 agent 发起**。GUI 从不设置这个头，所以"有值即 agent"是安全方向。
+
+> ⚠️ **2026-09-30 修正的错判**：此前 `server/core/middleware.py` 与 `server/exec.py` 把判据写成 `== "true"`，而客户端发的值是 `v6-lite-agent`——于是 **agent 流量一直被判成 GUI 用户流量**：审批中间件跳过它、terminal 的 `owner_token` 检查也免掉。改成统一走 `is_agent_caller()` 后，agent 链路会真正进入审批/归属判定路径。**如果哪天你把 `approval_level` 从 `none` 打开，agent 会开始弹出以前不弹的审批**——那是修复生效，不是新 bug。
+>
+> 两端都不要再写字符串字面量：客户端从 `lib.agent_identity` 引 `AGENT_CALLER_HEADER(_VALUE)`，服务端引 `is_agent_caller`（`lib/` 是 C4 允许的双向共享层）。
+
+### 放行来源分档（谁批准的，可查）
+
+`server/approval_review.py` 的每条 `data/approvals.jsonl` 记录都带 `origin`，区分放行是谁给的：
+
+| origin | 含义 |
+|--------|------|
+| `human` | GUI 审批面板真人点的（`command_guard` 与 `user_review_for_llm_deny` 两条路径都记） |
+| `llm_approved` | LLM 复核放行 |
+| `low_risk_degraded` | LLM 审查不可用时按 AST 低风险判定降级放行 |
+| `approval_cache` | 复用近期人审指纹（TTL 内不再问人） |
+| `denied` | 拒绝 |
+| `unknown` | 无法归类的历史/异常记录 |
+
+- 聚合计数：`approval_origin_counts()`，也从 `GET /health` 的 `guard.recent_origins` 直接看。
+- **闸门自身状态**：`GET /health` 的 `guard.gate_open`（= `enabled && approval_level != "none"`）与 `guard.note`。本机默认 `gate_open=false`，此时 `approval_required` 端点与命令守卫都在放行、日志无记录——排查时先看这一格，别从"没有告警"推"安全"。
 
 ### 审批清单（2026-08-25 调整）
 
-- `/loop/tasks*` 的 POST（pause/resume/run）**已从审批清单移除**——低风险运维操作，有 fail_threshold 自动熔断 + auto_failed 自动恢复兜底。任何 approval_level 下均 safe。
+- `/loop/tasks*` 的 POST（pause/resume/run）**已从审批清单移除**——低风险运维操作，有 fail_threshold 自动熔断兜底；auto_failed 能否重启后复活取决于 `fail_count` 是否还没攒满阈值（见 `docs/periodic-task-inventory.md`）。任何 approval_level 下均 safe。
 - strict 仍拦：exec 类（python/cmd/apply-patch/terminal spawn）、shutdown/config、模型管理、activity/daily、browser/close、PUT/DELETE 默认等。真源见 `server/route_tags.py`。
 
 ### loop 手动触发语义
@@ -425,6 +488,12 @@ localagent_advanced_tool(
     "used_mb": 1234,
     "total_mb": 8192,
     "ratio": 0.15,
+    "probe_source": "hub",
+    "probe_id": "gpu_mem",
+    "probe_status": "ok",
+    "probe_absent": false,
+    "probe_age_sec": 2.4,
+    "last_failure": null,
     "last_transition_ts": 1234567890.0
   },
   "cpu": {
@@ -467,7 +536,7 @@ localagent_advanced_tool(
 ```toml
 [model_manager]
 enabled = true                    # 总开关（false=纯透传，各模块行为回退现状）
-poll_interval_sec = 5.0           # 采样周期
+poll_interval_sec = 5.0           # 状态机推进周期（实际采样节奏见 [resource_probe]）
 reload_fail_cooldown_sec = 30      # per-model 加载失败冷却默认值（秒）
 
 [model_manager.gpu]
@@ -498,6 +567,8 @@ enabled = false
 #   evictable = false   # 默认钉住（热路径，每个 MCP 请求都会用）
 ```
 
+采样节奏与探针开关在 `config.example.toml` 的 `[resource_probe]` 段（常驻采样中枢：NVML 显存/利用率 + psutil 内存/CPU；无 NVIDIA 卡机器上 GPU 探针判 `absent`，属正常降级）。中枢结构与扩展点见 [docs/environment-constraints.md](environment-constraints.md) 的「资源采样中枢」。
+
 ### 故障排查
 
 | 问题 | 原因 | 解决 |
@@ -505,6 +576,7 @@ enabled = false
 | `POST /models/ocr/load` 返回 503 | GPU 压力态 REFUSING/PROBE_DEGRADED | 等压力下降到 ARMED/NORMAL 后重试；或调 `/models/pause` 手动超驰（注意：PAUSED 期间逐出也暂停） |
 | `POST /models/ocr/load` 返回 503 reason="reload_degraded" | OCR 连续 ≥3 次加载失败 | 重启后端（`POST /shutdown` + `start.bat`） |
 | `GET /models` 返回空 models 列表 | ModelLifecycleManager 启动失败 | 查后端日志 "ModelLifecycleManager 启动失败"；管理器降级为透传模式（模块行为回退现状，无自动监控） |
+| `GET /models/pressure` 的 `gpu.probe_status = "absent"` | 该机没有 NVIDIA 卡/驱动（NVML 库由驱动提供） | 正常降级，不是故障：GPU 监控失效、准入放行。CPU-only 机器另把 `[models] paddle_device` 设 `"cpu"` 让推理真跑 CPU |
 | `/health.model_manager` 字段缺失 | HealthResponse schema 漏声明 | 已修复（design §10 v2 修订），如仍缺失查 `server/core/health.py` 是否含 `model_manager: dict = {}` 字段 |
 | MindForge 卸载后内存未释放 | 在途搜索持局部引用 | 等在途搜索结束自动释放；无 forced + 延迟补释放语义（已知局限） |
 | 记忆语义检索突然变差（仅 BM25 命中） | memory_embedding 被手动卸载 | 调 `POST /models/memory_embedding/load` + `POST /memory/rebuild_vector_index` 补缺口 |
@@ -661,7 +733,7 @@ def _on_data(self, data):  # 主线程，填充 widget
 
 项目包含大量工具脚本（抽卡采集、社群爬取、媒体分类、图片整理、批量注释等），通过 `exec_python` 或直接命令行运行。完整脚本列表和用法详见 `docs/tools-guide.md`，工具目录总览见 `tools/README.md`，机器可读清单见 `tools_manifest.json`。
 
-`client/panels/tools.py`（ToolsPanel）+ `client/widgets/tool_runner.py` 是 GUI 工具面板，默认只读取 `tools_manifest.json` 来展示工具。新增工具时通常先改清单；只有 GUI 的布局、分类、队列或运行逻辑需要变化时，才改 `client/widgets/tool_runner.py` 本身。（旧 `tools_launcher.py` 已删除）
+`client/panels/tools.py`（ToolsPanel）+ `client/widgets/tool_runner.py` 是 GUI 工具面板，默认只读取 `tools_manifest.json` 来展示工具。新增工具时通常先改清单；只有 GUI 的布局、分类、队列或运行逻辑需要变化时，才改 `client/widgets/tool_runner.py` 本身。
 
 脚本中调用 LLM 时，统一通过后端 LLM 并发池代理（`call_via_backend`），支持多 key 并发、拉链排队、per-project token 统计。
 

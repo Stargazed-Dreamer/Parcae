@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +42,16 @@ def list_page(qapp):
     page.deleteLater()
 
 
+def _days_ago(n: int) -> str:
+    """相对今天的 updated_at 字符串。
+
+    刻意不写死绝对日期：staleness 是 (今天 - updated_at) 与阈值比较，写死日期会让
+    用例变成时间炸弹——本文件曾因 2026-08-15 被读成「3 天前」而在 30 天后
+    自动变成过时行，stale_only 筛选从 1 行变 2 行（2026-09-28 发版全量跑撞到）。
+    """
+    return (datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _mock_list_response() -> dict:
     """构造 GET /memory/list 的 mock 响应"""
     return {
@@ -52,7 +63,7 @@ def _mock_list_response() -> dict:
                 "fact_type": "user",
                 "summary": "用户偏好深色主题",
                 "value_preview": '{"name": "深色主题"}',
-                "updated_at": "2026-08-01 10:00:00",  # 17 天前，< user 阈值 90 → 正常
+                "updated_at": _days_ago(17),  # 17 天前，< user 阈值 90 → 正常
             },
             {
                 "key": "project_arch_old",
@@ -60,7 +71,7 @@ def _mock_list_response() -> dict:
                 "fact_type": "project",
                 "summary": "项目架构（旧版）",
                 "value_preview": '{"name": "旧架构"}',
-                "updated_at": "2026-07-01 10:00:00",  # 48 天前，> project 阈值 7 → 过时
+                "updated_at": _days_ago(48),  # 48 天前，> project 阈值 7 → 过时
             },
             {
                 "key": "feedback_recent",
@@ -68,7 +79,7 @@ def _mock_list_response() -> dict:
                 "fact_type": "feedback",
                 "summary": "最近反馈",
                 "value_preview": "{}",
-                "updated_at": "2026-08-15 10:00:00",  # 3 天前，< feedback 阈值 30 → 正常
+                "updated_at": _days_ago(3),  # 3 天前，< feedback 阈值 30 → 正常
             },
         ],
         "total": 3,

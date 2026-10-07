@@ -87,9 +87,105 @@ def _rotate_if_needed(path: Path, max_bytes: int, backup_count: int) -> None:
     path.rename(path.parent / f"{path.stem}.1{path.suffix}")
 
 
+# ========== 放行来源分档（unknown-outcome-evidence T14） ==========
+# 这四种"通过了"含金量完全不同：人看过、模型看了、代码看着简单所以放、
+# 上次人看过所以在 TTL 内复用。过去它们在日志里长得一样，
+# 于是"我到底在多大程度上亲自看过这些操作"这个问题无法回答。
+ORIGIN_HUMAN = "human"                          # 真人点的事务（批准或拒绝）
+ORIGIN_LLM_APPROVED = "llm_approved"            # 二层 LLM 审查直接放行
+ORIGIN_LOW_RISK_DEGRADED = "low_risk_degraded"  # LLM 不可用时按 AST 低风险降级放行
+ORIGIN_APPROVAL_CACHE = "approval_cache"        # 复用近期人审指纹（TTL 内不再问人）
+ORIGIN_DENIED = "denied"                        # 被挡下（静态规则或 LLM 拒绝）
+ORIGIN_UNKNOWN = "unknown"
+
+_ORIGIN_BY_FINAL = {
+    "llm_approved": ORIGIN_LLM_APPROVED,
+    "low_risk_degraded_approve": ORIGIN_LOW_RISK_DEGRADED,
+    "approval_cache_hit": ORIGIN_APPROVAL_CACHE,
+    "static_block": ORIGIN_DENIED,
+}
+
+
+def classify_approval_origin(final: object, *, explicit: object = None) -> str:
+    """由日志的 final 字段推导放行来源；调用方显式给了 origin 就用它。"""
+    if explicit:
+        return str(explicit)
+    text = str(final or "")
+    if text.startswith("human_"):
+        return ORIGIN_HUMAN
+    if text in _ORIGIN_BY_FINAL:
+        return _ORIGIN_BY_FINAL[text]
+    if text == "llm_denied":
+        return ORIGIN_DENIED
+    return ORIGIN_UNKNOWN
+
+
+def approval_origin_counts(max_lines: int = 500) -> dict[str, int]:
+    """统计 approvals.jsonl 尾部若干条的来源分布（供 /health 与状态面板）。"""
+    counts: dict[str, int] = {}
+    try:
+        if not _LOG_PATH.exists():
+            return counts
+        lines = _LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+        for line in lines[-max_lines:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            origin = classify_approval_origin(
+                record.get("final"), explicit=record.get("origin")
+            )
+            counts[origin] = counts.get(origin, 0) + 1
+    except Exception as e:
+        logger.debug("统计审批来源失败: %s", e)
+    return counts
+
+
+def guard_status() -> dict:
+    """审批闸门自身的状态——**包括"闸门根本没开"这件事本身**。
+
+    D-19 的前提修正：本机 config 里 command_guard.enabled=false / approval_level=none
+    时，来源分档再细也看不见"没人看过"这个事实，所以这里把它做成可查询字段。
+    """
+    status: dict[str, object] = {
+        "command_guard_enabled": None,
+        "approval_level": None,
+        "llm_review_enabled": None,
+        "gate_open": None,
+        "note": "",
+        "recent_origins": approval_origin_counts(),
+    }
+    try:
+        cfg = get_command_guard_config()
+    except Exception as e:
+        status["note"] = f"读取 command_guard 配置失败: {type(e).__name__}: {e}"
+        return status
+    enabled = bool(cfg.get("enabled", False))
+    level = str(cfg.get("approval_level", "strict"))
+    status["command_guard_enabled"] = enabled
+    status["approval_level"] = level
+    status["llm_review_enabled"] = bool(cfg.get("llm_review_enabled", False))
+    status["gate_open"] = enabled and level != "none"
+    if not status["gate_open"]:
+        status["note"] = (
+            "审批闸门当前关闭（enabled=false 或 approval_level=none）："
+            "approval_required 端点与命令守卫都在放行，来源分档因此无记录"
+        )
+    return status
+
+
 def log_approval(record: dict) -> None:
-    """追加一条审批日志到 data/approvals.jsonl。线程安全。"""
+    """追加一条审批日志到 data/approvals.jsonl。线程安全。
+
+    T14：每条记录自动带 `origin`（放行来源），见 classify_approval_origin。
+    """
     record.setdefault("ts", datetime.now().isoformat(timespec="seconds"))
+    record["origin"] = classify_approval_origin(
+        record.get("final"), explicit=record.get("origin")
+    )
     line = json.dumps(record, ensure_ascii=False)
     with _LOCK:
         _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -906,6 +1002,14 @@ async def user_review_for_llm_deny(
 
     record_result = record_http_decision(approval_id, decision, feedback)
     token_issued = bool(record_result.get("approval_token"))
+
+    # T14：人审结果进汇总日志，origin=human，便于事后区分"人点过"与"机器放了"
+    log_approval({
+        "operation_id": operation_id, "method": method, "path": path,
+        "layer1_static": "human_review", "layer2_llm": llm_decision,
+        "final": f"human_{decision}", "origin": ORIGIN_HUMAN,
+        "auto_approved": False, "reason": (feedback or "")[:200],
+    })
 
     # 用户批准后缓存代码指纹，TTL 内相同代码自动放行
     # 治本修复：mcp_gateway.py 丢弃了 token，但缓存机制让 agent 无感知地复用审批结果

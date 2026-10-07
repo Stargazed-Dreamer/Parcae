@@ -39,10 +39,13 @@ def _apply_chain(
     literals: list[dict],
     identifiers: list[str],
 ) -> str:
-    """复刻 build_release 的替换顺序：path_mapping → literal → 个人标识清除"""
+    """复刻 build_release 的替换顺序：path_mapping（含盘符残留归一化）→ literal → 个人标识清除"""
+    from tools.release.engine.build import _normalize_placeholder_paths
+
     out = text
     for find, repl in path_mapping.items():
         out = re.sub(re.escape(find), lambda m, r=repl: r, out, flags=re.IGNORECASE)
+    out, _ = _normalize_placeholder_paths(out)
     for rule in literals:
         out = re.sub(re.escape(rule["find"]), lambda m, r=rule["replace"]: r, out, flags=re.DOTALL)
     for ident in identifiers:

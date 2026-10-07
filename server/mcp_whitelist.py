@@ -40,6 +40,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
         "todos_due",                         # 6 次
         "wip_list",                          # 28 次
         "wip_get",                           # 20 次
+        "wip_get_many",                      # 批量取详情（wip_list 默认轻量后的配套入口）
         "exec_status",                       # 89 次（执行状态查询）
     ],
     "exec": [
@@ -181,6 +182,8 @@ GATEWAY_EXCLUDE: set[str] = {
     #    EvidenceLedger — 证据集审计
     "memory_evidence_recent", "memory_evidence_detail",
     "memory_evidence_cleanup",
+    #    ContextProjection — 记忆进入上下文那一段的留痕（v4 T15，只观测）
+    "memory_projections_list", "memory_projections_detail",
 
     # === 入站网关（inbound-gateway SDD）：/v1/* 与 /inbound/* 不进 MCP 网关 ===
     # OpenAI 兼容入站面是给外部 harness 用的，管理面是给 client 面板用的；
@@ -222,6 +225,7 @@ TOOL_ANNOTATIONS: dict[str, dict[str, bool]] = {
     "todos_due":                 {"readOnlyHint": True,  "idempotentHint": True},
     "wip_list":                  {"readOnlyHint": True,  "idempotentHint": True},
     "wip_get":                   {"readOnlyHint": True,  "idempotentHint": True},
+    "wip_get_many":              {"readOnlyHint": True,  "idempotentHint": True},
     "exec_status":               {"readOnlyHint": True,  "idempotentHint": True},
 
     # === exec ===

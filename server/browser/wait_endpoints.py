@@ -106,7 +106,7 @@ async def browser_wait_for(req: BrowserWaitRequest):
                        dialog_action="accept", timeout=5)
     Example — wait for download and save to directory:
       browser_wait_for(wait_type="download", session_id="...",
-                       download_dir="C:\\\\<data_drive>:/Downloads", timeout=30)
+                       download_dir="C:\\\<data_drive>:/Downloads", timeout=30)
     """
     valid_types = {"selector", "text", "url", "load_state", "popup", "filechooser", "dialog", "download"}
     if req.wait_type not in valid_types:
@@ -127,7 +127,7 @@ async def browser_wait_for(req: BrowserWaitRequest):
 
     # 优先用持久 session（热态 <250ms）
     if req.session_id:
-        from .session.manager import get_session_manager
+        from .session.manager import get_closed_hint, get_session_manager
         mgr = await get_session_manager()
         sess = mgr.get_session(req.session_id)
         page = await mgr.get_page(req.session_id) if sess else None
@@ -139,7 +139,7 @@ async def browser_wait_for(req: BrowserWaitRequest):
                     error_code="TAB_NOT_FOUND",
                     error_message=BROWSER_ERROR_CODES["TAB_NOT_FOUND"],
                     phase="connect",
-                    debug_detail=f"session_id {req.session_id} 不存在或已失效",
+                    debug_detail=f"session_id {req.session_id} 不存在或已失效" + get_closed_hint(req.session_id),
                     elapsed_ms=elapsed,
                 ),
             )
@@ -344,7 +344,7 @@ async def browser_wait_for(req: BrowserWaitRequest):
             elif wt == "download":
                 # download 等待：优先消费 session 持久监听器队列中的 download 事件
                 # （与 dialog/popup/filechooser 同模式：page.on('download') 持久监听器
-                # 在 manager.create_session 时挂载，触发时存入 pending_<data_drive>:/Downloads 队列）
+                # 在 manager.create_session 时挂载，触发时存入 pending_downloads 队列）
                 # 若 download_dir 提供，则用 last_download_obj.save_as() 保存到指定目录
                 if sess is not None:
                     # 2026-09-03 竞态闭合：先 clear 再查队列再等待（与 dialog 分支同模式）
@@ -366,7 +366,7 @@ async def browser_wait_for(req: BrowserWaitRequest):
                         # 若 download_dir 提供则 save_as 到指定目录；否则 cancel 掉——
                         # 2026-09-03 防泄漏：CDP 连真实 Chrome 时 download 事件触发后
                         # 若既不 save_as 也不 cancel，浏览器会落盘到默认下载目录
-                        # （实测泄漏 9 个 test_download*.txt 到用户 <data_drive>:/Downloads）
+                        # （实测泄漏 9 个 test_download*.txt 到用户 Downloads）
                         if req.download_dir:
                             dl_obj = sess.last_download_obj
                             if dl_obj is not None:
@@ -775,7 +775,7 @@ async def browser_wait_and_action(req: BrowserWaitAndActionRequest):
     import time as _time
     start = _time.perf_counter()
 
-    from .session.manager import get_session_manager
+    from .session.manager import get_closed_hint, get_session_manager
     mgr = await get_session_manager()
     sess = mgr.get_session(req.session_id)
     page = await mgr.get_page(req.session_id) if sess else None
@@ -788,7 +788,7 @@ async def browser_wait_and_action(req: BrowserWaitAndActionRequest):
                 error_code="TAB_NOT_FOUND",
                 error_message=BROWSER_ERROR_CODES["TAB_NOT_FOUND"],
                 phase="connect",
-                debug_detail=f"session_id {req.session_id} 不存在或已失效",
+                debug_detail=f"session_id {req.session_id} 不存在或已失效" + get_closed_hint(req.session_id),
                 elapsed_ms=elapsed,
             ),
         )

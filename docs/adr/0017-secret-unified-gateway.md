@@ -21,7 +21,7 @@
 - [lib/secret/paths.py](file:///<project_root>/lib/secret/paths.py)
 - [lib/secret/reader.py](file:///<project_root>/lib/secret/reader.py)
 - [server/llm_pool/key_store.py](file:///<project_root>/server/llm_pool/key_store.py)（`_get_unified_keys_path` 委托 `lib.secret.get_llm_keys_path`）
-- [tools/migrate_secrets.py](file:///<project_root>/tools/migrate_secrets.py)
+- [tools/restore_secrets.py](file:///<project_root>/tools/restore_secrets.py)（备份找回；迁移期的 `tools/migrate_secrets.py` 已完成使命并删除，见 `AGENTS.md`「密钥统一管理」）
 - [SECURITY-RISKS.md](file:///<project_root>/SECURITY-RISKS.md)（第 7-13 项：lib/secret 相关风险）
-- [temp/sdd/lib-secret/spec.md](file:///<project_root>/temp/sdd/lib-secret/spec.md)（SDD 流程产物，gitignored）
+- [temp/planning_archive/sdd/lib-secret/spec.md](file:///<project_root>/temp/planning_archive/sdd/lib-secret/spec.md)（SDD 流程产物的归档副本，随仓库跟踪；当轮目录 `temp/sdd/lib-secret/` 已清）
 - [.agents/rules/project_rules.md](file:///<project_root>/.agents/rules/project_rules.md) "密钥统一管理"段

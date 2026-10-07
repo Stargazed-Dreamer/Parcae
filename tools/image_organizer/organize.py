@@ -34,17 +34,17 @@ COMMIT_EVERY = 100
 # 默认模型（可用 --model 覆盖）
 DEFAULT_MODEL = "microsoft/Florence-2-large"
 
-TARGET_ROOT = Path(r"I:\<data_drive>:\<image_organize_output>")
+TARGET_ROOT = Path(r"<data_drive>:/<image_organize_output>")
 OUTPUT_DIR = Path(r"<project_root>\output\image_organizer")
 DB_PATH = OUTPUT_DIR / "files.db"
 MAPPING_FILE = OUTPUT_DIR / "mapping.jsonl"
 
 SOURCE_DIRS = [
-    r"I:\<data_drive>:\<source_images_root>",
-    r"I:\<data_drive>:\<classified_root>\图片-来自下载-乱",
-    r"I:\<data_drive>:\<classified_root>\图片-Picture",
-    r"I:\<data_drive>:\<classified_root>\图片",
-    r"G:\<data_drive>:\<ipad_backup>",
+    r"<data_drive>:/<source_images_root>",
+    r"<data_drive>:/<classified_root>\图片-来自下载-乱",
+    r"<data_drive>:/<classified_root>\图片-Picture",
+    r"<data_drive>:/<classified_root>\图片",
+    r"<data_drive>:/<ipad_backup>",
 ]
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif", ".tif", ".tiff", ".jfif"}
 

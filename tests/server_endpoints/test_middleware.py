@@ -1,8 +1,9 @@
-"""HTTP 中间件测试 — MCP 统计 + 用户消息注入
+"""HTTP 中间件测试 — Host 白名单 + MCP 统计 + 用户消息注入
 
-middleware 注册两个 http 中间件：
-1. mcp_stats_middleware — 拦截 /mcp POST，记录工具调用统计到 mcp_stats
-2. user_message_inject_middleware — 将待发送用户消息注入非工作端点响应
+middleware 注册三个 http 中间件：
+1. host_guard_middleware — 拒绝非白名单 Host（DNS rebinding 防护）
+2. mcp_stats_middleware — 拦截 /mcp POST，记录工具调用统计到 mcp_stats
+3. user_message_inject_middleware — 将待发送用户消息注入非工作端点响应
 
 测试通过 TestClient 发送请求验证中间件行为。
 """
@@ -11,6 +12,100 @@ middleware 注册两个 http 中间件：
 import pytest
 
 import server.user_message as um
+from server.core.middleware import (
+    _host_header_to_name,
+    _reset_allowed_hosts_cache,
+)
+
+# ========== Host 白名单（DNS rebinding 防护） ==========
+
+class TestHostWhitelist:
+    """放行集合内的 Host 一律放行；非白名单 Host **仅当请求像浏览器**时才 421"""
+
+    @pytest.mark.parametrize("host", [
+        "127.0.0.1:8766",
+        "localhost:8766",
+        "[::1]:8766",
+        "testserver",          # TestClient 的 base_url，冒烟测试依赖
+        "apiserver",           # IDE streamableHttp MCP 客户端实际发出的 Host（不放行=agent 失能）
+    ])
+    def test_allowed_hosts(self, client, host):
+        """白名单 Host 正常放行（不破坏既有本地调用）"""
+        resp = client.get("/health", headers={"Host": host})
+        assert resp.status_code == 200, f"Host={host} 应放行"
+
+    @pytest.mark.parametrize("host", [
+        "evil.example.com",
+        "attacker.top:8766",        # rebinding 典型形态：域名解析到 127.0.0.1
+        "192.168.4.105:8766",       # 局域网 IP 写法同样不在默认白名单
+    ])
+    def test_rejected_hosts_from_browser(self, client, host):
+        """浏览器发起 + 非白名单 Host → 421 + host_not_allowed"""
+        resp = client.get("/health", headers={
+            "Host": host,
+            "Origin": "http://evil.example.com",
+            "Sec-Fetch-Site": "cross-site",
+        })
+        assert resp.status_code == 421, f"Host={host}（浏览器发起）应被拒"
+        assert resp.json()["error"] == "host_not_allowed"
+
+    @pytest.mark.parametrize("fingerprint", [
+        {"Origin": "http://evil.example.com"},
+        {"Sec-Fetch-Site": "cross-site"},
+        {"Sec-Fetch-Mode": "cors"},
+        {"Sec-Fetch-Dest": "empty"},
+        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+    ])
+    def test_rejected_on_any_browser_fingerprint(self, client, fingerprint):
+        """任一浏览器指纹命中即判为浏览器（堵住只带其中一种头的浏览器）"""
+        headers = {"Host": "evil.example.com"}
+        headers.update(fingerprint)
+        resp = client.get("/health", headers=headers)
+        assert resp.status_code == 421, f"指纹 {fingerprint} 应判为浏览器"
+
+    @pytest.mark.parametrize("host", [
+        "evil.example.com",
+        "attacker.top:8766",
+        "192.168.4.105:8766",
+        "apiserver",                 # IDE MCP 客户端：url 写 127.0.0.1，Host 却是网关名
+        "some-internal-gateway",     # 未知的本地代理 / sidecar / stdio↔http 桥
+    ])
+    def test_non_browser_client_never_blocked(self, client, host):
+        """★ 非浏览器客户端无论 Host 写成什么都不拦。
+
+        Host 是客户端的内部实现细节，与 url 里的主机名可以不一致；只按 Host 判定
+        会让经中间层的合法客户端整体 421（agent 失能）。rebinding 只能借道浏览器，
+        因此"非浏览器 + 奇怪 Host"不在攻击面上。
+        """
+        resp = client.get("/health", headers={"Host": host})
+        assert resp.status_code == 200, f"非浏览器客户端 Host={host} 不应被拦"
+
+    def test_host_whitelist_config_extends(self, client, monkeypatch):
+        """config 的 server.host_whitelist 可追加放行项（浏览器发起也放行）"""
+        monkeypatch.setattr(
+            "server.config.get_server_config",
+            lambda: {"host": "127.0.0.1", "port": 8766, "host_whitelist": ["mybox.local"]},
+        )
+        _reset_allowed_hosts_cache()
+        try:
+            resp = client.get("/health", headers={
+                "Host": "mybox.local:8766",
+                "Sec-Fetch-Site": "same-origin",
+            })
+            assert resp.status_code == 200
+        finally:
+            _reset_allowed_hosts_cache()
+
+    @pytest.mark.parametrize("header,expected", [
+        ("evil.com:8766", "evil.com"),
+        ("[::1]:8766", "::1"),
+        ("LOCALHOST:8766", "localhost"),
+        ("user@host.example:80", "host.example"),
+        ("127.0.0.1", "127.0.0.1"),
+    ])
+    def test_host_header_parsing(self, header, expected):
+        """Host 头解析：去端口 / 去 IPv6 方括号 / 去 userinfo / 小写"""
+        assert _host_header_to_name(header) == expected
 
 # ========== 用户消息注入中间件 ==========
 

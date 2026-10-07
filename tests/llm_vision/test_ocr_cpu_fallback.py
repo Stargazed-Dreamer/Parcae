@@ -269,6 +269,12 @@ class TestVictimSelection:
                                     registry=registry, monitors=monitors)
         driver = registry.get("ocr")
         monkeypatch.setattr(OcrDriver, "is_loaded", lambda self: True)
+        # loaded_at 取自真实 server.ocr.models 单例：同批若有测试真跑过 paddle
+        # （tests/llm_vision/test_ocr.py::test_ocr_base64_small_image 会真加载），
+        # _loaded_at 就成了"刚刚"，候选被 cfg 的 60s 逐出保护期整体挡掉，本用例随
+        # 跑序变红（单跑绿、整目录跑必红，2026-09-28 发版全量跑抓到）。本用例只验
+        # 资源路由（gpu↔cpu 降级后不在 gpu 候选里），保护期在此显式失效。
+        monkeypatch.setattr(OcrDriver, "loaded_at", lambda self: None)
 
         # 未降级（GPU）→ 是候选
         monkeypatch.setattr("server.ocr.models._active_device", "gpu", raising=False)

@@ -41,6 +41,7 @@ import report  # pyright: ignore[reportMissingImports]  # noqa: E402
 import sns_model  # pyright: ignore[reportMissingImports]  # noqa: E402
 import tagging  # pyright: ignore[reportMissingImports]  # noqa: E402
 import treemap  # pyright: ignore[reportMissingImports]  # noqa: E402
+
 from lib.ui import tokens  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -70,14 +71,23 @@ def record(
     mtime_ft: int = 0,
     waste: int = 0,
     pops: int = 0,
+    state: bytes = b"\x00\x00",
 ) -> bytes:
-    """按格式规范拼一条记录。名称一律按 GBK 编码 —— 本机快照就是这个口径。"""
+    """按格式规范拼一条记录。名称一律按 GBK 编码 —— 本机快照就是这个口径。
+
+    `state` 是 +40 处的 2 字节状态字。**它不是哨兵**：老参数在这里写死 `00 00`，
+    而权限不足的真实快照会混进 `00 02`/`00 04`/`00 06`，当时被误判成文件损坏。
+    见 sns_model 模块 docstring 的「+40 状态字」一节。
+    """
     encoded = base64.b64encode(name.encode("gbk"))
     out = struct.pack("<BBI", 0x02, rec_type, len(encoded)) + encoded
     out += struct.pack("<qII", size, waste, attrs)
     out += struct.pack("<qqq", 0, 0, mtime_ft)
-    out += b"\x00\x00"
+    out += state
     return out + b"\x01\x00" * pops
+
+
+STATE_VARIANTS = (b"\x00\x02", b"\x00\x04", b"\x00\x06")
 
 
 # 节点规格：
@@ -294,11 +304,25 @@ class TestSnsModelErrors:
         with pytest.raises(sns_model.SnsParseError):
             sns_model.parse_bytes(data[: len(data) // 2])
 
-    def test_missing_end_marker(self):
-        blob = bytearray(record(TYPE_VOLUME, "C:\\", pops=0))
-        blob[-1] = 0x01  # 结束标志 00 00 → 00 01
-        with pytest.raises(sns_model.SnsParseError, match="缺少记录结束标志"):
-            sns_model.parse_bytes(bytes(blob))
+    @pytest.mark.parametrize("state", STATE_VARIANTS)
+    def test_state_word_does_not_invalidate_the_record(self, state):
+        """+40 状态字非零时必须照常解析，不能被当成「缺少结束标志」。
+
+        回归来由：本机 SpaceSniffer 在权限不足时写出的 C 盘快照，状态字会取
+        `00 02`/`00 04`/`00 06`。老实现在这里硬校验 `== b"\\x00\\x00"`，结果整份
+        快照在**根记录**就抛错，看起来像文件损坏——但重导出字节完全相同，仍然失败。
+        """
+        blob = (
+            record(TYPE_VOLUME, "C:\\", 100, state=state, pops=0)
+            + record(TYPE_DIR, "Users", 60, state=state, pops=0)
+            + record(TYPE_FILE, "a.bin", 60, pops=3)
+        )
+        snap = sns_model.parse_bytes(blob)
+        assert snap.root.name == "C:\\"
+        assert snap.used_bytes == 100
+        assert snap.stateful_records == 2, "两条记录带非零状态字，应被计数而非拒绝"
+        assert [c.name for c in snap.root.children] == ["Users"]
+        assert snap.is_complete
 
     def test_file_outside_dir(self):
         with pytest.raises(sns_model.SnsParseError, match="文件记录出现在任何目录之外"):
@@ -456,6 +480,23 @@ def test_cross_check_with_disk_manager():
     assert mine.free_bytes == their_meta["free_bytes"]
     assert mine.unknown_bytes == their_meta["unknown_bytes"]
     assert mine.used_bytes == their_root["size"]
+
+
+def test_cross_check_accepts_stateful_records():
+    """带状态字的记录两份实现都必须接受，且计数一致（防一边悄悄恢复成哨兵校验）。"""
+    theirs = _load_workspace_parser()
+    blob = (
+        record(TYPE_VOLUME, "C:\\", 100, state=b"\x00\x04", pops=0)
+        + record(TYPE_DIR, "Users", 60, state=b"\x00\x02", pops=0)
+        + record(TYPE_FILE, "a.bin", 60, pops=3)
+    )
+
+    mine = sns_model.parse_bytes(blob)
+    their_root, their_meta = theirs.parse_sns(blob)
+    theirs.finalize(their_root, 0)
+
+    assert mine.stateful_records == their_meta["stateful_records"] == 2
+    assert set(_flatten_mine(mine.root)) == set(_flatten_theirs(their_root))
 
 
 def test_cross_check_agrees_on_rejection():
@@ -729,7 +770,7 @@ class TestFilterParsing:
 
     def test_name_terms(self):
         flt = filtering.Filter("N:download")
-        assert flt.matches(sns_model.Entry("<data_drive>:/Downloads", 1, is_dir=True))
+        assert flt.matches(sns_model.Entry("Downloads", 1, is_dir=True))
         assert not flt.matches(sns_model.Entry("Docs", 1, is_dir=True))
 
     def test_name_exclude(self):
@@ -984,7 +1025,7 @@ class TestReport:
     def test_write_text_report_writes_bom_file(self, tmp_path):
         target = tmp_path / "report.txt"
         report.write_text_report(target, "内容")
-        assert target.read_bytes() == b"\xef\xbb\xbf" + "内容".encode("utf-8")
+        assert target.read_bytes() == b"\xef\xbb\xbf" + "内容".encode()
 
     def test_type_distribution(self, tmp_path):
         snap = self._snapshot(tmp_path)
@@ -1003,7 +1044,7 @@ class TestReport:
         assert [path.rsplit("\\", 1)[-1] for _, path in files] == ["pagefile.sys", "音乐.mp3"]
 
         dirs = report.largest_dirs(snap.root, limit=2)
-        assert [path for _, path in dirs] == ["C:\\Users", "C:\\Users\\admin"]
+        assert [path for _, path in dirs] == ["C:\\Users", "<user_home>"]
 
     def test_category_column(self):
         assert report.category_column(sns_model.Entry("d", 0, is_dir=True)) == "目录"

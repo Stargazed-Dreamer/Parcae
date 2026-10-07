@@ -2384,7 +2384,7 @@ class FileClassifierGUI(QMainWindow):
             for mv in self._pending_moves:
                 # 简化处理：所有 pending_moves 都标记已处理
                 # （移动失败已在 MoveFilesThread 内部统计为 skipped，但源文件仍在）
-                # 这里仅标记分类已处理，避免后端 <data_drive>:/DownloadscanAction 重复扫描
+                # 这里仅标记分类已处理，避免后端 DownloadScanAction 重复扫描
                 self.state_manager.mark_classified(mv["src"], mv.get("category", ""))
             self._pending_moves = []
         QMessageBox.information(

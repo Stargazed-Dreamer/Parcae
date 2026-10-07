@@ -3,7 +3,6 @@
 覆盖：
 - paths.py：路径常量解析（默认路径 + config.toml 覆盖路径 + 项目根定位）
 - reader.py：get_secret / get_secret_or_raise / mtime 缓存 / 异常路径
-- 迁移脚本的幂等性（独立测试模块 test_migrate_secrets.py，若需要）
 
 测试模式参考 tests/test_config.py / tests/test_llm_pool.py。
 """

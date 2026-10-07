@@ -95,3 +95,7 @@
 
 > 历史上的 `grill-me` / `grilling` / `grill-with-docs` 已于 2026-07-21 迁出到 `dev/`：三者主要用于开发决策压力测试，归入 dev 桶更合适。
 > 注意：`dev.grill_me` 与 `daily.steel_man_decision` / `daily.decision_protocol` 可串联使用（grill-me 决策前拷问计划，钢人决策中二选一）。
+
+## 浏览器自动化类
+
+- `douyin_abdm_download`：抖音视频批量下载（ABDM 插件 + 9222 调试浏览器静默嗅探下载）。非思维工具，属日常事务自动化；2026-10-07 实战固化，坑位实录见该目录 `references/pitfalls.md`。

@@ -1038,7 +1038,7 @@ for r in list_recordings():
 
 ### 10.1 工具清单验证
 
-**验证 `tools_manifest.json` 含 recorder 分类和 4 个工具**：
+**验证 `tools_manifest.json` 含 recorder 分类，且该分类下每个工具条目都能在面板里找到**（工具数量以 `tools_manifest.json` 为准，不在本文写死）：
 
 ```bash
 uv run python -c "

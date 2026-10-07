@@ -15,12 +15,17 @@ routes.py 末尾的 `from . import session_endpoints` 触发本模块加载，�
 把端点注册到 router。Ticket 06 删除 browser.py 后本文件成为唯一定义。
 """
 
-from fastapi import HTTPException
+import logging
 
+from fastapi import HTTPException, Request
+
+from lib.agent_identity import get_caller_id
 from lib.schema import BaseSchema
 
 from .routes import router
 from .session.manager import get_session_manager
+
+logger = logging.getLogger("localagent.browser_session")
 
 # ========== 请求/响应模型 ==========
 
@@ -32,17 +37,20 @@ class BrowserSessionCreateRequest(BaseSchema):
     后续 snapshot/action/wait_for/evaluate 调用传入 session_id 即可复用，
     热态延迟 <250ms。
 
-    - url_pattern: 复用现有 page（url 包含 pattern）
+    - url_pattern: 复用现有 page（url 包含 pattern）；若该 tab 已被其他 agent
+      有主持有，需 force=true 才能接管（2026-10-02 归属权，否则 409 TAB_OWNED）
     - url: 新建 page 并 goto url（优先级低于 url_pattern）
     - 都不传：新建专用空白 tab（不复用已有页面，避免误绑用户真实 tab/扩展窗口页；
       2026-09-03 修复，详见 session/manager.py create_session 注释）
+    - force: 允许接管其他调用方有主持有的 tab（url_pattern 场景）
 
     返回 session_id（调用方持有）+ tab_id（CDP target id）+ url + title。
-    session idle 超时（默认 900s = 15min，见 [browser].session_idle_timeout_secs）
-    或 page 关闭时自动清理（idle 超时/LRU 淘汰时同时关闭浏览器 tab）。
+    租约（2026-10-02）：有主 session idle 超时 900s（操作即续租）；anonymous 300s。
+    单 caller 上限 10 个、全局上限 session_max_count（默认 32），超限 409。
     """
     url_pattern: str | None = None
     url: str | None = None
+    force: bool = False
 
 
 class BrowserSessionCreateResponse(BaseSchema):
@@ -70,6 +78,7 @@ class BrowserSessionListResponse(BaseSchema):
 class BrowserSessionCloseRequest(BaseSchema):
     session_id: str
     close_page: bool = True  # True=同时关闭浏览器标签（默认，避免 tab 累积）
+    force: bool = False  # True=显式抢占关闭别人的有主 session（2026-10-02 用户拍板语义）
 
 
 class BrowserSessionCloseResponse(BaseSchema):
@@ -81,7 +90,7 @@ class BrowserSessionCloseResponse(BaseSchema):
 # ========== 端点函数（@router 装饰器注册到 routes.py 的 router） ==========
 
 @router.post("/sessions", response_model=BrowserSessionCreateResponse, operation_id="browser_session_create")
-async def browser_session_create(req: BrowserSessionCreateRequest):
+async def browser_session_create(req: BrowserSessionCreateRequest, request: Request):
     """Create a persistent browser session.
 
     Returns a session_id to pass to snapshot/action/wait_for/evaluate for hot-path
@@ -97,18 +106,26 @@ async def browser_session_create(req: BrowserSessionCreateRequest):
 
     Example — attach to an existing bilibili tab:
       browser_session_create(url_pattern="bilibili.com")
+      （2026-10-02 归属权：该 tab 已被其他 agent 有主持有时需 force=true，否则 409 TAB_OWNED）
     Example — open a fresh tab to a URL:
       browser_session_create(url="https://www.bilibili.com")
     """
     import time as _time
     start = _time.perf_counter()
     mgr = await get_session_manager()
+    caller = get_caller_id(request.headers)
     try:
-        info = await mgr.create_session(url_pattern=req.url_pattern, url=req.url)
+        info = await mgr.create_session(
+            url_pattern=req.url_pattern, url=req.url, owner=caller, force=req.force
+        )
         elapsed = int((_time.perf_counter() - start) * 1000)
         return BrowserSessionCreateResponse(
             success=True, elapsed_ms=elapsed, **info,
         )
+    except ValueError as e:
+        # 归属权/额度冲突（TAB_OWNED / PER_CALLER_LIMIT / SESSION_LIMIT_REACHED）
+        elapsed = int((_time.perf_counter() - start) * 1000)
+        raise HTTPException(status_code=409, detail=f"{e} (elapsed_ms={elapsed})") from e
     except Exception as e:
         elapsed = int((_time.perf_counter() - start) * 1000)
         raise HTTPException(
@@ -133,7 +150,7 @@ async def browser_session_list():
 
 
 @router.post("/sessions/close", response_model=BrowserSessionCloseResponse, operation_id="browser_session_close")
-async def browser_session_close(req: BrowserSessionCloseRequest):
+async def browser_session_close(req: BrowserSessionCloseRequest, request: Request):
     """Close a browser session.
 
     - close_page=True (default): also close the browser tab, avoiding tab
@@ -142,11 +159,41 @@ async def browser_session_close(req: BrowserSessionCloseRequest):
       open (use this when you want to detach but keep the page alive for reuse).
 
     Always call this when done with a session to free server resources, even
-    though idle sessions auto-expire after session_idle_timeout_secs.
+    though idle sessions auto-expire.
+
+    2026-10-02 归属权：非 owner 关别人的 session → 409 TAB_OWNED
+    （gui / anonymous 例外：gui 是人永远放行；anonymous 是无主老脚本无人认领）。
+    关闭原因记入墓碑，可用 GET /sessions 或后端日志追溯"谁关的"。
     """
     import time as _time
     start = _time.perf_counter()
     mgr = await get_session_manager()
-    closed = await mgr.close_session(req.session_id, close_page=req.close_page)
+    caller = get_caller_id(request.headers)
+    holder = mgr.get_session(req.session_id)
+    if (
+        holder is not None
+        and not req.force
+        and caller != "gui"
+        and holder.owner not in ("anonymous", caller)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"TAB_OWNED: session {req.session_id} 的 owner 是 {holder.owner}，"
+                f"调用方 {caller} 无权关闭。请先与 owner 协调，"
+                f"或由 owner 自己释放（gui 用户不受此限）；"
+                f"确要抢占时传 force=true。"
+            ),
+        )
+    if req.force and holder is not None and caller != "gui" and holder.owner != caller:
+        logger.warning(
+            "BrowserSession: %s force 关闭了 %s 的 session %s（抢占已记录）",
+            caller, holder.owner, req.session_id,
+        )
+    closed = await mgr.close_session(
+        req.session_id,
+        close_page=req.close_page,
+        closed_reason=f"manual:{caller}" + ("(force)" if req.force else ""),
+    )
     elapsed = int((_time.perf_counter() - start) * 1000)
     return BrowserSessionCloseResponse(success=True, closed=closed, elapsed_ms=elapsed)

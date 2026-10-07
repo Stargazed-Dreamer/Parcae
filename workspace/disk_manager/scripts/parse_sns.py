@@ -28,7 +28,18 @@ sys.setrecursionlimit(100_000)  # finalize 递归；真实快照层级可达数�
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
-from scan_disk import CACHE_DIR, DEFAULT_KEEP_FILES, human, slugify  # noqa: E402
+from scan_disk import (  # noqa: E402
+    CACHE_DIR,
+    DEFAULT_KEEP_FILES,
+    force_utf8_streams,
+    human,
+    slugify,
+)
+
+# 输出收口与 scan_disk 共用 force_utf8_streams()：本工具的 --json 会把解出的中文文件名
+# print 到 stdout，控制台默认 cp936 写成 GBK 字节，按 utf-8 读的消费方拿到乱码。
+# 只在 __main__ 里调用——import 期换掉 sys.stdout 会连带关掉 pytest 的捕获流（实测
+# 会让整批用例 "I/O operation on closed file / no tests ran"）。
 
 SNS_MAGIC = 0x02
 TYPE_VOLUME = 1
@@ -55,10 +66,18 @@ def dec_name(raw: bytes) -> str:
 
 
 def ft2str(ft: int) -> "str | None":
-    """FILETIME → 'YYYY-MM-DD HH:MM'（与 scan_disk 文件节点格式一致）。目录时间戳全 0 → None。"""
+    """FILETIME → 'YYYY-MM-DD HH:MM'（与 scan_disk 文件节点格式一致）。
+
+    目录时间戳全 0 → None。**越界 FILETIME 也返回 None**：系统区存在脏时间戳
+    （如 0x7FFF…、负值），`datetime.fromtimestamp` 会抛 OSError/OverflowError 而中断
+    整份导入 —— 与 `tools/spacesniffer/sns_model.filetime_to_str` 保持一致。
+    """
     if ft <= 0:
         return None
-    return datetime.fromtimestamp((ft - _FT_TO_UNIX) / 1e7).strftime("%Y-%m-%d %H:%M")
+    try:
+        return datetime.fromtimestamp((ft - _FT_TO_UNIX) / 1e7).strftime("%Y-%m-%d %H:%M")
+    except (OSError, OverflowError, ValueError):
+        return None
 
 
 def parse_sns(data: bytes) -> "tuple[dict, dict]":
@@ -76,6 +95,7 @@ def parse_sns(data: bytes) -> "tuple[dict, dict]":
     ndirs = 0
     free_bytes = 0
     unknown_bytes = 0
+    flagged = 0
 
     while pos < n:
         if pos + 6 > n or data[pos] != SNS_MAGIC or data[pos + 1] not in (1, 2, 3, 4, 5):
@@ -88,8 +108,11 @@ def parse_sns(data: bytes) -> "tuple[dict, dict]":
         name = dec_name(data[pos + 6:ne])
         (size,) = struct.unpack_from("<q", data, ne)
         (mtime_ft,) = struct.unpack_from("<q", data, ne + 32)
+        # +40 是状态字而非哨兵，不做等值校验（见 references/sns_format.md「+40 状态字」）。
+        # 权限不足的扫描会混入少量 `00 02`/`00 04`/`00 06`；当作哨兵校验会让整份快照
+        # 在根记录就解析失败，表现为「文件损坏」（实测重导出字节完全相同，仍失败）。
         if data[ne + 40:ne + 42] != b"\x00\x00":
-            raise ValueError(f"missing end marker at byte {pos} (name={name!r})")
+            flagged += 1
         p = ne + 42
         pops = 0
         while p + 2 <= n and data[p:p + 2] == b"\x01\x00":
@@ -142,6 +165,7 @@ def parse_sns(data: bytes) -> "tuple[dict, dict]":
     meta = {
         "files": nfiles, "dirs": ndirs,
         "free_bytes": free_bytes, "unknown_bytes": unknown_bytes,
+        "stateful_records": flagged,
     }
     return root, meta
 
@@ -201,6 +225,7 @@ def cmd_parse(args):
         "stop_reason": None,
         "files": meta["files"],
         "dirs": meta["dirs"],
+        "stateful_records": meta["stateful_records"],
         "errors": 0,
         "cache_path": str(cache_path),
     }
@@ -245,4 +270,5 @@ def main():
 
 
 if __name__ == "__main__":
+    force_utf8_streams()
     main()

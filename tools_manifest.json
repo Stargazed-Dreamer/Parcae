@@ -15,7 +15,7 @@
     },
     {
       "id": "bilibili",
-      "name": "<data_drive>:\<bilibili_videos>工具",
+      "name": "<data_drive>:/<bilibili_videos>工具",
       "icon": "tv"
     },
     {
@@ -244,9 +244,9 @@
     },
     {
       "id": "bilibili_gacha",
-      "name": "<data_drive>:\<bilibili_videos>互动抽奖扫描",
+      "name": "<data_drive>:/<bilibili_videos>互动抽奖扫描",
       "category": "bilibili",
-      "description": "<data_drive>:\<bilibili_videos>互动抽奖整理工具v2（扫描转发动态，识别抽奖，检查开奖状态，支持删动态+取关）",
+      "description": "<data_drive>:/<bilibili_videos>互动抽奖整理工具v2（扫描转发动态，识别抽奖，检查开奖状态，支持删动态+取关）",
       "script": "workspace/bilibili_gacha/bilibili_gacha.py",
       "command": ".venv\\Scripts\\python.exe workspace/bilibili_gacha/bilibili_gacha.py",
       "usage": "agent",
@@ -269,9 +269,9 @@
     },
     {
       "id": "bilibili_cleanup",
-      "name": "<data_drive>:\<bilibili_videos>动态批量清理",
+      "name": "<data_drive>:/<bilibili_videos>动态批量清理",
       "category": "bilibili",
-      "description": "批量清理已开奖未中奖的<data_drive>:\<bilibili_videos>抽奖动态v3（坐标操作法模拟真人点击）",
+      "description": "批量清理已开奖未中奖的<data_drive>:/<bilibili_videos>抽奖动态v3（坐标操作法模拟真人点击）",
       "script": "workspace/bilibili_gacha/bilibili_cleanup.py",
       "command": ".venv\\Scripts\\python.exe workspace/bilibili_gacha/bilibili_cleanup.py",
       "usage": "agent",
@@ -285,7 +285,7 @@
       "id": "official_gacha",
       "name": "官方账号互动抽奖",
       "category": "bilibili",
-      "description": "扫描异环/明日方舟/鸣潮官方<data_drive>:\<bilibili_videos>账号互动抽奖动态，键鼠+OCR参与抽奖。explore=实时探查+参与一步到位",
+      "description": "扫描异环/明日方舟/鸣潮官方<data_drive>:/<bilibili_videos>账号互动抽奖动态，键鼠+OCR参与抽奖。explore=实时探查+参与一步到位",
       "script": "workspace/official_gacha/official_gacha.py",
       "command": ".venv\\Scripts\\python.exe workspace/official_gacha/official_gacha.py",
       "usage": "agent",
@@ -443,7 +443,7 @@
       "id": "backup_env",
       "name": "环境备份",
       "category": "disk",
-      "description": "系统环境备份工具（浏览器数据/游戏存档/桌面布局/系统设置/软件列表）",
+      "description": "系统环境备份工具（浏览器/游戏存档/桌面/系统设置/软件列表/文件关联/设置看门狗 + 迁移易漏四组：凭据/外观/策略/开发配置）",
       "script": "workspace/disk_manager/scripts/backup_env.py",
       "command": ".venv\\Scripts\\python.exe workspace/disk_manager/scripts/backup_env.py",
       "usage": "user",
@@ -469,9 +469,154 @@
           "name": "--software",
           "default": false,
           "description": "只备份软件列表"
+        },
+        {
+          "name": "--assoc",
+          "default": false,
+          "description": "只备份文件关联（每用户默认程序）"
+        },
+        {
+          "name": "--settings",
+          "default": false,
+          "description": "只跑设置看门狗快照（PATH/浏览器/URL协议/自启 等纳管项）"
+        },
+        {
+          "name": "--credentials",
+          "default": false,
+          "description": "只备份凭据/密钥：WiFi/SSH/AWS等dotfiles + Chrome/Edge隐私(HackBrowserData)"
+        },
+        {
+          "name": "--appearance",
+          "default": false,
+          "description": "只备份壁纸/主题/字体/输入法词库"
+        },
+        {
+          "name": "--policy",
+          "default": false,
+          "description": "只备份防火墙/计划任务/打印机/VPN（不含大驱动）"
+        },
+        {
+          "name": "--drivers",
+          "default": false,
+          "description": "系统策略 + 第三方驱动导出（可达数GB，仅显式触发）"
+        },
+        {
+          "name": "--devtools",
+          "default": false,
+          "description": "只备份 IDE/WSL/改键/shell 配置"
         }
       ],
-      "notes": "默认全量备份，生成一键恢复脚本",
+      "notes": "默认全量含四组迁移导出；凭据组以【明文】导出WiFi密码/浏览器隐私/token，filesync会同步到移动硬盘，慎用；驱动仅--drivers才导",
+      "user_facing": true
+    },
+    {
+      "id": "assoc_snapshot",
+      "name": "文件关联快照",
+      "category": "disk",
+      "description": "备份每用户文件关联：reg export 原始 hive + 生成可读清单 inventory.json/csv，可设为基线",
+      "script": "workspace/disk_manager/scripts/assoc_snapshot.py",
+      "command": ".venv\\Scripts\\python.exe workspace/disk_manager/scripts/assoc_snapshot.py",
+      "usage": "user",
+      "requires_browser": false,
+      "requires_admin": false,
+      "options": [
+        {
+          "name": "--set-baseline",
+          "default": false,
+          "description": "把本次快照标记为基线"
+        },
+        {
+          "name": "--list",
+          "default": false,
+          "description": "列出历史快照"
+        }
+      ],
+      "notes": "快照存放 <data_drive>:/<backup_root>\\SystemBackup\\file_associations\\<时间戳>",
+      "user_facing": true
+    },
+    {
+      "id": "assoc_diff",
+      "name": "文件关联篡改对比",
+      "category": "disk",
+      "description": "当前系统 vs 基线/指定快照，列出哪个后缀的默认程序被改了；--show 列全部",
+      "script": "workspace/disk_manager/scripts/assoc_diff.py",
+      "command": ".venv\\Scripts\\python.exe workspace/disk_manager/scripts/assoc_diff.py",
+      "usage": "user",
+      "requires_browser": false,
+      "requires_admin": false,
+      "options": [
+        {
+          "name": "--show",
+          "default": false,
+          "description": "仅显示当前全部关联"
+        },
+        {
+          "name": "--vs",
+          "default": "",
+          "description": "与指定快照比对（时间戳）"
+        }
+      ],
+      "notes": "有差异返回码非0，可挂 loop 做反篡改告警",
+      "user_facing": true
+    },
+    {
+      "id": "assoc_restore",
+      "name": "文件关联恢复",
+      "category": "disk",
+      "description": "分档恢复到基线：经典关联自动（set classic+del UserChoice，哈希无关），商店/UWP 引导 ms-settings 手动重选",
+      "script": "workspace/disk_manager/scripts/assoc_restore.py",
+      "command": ".venv\\Scripts\\python.exe workspace/disk_manager/scripts/assoc_restore.py",
+      "usage": "user",
+      "requires_browser": false,
+      "requires_admin": false,
+      "options": [
+        {
+          "name": "--apply",
+          "default": false,
+          "description": "真正写入（默认只干跑打印计划）"
+        },
+        {
+          "name": "--yes",
+          "default": false,
+          "description": "配合 --apply 跳过逐个确认"
+        }
+      ],
+      "notes": "勿用 reg import 旧 UserChoice（哈希校验失败被忽略）",
+      "user_facing": true
+    },
+    {
+      "id": "settings_watch",
+      "name": "设置看门狗",
+      "category": "disk",
+      "description": "通用设置快照/篡改对比/恢复引擎，纳管文件关联、PATH/环境变量、默认浏览器/URL协议、开机自启、Winlogon登录劫持(Shell/Userinit)；子命令 snapshot/diff/restore/list/status",
+      "script": "workspace/disk_manager/settings_watch/watch.py",
+      "command": ".venv\\Scripts\\python.exe workspace/disk_manager/settings_watch/watch.py <snapshot|diff|restore|list|status>",
+      "usage": "user",
+      "requires_browser": false,
+      "requires_admin": false,
+      "options": [
+        {
+          "name": "snapshot",
+          "default": "",
+          "description": "采集当前所有纳管项存快照；配 --set-baseline 设为基线"
+        },
+        {
+          "name": "diff",
+          "default": "",
+          "description": "当前 vs 基线，列出被偷改的项；有改动返回码 1（可挂 loop）"
+        },
+        {
+          "name": "restore",
+          "default": "",
+          "description": "按基线恢复（默认干跑）；--apply 执行自动档，--yes 免逐个确认"
+        },
+        {
+          "name": "--item",
+          "default": "",
+          "description": "仅处理指定条目，逗号分隔（file_associations,env_path,url_browser,autostart,winlogon）"
+        }
+      ],
+      "notes": "系统级PATH/机器级协议/默认浏览器/机器级Winlogon(Shell/Userinit) 需管理员或走 ms-settings 手动；HKCU 层被凭空加的 Shell 可自动删回。快照落 <data_drive>:/<backup_root>\\SystemBackup\\settings_watch\\<时间戳>",
       "user_facing": true
     },
     {
@@ -1035,7 +1180,7 @@
       "options": [
         {"name": "urls", "label": "状态链接", "description": "x.com/twitter 状态链接，可一次传多个"},
         {"name": "--max-res", "optional": true, "description": "分辨率上限如 720（默认取最高档）"},
-        {"name": "--out", "optional": true, "description": "输出目录（默认 ~/<data_drive>:/Downloads/x_videos_<当天日期>）"},
+        {"name": "--out", "optional": true, "description": "输出目录（默认 ~/Downloads/x_videos_<当天日期>）"},
         {"name": "--seq-start", "optional": true, "description": "文件名序号起始（默认 1）"},
         {"name": "--prefix", "optional": true, "description": "文件名附加标记（如 追加/来源说明）"},
         {"name": "--force", "optional": true, "description": "无视账本去重，已下载过的也强制重下"}

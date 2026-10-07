@@ -90,7 +90,7 @@ def test_staging_category_detected_by_empty_path():
 
 def test_non_staging_category_has_path():
     """path 非空的分类不是暂存分类"""
-    normal_category = {"name": "图片", "path": "E:/<data_drive>:\Pictures", "extensions": [".jpg"]}
+    normal_category = {"name": "图片", "path": "E:/Pictures", "extensions": [".jpg"]}
 
     assert StateManager.is_staging_category(normal_category) is False
 
@@ -122,9 +122,9 @@ def test_column_widths_empty_by_default(manager):
 
 def test_last_source_dir_round_trip(manager):
     """上次源目录保存和读取一致"""
-    manager.save_last_source_dir("<data_drive>:\<system_data_root>/<data_drive>:/Downloads")
+    manager.save_last_source_dir("<data_drive>:/<system_data_root>/Downloads")
 
-    assert manager.get_last_source_dir() == "<data_drive>:\<system_data_root>/<data_drive>:/Downloads"
+    assert manager.get_last_source_dir() == "<data_drive>:/<system_data_root>/Downloads"
 
 
 def test_last_source_dir_empty_by_default(manager):
@@ -152,7 +152,7 @@ def test_loaded_categories_config_empty_by_default(manager):
 def test_persistence_across_instances(manager, tmp_path):
     """新实例读取旧状态（GUI/后端共享同一 state.json）"""
     manager.mark_classified("/path/to/file.jpg", "图片")
-    manager.save_last_source_dir("E:/<data_drive>:/Downloads")
+    manager.save_last_source_dir("E:/Downloads")
     manager.save_column_widths({"col_0": 40})
 
     # 模拟后端启动新实例读取同一 state.json
@@ -160,7 +160,7 @@ def test_persistence_across_instances(manager, tmp_path):
 
     assert backend_manager.is_processed("/path/to/file.jpg") is True
     assert backend_manager.get_classification("/path/to/file.jpg")["category"] == "图片"
-    assert backend_manager.get_last_source_dir() == "E:/<data_drive>:/Downloads"
+    assert backend_manager.get_last_source_dir() == "E:/Downloads"
     assert backend_manager.get_column_widths() == {"col_0": 40}
 
 

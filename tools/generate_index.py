@@ -12,6 +12,9 @@
 - 核心 skill 段（.agents/skills/）手工维护，本工具不动
 - 组件化模块段（manifest 声明的）程序化生成，避免手工同步
 - 删除 workspace/<module>/ 后 manifest 消失，组件化模块段自动清除该条目
+- **fail-closed**：manifest 一条都没加载到时拒绝写回。本工具用"生成的段"整体替换
+  "已有的段"，所以加载失败若被当成"0 个组件"，就会静默清空组件段（实测一次 -155 行）
+  且退出码 0。要真的清空全部组件段，显式传 --allow-empty。
 """
 from __future__ import annotations
 
@@ -30,6 +33,10 @@ COMPONENT_SECTION_HEADER = "## 组件化模块（自动生成，勿手工编辑�
 COMPONENT_SECTION_END = "<!-- END component section -->"
 
 
+class ManifestLoadError(RuntimeError):
+    """manifest 一条都没加载到。此时"0 个组件"是假象，绝不能拿去覆盖已有组件段。"""
+
+
 def _collect_component_entries() -> list[dict]:
     """扫描 manifest，收集组件化模块段条目
 
@@ -39,8 +46,11 @@ def _collect_component_entries() -> list[dict]:
         from server.component_manifest import load_manifests
         manifests = load_manifests()
     except Exception as e:
-        print(f"[generate_index] manifest 加载失败: {e}", file=sys.stderr)
-        return []
+        raise ManifestLoadError(
+            f"manifest 加载失败（{e}），拒绝写回以免清空组件段。"
+            f"正确姿势：uv run python -m tools.generate_index"
+            f"（-m 会把仓库根放进 sys.path；或 PYTHONPATH=. 后再跑脚本路径）"
+        ) from None
 
     entries: list[dict] = []
     for name, m in sorted(manifests.items()):
@@ -94,20 +104,47 @@ def _replace_or_append_component_section(content: str, new_section: str) -> str:
     return content.rstrip() + "\n\n" + new_section + "\n"
 
 
-def generate(dry_run: bool = False) -> dict:
+def _existing_component_count(content: str) -> int:
+    """已有组件段里的条目数（段内 ### 标题行数）"""
+    m = re.search(
+        re.escape(COMPONENT_SECTION_HEADER) + r"(.*?)" + re.escape(COMPONENT_SECTION_END),
+        content,
+        re.DOTALL,
+    )
+    if not m:
+        return 0
+    return sum(1 for line in m.group(1).splitlines() if line.startswith("### "))
+
+
+def generate(dry_run: bool = False, allow_empty: bool = False) -> dict:
     """生成组件化模块段并写入 _index.md
+
+    Args:
+        dry_run: 只打印不写入
+        allow_empty: 承认"确实没有组件了"，允许用空段覆盖已有段
 
     Returns:
         报告 dict，含 entries count 和是否写入
+
+    Raises:
+        ManifestLoadError: 一条组件都没加载到、而已有的段里有内容——判定为加载失败，
+            拒绝写回（要真的清空全部组件段请显式传 allow_empty）。
     """
     entries = _collect_component_entries()
-    new_section = _format_component_section(entries)
 
     if not INDEX_FILE.exists():
         print(f"[generate_index] _index.md 不存在: {INDEX_FILE}", file=sys.stderr)
         return {"entries": len(entries), "written": False, "error": "index not found"}
 
     content = INDEX_FILE.read_text(encoding="utf-8")
+    existing = _existing_component_count(content)
+    if not entries and existing and not allow_empty:
+        raise ManifestLoadError(
+            f"扫描到 0 个组件，但 _index.md 现有组件段有 {existing} 条——"
+            f"判定为加载失败，拒绝清空。确认要清空全部组件段才传 --allow-empty。"
+        )
+
+    new_section = _format_component_section(entries)
     new_content = _replace_or_append_component_section(content, new_section)
 
     if dry_run:
@@ -120,13 +157,23 @@ def generate(dry_run: bool = False) -> dict:
     return {"entries": len(entries), "written": False, "unchanged": True}
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="_index.md 组件化模块段生成器")
     parser.add_argument("--dry-run", action="store_true", help="仅打印不写入")
     parser.add_argument("--json", action="store_true", help="JSON 输出（CI 友好）")
+    parser.add_argument(
+        "--allow-empty", action="store_true",
+        help="承认组件确实为零，允许用空段覆盖已有组件段（默认拒绝）",
+    )
     args = parser.parse_args()
 
-    report = generate(dry_run=args.dry_run)
+    try:
+        report = generate(dry_run=args.dry_run, allow_empty=args.allow_empty)
+    except ManifestLoadError as e:
+        print(f"[generate_index] {e}", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"entries": 0, "written": False, "error": str(e)}, ensure_ascii=False))
+        return 1
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -140,7 +187,8 @@ def main():
             print("dry-run 模式，未写入")
         elif report.get("error"):
             print(f"错误: {report['error']}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

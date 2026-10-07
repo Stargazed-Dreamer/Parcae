@@ -35,6 +35,9 @@ class MemoryConfig:
     bm25_top_k: int = 10
     vector_top_k: int = 10
     hybrid_alpha: float = 0.5  # 向量检索权重（1-alpha 为 BM25 权重）
+    # HONEST_EMPTY（T18）：纯向量命中需要的最低**原始**余弦相似度。
+    # 融合分是按本次最大值归一的，相对分数当不了门槛，只能用绝对相似度判"有没有正证据"。
+    hybrid_min_vector_similarity: float = 0.30
 
     # --- 自动记录 ---
     auto_record: bool = True  # 是否自动记录 agent 交互
@@ -54,11 +57,20 @@ class MemoryConfig:
     maintain_interval_hours: int = 6          # 维护器运行间隔（小时）
     maintain_stale_days: int = 7              # 超过 N 天未更新视为 stale
     maintain_enable_validate: bool = True     # 是否启用 LLM 验证 stale 记忆
+    # v5：验证器一次能看到多少字符。旧值 800 是误判主因——实测 120/151 条 fact
+    # 超过 800 字符，且 81 条的前 800 字符以 JSON 元数据脚手架开头，
+    # cheap 模型因此给出"内容被截断/乱码/无语义"的 archive 判决。
+    validate_preview_chars: int = 2400
+    # v5：单轮验证条数上限。archive 标签改为可过期重验后会有一次性积压
+    # （实测 109 条 archive），限流避免把 cheap 池 quota 一次打空。
+    validate_batch_limit: int = 25
+    # v5：同一条记忆两次验证的最小间隔（天）。此前 keep/update 每 6 小时
+    # 就被 aging 重新置回 pending，等于对每条 stale 记忆无限重验。
+    validate_revalidate_days: int = 30
 
     # --- 清理 ---
     orphan_cleanup_days: int = 30  # 孤立记忆清理阈值（已压缩消息）
     summary_cleanup_days: int = 180  # 旧摘要清理阈值
-    max_db_size_mb: int = 500  # 数据库最大大小（MB）
 
     # --- Evidence Ledger (A) ---
     enable_evidence_ledger: bool = True        # 是否启用证据组织层
@@ -72,6 +84,10 @@ class MemoryConfig:
     search_tracer_retention_days: int = 30     # search_traces 表保留天数
     search_tracer_sample_rate: float = 1.0     # 采样率 0-1，1.0=全采样
     search_tracer_candidates_to_store: int = 20  # 每次 trace 存储前 N 条候选
+
+    # --- Context Projection (v4 T15) ---
+    # "记忆进了上下文"那一段的留痕保留天数；与 traces 同纪律，避免无限增长
+    projection_retention_days: int = 30
 
 
 def get_memory_config() -> MemoryConfig:
@@ -102,16 +118,26 @@ def get_memory_config() -> MemoryConfig:
             cfg.hf_mirror = mem["hf_mirror"]
         if "hybrid_alpha" in mem:
             cfg.hybrid_alpha = float(mem["hybrid_alpha"])
+        if "hybrid_min_vector_similarity" in mem:
+            cfg.hybrid_min_vector_similarity = float(mem["hybrid_min_vector_similarity"])
         if "auto_record" in mem:
             cfg.auto_record = bool(mem["auto_record"])
+        # 2026-10-01 磁盘 IO 审计修复：record_sources / exclude_tools / recent_save_interval
+        # 此前只在 dataclass 里定义、从未从 config.toml 读取 ⇒ 配置开关完全失效。
+        # 后果：config.example.toml 明说「可在 config.toml 改为 ["agent","user"] 禁用」，
+        # 用户照做后工具调用记录（97%+ 为噪声）仍在照常写入 memory.db，无人察觉。
+        if "record_sources" in mem:
+            cfg.record_sources = list(mem["record_sources"])
+        if "exclude_tools" in mem:
+            cfg.exclude_tools = list(mem["exclude_tools"])
+        if "recent_save_interval" in mem:
+            cfg.recent_save_interval = int(mem["recent_save_interval"])
         if "maintenance_interval" in mem:
             cfg.maintenance_interval = int(mem["maintenance_interval"])
         if "orphan_cleanup_days" in mem:
             cfg.orphan_cleanup_days = int(mem["orphan_cleanup_days"])
         if "summary_cleanup_days" in mem:
             cfg.summary_cleanup_days = int(mem["summary_cleanup_days"])
-        if "max_db_size_mb" in mem:
-            cfg.max_db_size_mb = int(mem["max_db_size_mb"])
 
         # 维护器子配置 [memory.maintain]
         maintain = mem.get("maintain", {})
@@ -121,6 +147,13 @@ def get_memory_config() -> MemoryConfig:
             cfg.maintain_stale_days = int(maintain["stale_days"])
         if "enable_validate" in maintain:
             cfg.maintain_enable_validate = bool(maintain["enable_validate"])
+        # v5：验证器可见窗口 / 单轮条数 / 重验间隔
+        if "preview_chars" in maintain:
+            cfg.validate_preview_chars = int(maintain["preview_chars"])
+        if "batch_limit" in maintain:
+            cfg.validate_batch_limit = int(maintain["batch_limit"])
+        if "revalidate_days" in maintain:
+            cfg.validate_revalidate_days = int(maintain["revalidate_days"])
 
         # Evidence Ledger 子配置（A）
         if "enable_evidence_ledger" in mem:
@@ -139,6 +172,8 @@ def get_memory_config() -> MemoryConfig:
             cfg.enable_search_tracer = bool(mem["enable_search_tracer"])
         if "search_tracer_retention_days" in mem:
             cfg.search_tracer_retention_days = int(mem["search_tracer_retention_days"])
+        if "projection_retention_days" in mem:
+            cfg.projection_retention_days = int(mem["projection_retention_days"])
         if "search_tracer_sample_rate" in mem:
             cfg.search_tracer_sample_rate = float(mem["search_tracer_sample_rate"])
         if "search_tracer_candidates_to_store" in mem:

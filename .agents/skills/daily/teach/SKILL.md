@@ -15,7 +15,7 @@ task_type: daily.teach
 把 `workspace/teaching/<topic-slug>/` 视为 teaching workspace，`<topic-slug>` 取 topic 的 dash-case 形式（例如 `react-hooks`、`yoga-basics`）。若该目录已存在则直接续接，不存在则创建。原版 mattpocock/skills 把工作区放在"当前目录"，本版改为统一放在 `workspace/teaching/` 下，避免污染项目根目录。他们的学习状态保存在这个目录中的几个文件里：
 
 - `MISSION.md`：记录用户为什么对这个 topic 感兴趣。所有教学都应以它为 grounding。使用 [MISSION-FORMAT.md](./MISSION-FORMAT.md) 中的格式。
-- `./reference/*.html`：reference materials 目录。这些是从 lessons 中压缩出的 learnings：cheat sheets、reference algorithms、syntax、yoga poses、glossaries。它们是原始学习单元。它们应该是漂亮的 <data_drive>:\Documents，适合打印，并为 quick reference 设计。
+- `./reference/*.html`：reference materials 目录。这些是从 lessons 中压缩出的 learnings：cheat sheets、reference algorithms、syntax、yoga poses、glossaries。它们是原始学习单元。它们应该是漂亮的 documents，适合打印，并为 quick reference 设计。
 - `RESOURCES.md`：可探索的 resources 列表，用来把教学建立在 context knowledge 上，或获取 knowledge 和 wisdom。使用 [RESOURCES-FORMAT.md](./RESOURCES-FORMAT.md) 中的格式。
 - `./learning-records/*.md`：learning records 目录，记录用户已经学到的东西。它们大致相当于软件开发里的 architectural decision records：捕获非显而易见的 lessons 和 key insights，这些内容可能之后需要修订，或推动未来 sessions。它们应用来计算 zone of proximal development。标题格式为 `0001-<dash-case-name>.md`，数字每次递增。使用 [LEARNING-RECORD-FORMAT.md](./LEARNING-RECORD-FORMAT.md) 中的格式。
 - `./lessons/*.html`：lessons 目录。一个 **lesson** 是一个单独、自包含的 HTML output，用来教授一个与 mission 绑定的 tightly-scoped 内容。这是此 workspace 中教学的主要单元。
@@ -56,7 +56,7 @@ Lesson 应该很短，并且很快就能完成。Learners 的 working memory 非
 
 如果可能，通过运行 CLI command 为用户打开 lesson file。
 
-每个 lesson 都应通过 HTML anchors 链接到其他 lessons 和 reference <data_drive>:\Documents。
+每个 lesson 都应通过 HTML anchors 链接到其他 lessons 和 reference documents。
 
 每个 lesson 都应推荐一个 primary source，供用户阅读或观看。它应该是你在该 topic 上找到的最高质量、最高信任度 resource。
 
@@ -113,11 +113,11 @@ Community 是一个线上或线下场所，用户可以在真实世界中测试 
 
 你应尝试找到用户可以加入的 high-reputation communities。如果用户表示不想加入 community，尊重这个偏好。
 
-## Reference <data_drive>:\Documents
+## Reference Documents
 
-创建 lessons 时，你也应创建 reference <data_drive>:\Documents。Lessons 可以引用这些 <data_drive>:\Documents。它们有助于跟踪跨 lessons 都有用的原始 knowledge units。
+创建 lessons 时，你也应创建 reference documents。Lessons 可以引用这些 documents。它们有助于跟踪跨 lessons 都有用的原始 knowledge units。
 
-Lessons 之后很少会被反复打开，而 reference <data_drive>:\Documents 会。它们应该是 lesson 的 compressed essence，采用为 quick reference 设计的格式。
+Lessons 之后很少会被反复打开，而 reference documents 会。它们应该是 lesson 的 compressed essence，采用为 quick reference 设计的格式。
 
 有些学习 topics 天然适合 reference：
 

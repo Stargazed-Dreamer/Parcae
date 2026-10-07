@@ -25,7 +25,7 @@ POOL_STATS_FILE = PROJECT_ROOT / "data" / "llm" / "stats" / "llm_pool_stats.json
 # 各脚本独立的 stats 文件（避免多进程写冲突）—— 动态扫描 stats 目录
 _STATS_DIR = PROJECT_ROOT / "data" / "llm" / "stats"
 POOL_STATS_FILES = sorted(_STATS_DIR.glob("*.json")) if _STATS_DIR.exists() else [POOL_STATS_FILE]
-POSTS_CHECKPOINT = PROJECT_ROOT / "output" / "社群" / "reports" / "summarize_direct_checkpoint_all.json"
+POSTS_CHECKPOINT = PROJECT_ROOT / "workspace" / "community_review" / "reports" / "summarize_direct_checkpoint_all.json"
 COMMENT_STATE = PROJECT_ROOT / "temp" / "mimo_comment_state.json"
 LRC_STATE = PROJECT_ROOT / "temp" / "mimo_lrc_state.json"
 LRC_RESULTS = PROJECT_ROOT / "temp" / "mimo_lrc_results.json"

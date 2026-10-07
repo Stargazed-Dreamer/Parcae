@@ -14,7 +14,7 @@
 | `hypergryph.com` | 鹰角通行证与游戏记录页 | [sites/hypergryph.md](file:///<project_root>/.agents/skills/browser_lessons/sites/hypergryph.md) | arknights_gacha、endfield_gacha | 明日方舟、终末地、鹰角、寻访记录 | 需登录鹰角通行证 |
 | `feishu.cn` | 飞书云文档 | [sites/feishu.cn.md](../sites/feishu.cn.md) | web_archive（extract_feishu.py） | 飞书、飞书文档、云文档、wiki、docx | 分享链接游客态可读 |
 | `docs.qq.com` | 腾讯文档 | [sites/docs.qq.com.md](../sites/docs.qq.com.md) | web_archive（extract_tencent_doc.py） | 腾讯文档、腾讯、docs.qq.com、tdocs | 游客态可读全文 |
-| `bilibili.com` | <data_drive>:\<bilibili_videos> | [sites/bilibili.com.md](../sites/bilibili.com.md) | bilibili_gacha、official_gacha | <data_drive>:\<bilibili_videos>、bilibili、互动抽奖、取关、删动态 | 需登录 |
+| `bilibili.com` | <data_drive>:/<bilibili_videos> | [sites/bilibili.com.md](../sites/bilibili.com.md) | bilibili_gacha、official_gacha | <data_drive>:/<bilibili_videos>、bilibili、互动抽奖、取关、删动态 | 需登录 |
 | `zhihu.com` | 知乎 | [sites/zhihu.md](../sites/zhihu.md) | web_archive（探索中） | 知乎、zhihu、zhuanlan、专栏文章、问题页 | **需登录**（IP 风控后匿名完全被拦，2026-09-12 实测） |
 | `scnu.edu.cn` | 砺儒云课堂（华师 Moodle） | [sites/scnu.edu.cn.md](../sites/scnu.edu.cn.md) | homework（作业流水线） | 砺儒云、moodle.scnu、作业要求、SSO 登录 | 需登录（统一身份认证 SSO） |
 | `js.design` | 即时设计 | [sites/js.design.md](../sites/js.design.md) | homework（hci 作业 / jsd_research） | 即时设计、jsd、原型、画布、导入文件 | 需登录（客户端 userData 可复用） |

@@ -18,8 +18,20 @@
     …+8         4     uint32 簇尾浪费
     …+12        4     uint32 Windows FILE_ATTRIBUTE
     …+16        24    3×int64 FILETIME
-    …+40        2     00 00 结束标志
+    …+40        2     状态字（little-endian uint16）——**不是哨兵**，见下方「+40 状态字」
     …+42        2×k   01 00 × k：弹出最近 k 个层级
+
++40 状态字（2026-09-24 修订，此前被误当成 `00 00` 哨兵）
+    绝大多数记录为 `00 00`；但在**权限不足的扫描**里会混入少量非零值
+    （C 盘 178.6 万条实测 127 条非零，取值仅 `00 02` / `00 04` / `00 06`，
+    集中在 `Users`、`Program Files`、`Windows`、`$Recycle.Bin` 等需提权的路径）。
+    语义尚未确定；已验证它**不代表子树残缺**——这些节点的 size 与
+    「子目录 size 之和 + 直属文件大小之和」完全相等。
+
+    ❼ **不要对它做等值校验**。曾经按 `== b"\\x00\\x00"` 硬校验，结果整份快照在**根记录**
+    就抛「缺少记录结束标志」，表现为「文件损坏」，重导出也一样——实际两次导出字节完全相同。
+    真正的结构防线是：魔数+类型、name_len 边界、pops 栈平衡、以及遍历必须精确走到 EOF。
+    放宽这一处后，本机四份快照（C / C2 / E / F）全部 100% 走到文件尾且栈深归零。
 """
 
 from __future__ import annotations
@@ -197,7 +209,8 @@ class Entry:
 class Snapshot:
     """一份解析完成的快照：根节点 + 卷级统计。"""
 
-    __slots__ = ("root", "used_bytes", "free_bytes", "unknown_bytes", "n_files", "n_dirs", "source_path")
+    __slots__ = ("root", "used_bytes", "free_bytes", "unknown_bytes", "n_files", "n_dirs",
+                 "stateful_records", "source_path")
 
     def __init__(
         self,
@@ -208,6 +221,7 @@ class Snapshot:
         n_files: int,
         n_dirs: int,
         source_path: Path,
+        stateful_records: int = 0,
     ) -> None:
         self.root = root
         self.used_bytes = used_bytes
@@ -215,6 +229,7 @@ class Snapshot:
         self.unknown_bytes = unknown_bytes
         self.n_files = n_files
         self.n_dirs = n_dirs
+        self.stateful_records = stateful_records
         self.source_path = source_path
 
     @property
@@ -264,6 +279,7 @@ def parse_bytes(data: bytes, source_path: Optional[Path] = None) -> Snapshot:
     n_dirs = 0
     free_bytes = 0
     unknown_bytes = 0
+    flagged_records = 0
 
     while pos < n:
         if pos + 6 > n or data[pos] != SNS_MAGIC or data[pos + 1] not in (1, 2, 3, 4, 5):
@@ -279,8 +295,10 @@ def parse_bytes(data: bytes, source_path: Optional[Path] = None) -> Snapshot:
         (attrs,) = struct.unpack_from("<I", data, name_end + 12)
         (mtime_ft,) = struct.unpack_from("<q", data, name_end + 32)
 
+        # +40 是状态字而非哨兵，不做等值校验（见模块 docstring「+40 状态字」一节）。
+        # 它只用于诊断统计：非零意味着 SpaceSniffer 扫描该条目时走了另一条路径。
         if data[name_end + 40 : name_end + 42] != b"\x00\x00":
-            raise SnsParseError(f"缺少记录结束标志，偏移 {pos}（name={name!r}）")
+            flagged_records += 1
 
         cursor = name_end + 42
         pops = 0
@@ -341,6 +359,7 @@ def parse_bytes(data: bytes, source_path: Optional[Path] = None) -> Snapshot:
         unknown_bytes=unknown_bytes,
         n_files=n_files,
         n_dirs=n_dirs,
+        stateful_records=flagged_records,
         source_path=source_path or Path("<bytes>"),
     )
 

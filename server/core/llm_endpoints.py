@@ -144,7 +144,10 @@ def register_llm_routes(app: FastAPI):
 
         v6-lite-chat-fix T02 新增字段（供前端模型选择器拉取，来自 pool.list_models()）：
         - grouped_by_tier: 按 tier 分组的 model 清单
-            {"tier1-lightest": [{"model": "...", "tier": 1, "provider": "..."}, ...], ...}
+            {"tier1-lightest": [{"model": "...", "tier": 1, "provider": "...",
+                                 "context_window": 0}, ...], ...}
+            （context_window v16 新增：keys.json 里该 model 的上下文窗口，0 = 未填；
+             消费方是 chat 面板的压缩判据，见 docs/chat-engine.md）
         - default_tier: 取自 USE_CASE_REGISTRY['agent_chat'].default_tier 的 min（如 "tier3-medium"）
         - default_model: default_tier 分组中首个 model（前端启动时默认选中）
         """

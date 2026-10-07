@@ -6,12 +6,31 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from server.memory.schema import init_db
 
 logger = logging.getLogger(__name__)
+
+_REVISION_TS_FMT = "%Y-%m-%d %H:%M:%S.%f"
+
+
+def _plus_one_microsecond(ts: str) -> str:
+    """把定长时间文本 +1 微秒（同刻连续写入时用来保住"区间非空且单调"）。
+
+    为什么需要它：Windows 上 ``datetime.now()`` 的**时钟刻度约 15.6 ms**，不是 1 µs ——
+    连续两次调用经常返回**完全相同**的值。若直接拿它当历史区间的上界，
+    同一个刻度内的第二次覆盖就会得到 ``valid_at == invalid_at`` 的零宽度区间，
+    那条历史**永远查不到**（首版实现正是如此，被 ``test_same_second_supersedes_are_both_queryable``
+    抓出来）。这里不信任时钟的精度，而是按链路前一条把上界显式推后 1 µs。
+    """
+    try:
+        dt = datetime.strptime(ts, _REVISION_TS_FMT)
+    except ValueError:
+        # 迁移回填的行是秒精度（来自 messages.created_at），补零到微秒再进位
+        dt = datetime.strptime(ts + ".000000", _REVISION_TS_FMT)
+    return (dt + timedelta(microseconds=1)).strftime(_REVISION_TS_FMT)
 
 
 class MemoryStore:
@@ -315,6 +334,9 @@ class MemoryStore:
         keywords_json = json.dumps(trigger_keywords, ensure_ascii=False) if trigger_keywords is not None else None
         # T06：execute + commit 包入 _write_lock
         with self._write_lock:
+            # v6：覆盖前先把旧值落进历史。**必须在同一次加锁里做**，
+            # 否则"落了历史但 upsert 失败"会留下一条无主历史行。
+            self._record_superseded_value(key, value)
             self.conn.execute(
                 """INSERT INTO facts (key, value, source, confidence, fact_type, occurred_at,
                                        consumption_contexts, trigger_keywords, updated_at)
@@ -391,6 +413,132 @@ class MemoryStore:
         cur = self.conn.execute("SELECT * FROM facts WHERE key = ?", (key,))
         row = cur.fetchone()
         return self._row_to_dict("facts", row) if row else None
+
+    # ─── 事实版本历史（v6 P2 版本模型） ──────────────────────
+
+    _REVISION_COLUMNS = (
+        "id", "key", "value", "valid_at", "invalid_at",
+        "source_message_id", "migrated", "created_at",
+    )
+
+    def _record_superseded_value(self, key: str, new_value: str) -> None:
+        """覆盖写入前，把旧值落进 ``fact_revisions``（调用方须已持有 ``_write_lock``）。
+
+        判据是 **"值真的变了"才记**。这条判断不是优化而是必需：
+        ``extract_facts_from_kv`` 每次 ``set()`` 都会调用 ``upsert_fact``，
+        若不比较内容，同一份数据会被反复记成历史，把 ``fact_revisions``
+        变成噪音日志、也会让 ``as_of`` 查询在同一时刻出现多条候选。
+
+        **区间怎么定（踩过两个坑，别改回去）**：
+        - 下界 ``valid_at`` **接在上一条历史的 ``invalid_at`` 之后**，而不是取
+          ``facts.updated_at``。后者由 SQLite 的 ``datetime('now','localtime')`` 写入、
+          **只有秒精度**：同一秒内连续覆盖两次时两条历史的 ``valid_at`` 会完全相同，
+          较早那条的区间就变成 ``[T, T)`` —— **零宽度、永远查不到**。
+        - 上界 ``invalid_at`` 取 ``datetime.now()``，但**一旦发现它不大于下界，就显式推进
+          1 µs**。理由见 ``_plus_one_microsecond``：Windows 的时钟刻度约 15.6 ms，
+          两次连续调用的返回值可能完全一样，"微秒格式化"并不等于"时间唯一"。
+        - 该 key 第一次被覆盖时没有上一条可接，退回 ``facts.updated_at``；此时区间是
+          ``[T, now_us)``，虽然窄但仍然非空。
+
+        时间一律用定长文本（``'YYYY-MM-DD HH:MM:SS[.ffffff]'``），与
+        ``messages.created_at`` / 迁移回填行可比，字符串比较即时间比较。
+        """
+        row = self.conn.execute(
+            "SELECT value, updated_at FROM facts WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None or row[0] == new_value:
+            return
+        now_us = datetime.now().strftime(_REVISION_TS_FMT)
+        prev = self.conn.execute(
+            "SELECT invalid_at FROM fact_revisions WHERE key = ? ORDER BY id DESC LIMIT 1",
+            (key,),
+        ).fetchone()
+        valid_at = str(prev[0]) if prev and prev[0] else str(row[1])
+        # 上界不一定信时钟：同一个 15.6 ms 刻度内连续覆盖时 now_us 会等于 valid_at，
+        # 那样区间宽度为 0、该版本永远查不到 —— 此时显式推到 valid_at + 1µs。
+        invalid_at = now_us if now_us > valid_at else _plus_one_microsecond(valid_at)
+        self.conn.execute(
+            "INSERT INTO fact_revisions (key, value, valid_at, invalid_at, migrated) "
+            "VALUES (?, ?, ?, ?, 0)",
+            (key, row[0], valid_at, invalid_at),
+        )
+
+    def list_fact_revisions(self, key: str) -> list[dict]:
+        """列出某个 key 的版本历史（``valid_at`` 升序）。
+
+        刻意不走 ``_row_to_dict``：``fact_revisions`` 不在 ``_ALLOWED_TABLES``
+        白名单里（v5 的 ``memory_metrics_daily`` 同样没加，而那份白名单有精确
+        集合断言的测试守着）。按游标列名自建 dict，避免为一张新表去改无关的
+        白名单及其测试。
+        """
+        cur = self.conn.execute(
+            f"SELECT {', '.join(self._REVISION_COLUMNS)} FROM fact_revisions "
+            "WHERE key = ? ORDER BY valid_at ASC, id ASC",
+            (key,),
+        )
+        return [dict(zip(self._REVISION_COLUMNS, r, strict=False)) for r in cur.fetchall()]
+
+    def get_fact_as_of(self, key: str, as_of: str) -> dict | None:
+        """取 ``fact_revisions`` 中在 ``as_of`` 时刻为真的那一版。
+
+        ``as_of`` 用 ``'YYYY-MM-DD'`` 或 ``'YYYY-MM-DD HH:MM:SS'``；因为所有时间列
+        都是同格式定长文本，直接字符串比较即可正确排序。命中条件：
+        ``valid_at <= as_of AND (invalid_at IS NULL OR as_of < invalid_at)``。
+        仅查历史表；"当前值是否也覆盖该时刻"由 ``resolve_fact_as_of`` 兜。
+        """
+        cur = self.conn.execute(
+            f"SELECT {', '.join(self._REVISION_COLUMNS)} FROM fact_revisions "
+            "WHERE key = ? AND valid_at <= ? AND (invalid_at IS NULL OR ? < invalid_at) "
+            "ORDER BY valid_at DESC, id DESC LIMIT 1",
+            (key, as_of, as_of),
+        )
+        row = cur.fetchone()
+        return dict(zip(self._REVISION_COLUMNS, row, strict=False)) if row else None
+
+    def resolve_fact_as_of(self, key: str, as_of: str) -> tuple[str, str, dict | None] | None:
+        """解析 key 在 ``as_of`` 时刻"当时为真"的值。
+
+        返回 ``(value, origin, revision)``，``origin ∈ {'revision', 'current'}``；
+        没有任何版本覆盖该时刻则返回 ``None``。
+
+        顺序不能颠倒：先查历史、再回落当前值。当前值的有效区间是
+        ``[facts.updated_at, +∞)``，只有 ``as_of`` 落进该区间才轮到它——
+        先查当前值会把"改了之后又查旧日期"错判成当前值。
+        """
+        rev = self.get_fact_as_of(key, as_of)
+        if rev is not None:
+            return str(rev["value"]), "revision", rev
+        cur = self.conn.execute(
+            "SELECT value, updated_at FROM facts WHERE key = ?", (key,)
+        ).fetchone()
+        if cur is not None and cur[1] is not None and str(cur[1]) <= as_of:
+            return str(cur[0]), "current", None
+        return None
+
+    def get_validation_meta(self, keys: list[str]) -> dict[str, dict]:
+        """批量读 memory_meta 的验证状态（unknown-outcome-evidence T17）。
+
+        memory_meta 由维护器逐条 LLM 验证后写入，此前只有面板与维护器自己读——
+        也就是"验没验过"这件事从不参与记忆被消费的那一刻。消费路径接上它之后，
+        被标成 archive/update 的记忆不再静默进上下文，而是带警告降到必读块末尾。
+
+        只读，不加锁：不写任何计数，读-改-写竞态在这里不存在。
+        """
+        if not keys:
+            return {}
+        placeholders = ",".join("?" for _ in keys)
+        rows = self.conn.execute(
+            f"SELECT key, validation_status, last_validated_at, stale_score, validation_note "
+            f"FROM memory_meta WHERE key IN ({placeholders})",
+            tuple(keys),
+        ).fetchall()
+        out: dict[str, dict] = {}
+        for row in rows:
+            d = self._row_to_dict("memory_meta", row)
+            key = d.get("key")
+            if key:
+                out[str(key)] = d
+        return out
 
     def list_facts(self, source: str | None = None, limit: int = 100) -> list[dict]:
         """
@@ -495,6 +643,34 @@ class MemoryStore:
             self.conn.execute("DELETE FROM vector_index WHERE message_id = ?", (message_id,))
             self.conn.commit()
 
+    def update_message_content(self, msg_id: int, content: str) -> None:
+        """原地更新一条消息的正文（v6：每个 key 只保留一条"当前快照"行）。
+
+        刻意**不动 timestamp**：这一行的身份是"该 key 的记忆快照"，它的创建时间
+        应该保持首次写入的时刻；"什么时候被改过"由 ``fact_revisions`` 与
+        ``source='event'`` 的事件行表达。改了 timestamp 反而让 created_at 与
+        timestamp 互相矛盾，也让时间线排序失去意义。
+
+        T06：execute + commit 包入 _write_lock。
+        """
+        with self._write_lock:
+            self.conn.execute("UPDATE messages SET content = ? WHERE id = ?", (content, msg_id))
+            self.conn.commit()
+
+    def get_kv_snapshot_id(self, key: str) -> int | None:
+        """取该 key 的"当前快照"消息 id（``source='manual'`` 的最新一条）。
+
+        v6 起每个 key 至多一条手动行 —— 它的身份从"某一次写入"变成了"当前快照"，
+        每次覆盖原地更新（见 ``update_message_content``）。
+        取"最新一条"是为了兼容 v6 之前留下的多行旧址：那时一个 key 有多行，
+        改到最新那行即可，旧行留给 superseded 清理与指标统计。
+        """
+        row = self.conn.execute(
+            "SELECT id FROM messages WHERE key = ? AND source = 'manual' ORDER BY id DESC LIMIT 1",
+            (key,),
+        ).fetchone()
+        return int(row[0]) if row else None
+
         # ─── BM25 索引 ─────────────────────────────────────────
 
     def upsert_bm25_term(self, term: str, message_id: int, tf: int = 1) -> None:
@@ -519,6 +695,19 @@ class MemoryStore:
                    ON CONFLICT(term, message_id) DO UPDATE SET tf = tf + ?""",
                 (term, message_id, tf, tf),
             )
+            self.conn.commit()
+
+    def delete_bm25_terms_by_message(self, message_id: int) -> None:
+        """删除某条消息的全部 BM25 倒排词条。
+
+        为什么必须单独有这个动作：``upsert_bm25_term`` 的冲突分支是 ``tf = tf + ?``
+        （**累加**），并不替换。所以"重建索引"如果只调 upsert，旧内容独有的词会残留，
+        索引就变成"新旧内容的并集" —— 那恰好是 A 项要消灭的东西。
+
+        T06：execute + commit 包入 _write_lock。
+        """
+        with self._write_lock:
+            self.conn.execute("DELETE FROM bm25_inverted WHERE message_id = ?", (message_id,))
             self.conn.commit()
 
     def get_bm25_posting(self, term: str) -> list[dict]:
@@ -652,11 +841,13 @@ class MemoryStore:
     def query_db_size_history(self) -> list[dict]:
         """返回最近 7 天 DB 大小采样数组
 
-        Ticket 01：最简实现，in-memory cache + 当天采样。
-        不新增 sqlite 表（如需持久化采样走后续 ticket）。
+        v5：采样落库（`memory_metrics_daily` 的 `db_size_mb` 指标）。
+        旧实现只在内存 dict 里滚动 7 天，后端一重启历史就归零——实测
+        `/memory/stats` 的 `db_size_history` 只有 1 条，而健康分的"DB 增长率"
+        维度需要 ≥2 条才参与计算（`_health_score.py` 的降级分支），于是这一维
+        实际上从来没被算过。
 
-        每次 /memory/status 被调用时更新当天采样值，反映最新 DB 大小。
-        历史采样在内存中滚动保留 7 天（按日期字符串升序，超过 7 条删最旧的）。
+        日表读不到时（老库尚未迁移/只读连接失败）退回内存 dict，行为不劣于旧实现。
 
         Returns:
             list[dict]: 每条 {date: "YYYY-MM-DD", size_mb: float}，按 date 升序，
@@ -666,10 +857,24 @@ class MemoryStore:
 
         # 当天采样（每次调用都更新当天值，反映最新 DB 大小）
         db_size = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
-        size_mb = round(db_size / 1024 / 1024, 2)
+        size_mb = round(db_size / 1048576, 2)
         self._db_size_history[today_str] = size_mb
 
-        # 滚动保留最近 7 天，删过期采样
+        persisted: list[dict] = []
+        try:
+            from server.memory import metrics as _metrics
+
+            with self._write_lock:
+                _metrics.put_metric(self.conn, today_str, "db_size_mb", size_mb)
+                self.conn.commit()
+            persisted = _metrics.query_metric_history(self.conn, "db_size_mb", days=7)
+        except Exception as e:  # noqa: BLE001 - 指标持久化失败不能拖垮 /memory/status
+            logger.debug(f"db_size 采样落库失败（退回内存采样）: {e}")
+
+        if len(persisted) >= 2:
+            return persisted
+
+        # 滚动保留最近 7 天，删过期采样（内存兜底路径）
         sorted_dates = sorted(self._db_size_history.keys())
         if len(sorted_dates) > 7:
             for old_date in sorted_dates[:-7]:
@@ -789,6 +994,7 @@ class MemoryStore:
         "messages", "facts", "summaries", "vector_index", "bm25_inverted",
         "bm25_stats", "schema_info", "memory_meta",
         "evidence_ledger", "search_traces",  # v3 新增
+        "context_projections",               # v4 新增（投影留痕，只写不读回 fact 列）
     })
 
     def _row_to_dict(self, table: str, row: tuple) -> dict:

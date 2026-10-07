@@ -200,3 +200,39 @@ LOOP_TASK_DEFS = {
         finally:
             _restore_workspace_modules(ws_snapshot)
             component_manifest.reset_cache()
+
+
+class TestComponentActionsActuallyRegistered:
+    """组件声明的 loop 任务必须有对应 action 被注册，否则静默不跑。
+
+    背景：email_source.poll 曾因 _load_optional_actions 用 pkgutil.iter_modules
+    （只枚举带 __init__.py 的包）而从未注册，任务被 "action 未注册" 跳过，
+    只在 server.log 留一行 INFO，组件作者与测试都发现不了。
+    """
+
+    def test_every_component_task_has_registered_action(self):
+        class _Collector:
+            config: dict = {"tasks": {}}
+
+            def __init__(self) -> None:
+                self.registered: set[str] = set()
+
+            def register_action(self, action_type: str, action) -> None:
+                self.registered.add(action_type)
+
+        from server.activity_tracker.loop_actions import (
+            _load_optional_actions,
+            register_loop_actions,
+        )
+
+        collector = _Collector()
+        register_loop_actions(collector)
+        _load_optional_actions(collector)
+
+        missing = [
+            f"{segment}.{rule['sub_id']} -> {rule['action']}"
+            for segment, rules in loop_manager._load_optional_loop_defs().items()
+            for rule in rules
+            if rule["action"] not in collector.registered
+        ]
+        assert not missing, f"组件 loop 任务的 action 未注册，将被调度器跳过: {missing}"

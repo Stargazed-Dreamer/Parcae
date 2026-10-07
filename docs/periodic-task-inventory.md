@@ -36,11 +36,12 @@
 | 任务 | 阈值 | 上次活动核对信号 | 怎么跑 | 注意 |
 |------|------|------------------|--------|------|
 | homework 作业巡检 | 额度有余且 >1 天没动；无条件 >1 周没动 | `workspace/homework/records/journal.md`、`records/todos.md` 的 mtime | 按 `workspace/homework/AGENTS.md` 的五段流水线（获取/检查/完成/汇总/人工提交） | 砺儒云统一身份认证需人工登录，agent 不代填密码；提交环节恒为人工 |
-| web_archive 超链接群导出+跑 | >1 周没动 | `workspace/web_archive/reports/`、`state/` 内最新文件 mtime；weflow 增量另看 `weflow/doc.weflow.top/` | 见 `workspace/web_archive/SKILL.md` 每日流程 | 全站慢爬每天限额 20 篇、每篇间隔 15~30s，**本来就是手动触发** |
-| gh_mirror 告警处理 | 额度有余且 >1 周没人工处理 | `GET /loop/tasks` 里 `gh_mirror.monitor` 的 `last_run_at` + `GET /inbox?status=new` 是否有未处理镜像告警 | `workspace/gh_mirror/health_check.py`；上游被删走 `RUNBOOK_wiped_upstream.md` | 监控本身每 24h 自动（`config.toml` `[loops.gh_mirror] monitor_interval`），要人做的是"处理告警" |
-| official_gacha 官方抽奖扫描 | 无自动；有空可跑 | `workspace/official_gacha/latest_scan.json` 的 mtime | `workspace/official_gacha/SKILL.md`（Playwright 连 CDP 9222 扫官方账号近 7 天动态） | **故意不注册提醒**（风控顾虑）。参与抽奖是键鼠+OCR 实操，弹窗需用户确认 |
+| web_archive 超链接群导出+跑 | >1 周没动 | `workspace/web_archive/reports/`、`state/` 内最新文件 mtime | 供源 `wechat_source.py`（**必须用 wechatDecode 的 venv** 跑）→ 出 `state/wechat_source/pending_links.json` → 对话确认要抓哪条 → 按站点 `extract_web.py` / `extract_feishu.py` / `extract_tencent_doc.py` | 抓取需调试浏览器（CDP 9222）+ 步骤 0 登录态预检，未登录时评论数偏少且不报错。⚠️ "每天限额 20 篇、每篇间隔 15~30s" 是 **`extract_xiaolin.py`（小林coding）** 的约束，不是 weflow；该慢爬已于 2026-09-16 全量完成（见 `reports/report_xiaolin.md`），weflow 的一次性脚本已回收、**当前无可运行入口** |
+| gh_mirror 告警处理 | 额度有余且 >1 周没人工处理 | `GET /loop/tasks` 里 `gh_mirror.monitor` 的 `last_result.alerts`（**每轮重复计数，不是去重后的仓库数**）；明细在 `GET /inbox?status=pending`（⚠️ 只有 `pending` 是合法状态值，传 `new` 会静默返回空列表 → 假绿灯） | `workspace/gh_mirror/health_check.py`；上游被删走 `RUNBOOK_wiped_upstream.md` | 监控本身每 24h 自动。⚠️ 系统性误报：`alert_lag_threshold_days = 7`（`config.toml` `[loops.gh_mirror]`）与镜像同步 cron `0 3 * * 1`（周频）同量级，且 monitor 每日跑在当天同步**之前**，于是每周必然刷出一批 `mirror_lag`；判据里的 `upstream_sha != mirror_sha` 也恒成立（同步流程会打 strip commit 删上游 workflow 文件，SHA 永远不相等）。2026-09-29 实测：pending 告警对应 10 个仓库，全部 `dmca-backup.yml` 最近一次 run `conclusion=success`，**无需人工 dispatch**。**判"镜像是否真落后"的口径**（2026-09-30 定）：不比 tip SHA，比"镜像分支 tip 若是 `chore: strip upstream CI workflows` 提交，其 `parents[0]` 是否等于上游该分支 tip"；`workspace/gh_mirror/workflow_template.yml` 的同步循环带"上游无新提交即 skip"，所以一轮下来 tip 变化数少是正常的。**`sync_failed` 不可当误报直接关**：09-28 那次是单个 ref 被 `remote rejected` + 循环 `set -e` 中断后续分支。另一层坑：cron 只跑**默认分支**上那份 workflow，09-30 普查发现 `mirror-SteamTools`/`mirror-lux` 的 GitHub `default_branch` 是上游 `dependabot/*` 分支（`repos.json` 的 `branch` 同样记着它），且这两个仓的脚本落后于现役模板（无清库守护）——已升级并把默认分支改回 `main`/`master`；但"远端脚本版本 vs 模板"的漂移检查直到 2026-10-05 才落地：只读体检 `workspace/gh_mirror/workflow_drift_check.py`（口径与按设计豁免见 `workspace/gh_mirror/README.md`「Workflow 模板更新」），首跑即证明 `rollout_update.py` 的 `PILOT_DONE` 手抄清单失真（记为已下发的仓，其 `release-backup.yml` 在远端从未有过提交历史）；未处理的缺口与后续动作见 `wip_5950f631` |
+| official_gacha 官方抽奖扫描 | 无自动；有空可跑 | `workspace/official_gacha/state/latest_scan.json` 的 mtime | `workspace/official_gacha/SKILL.md`（Playwright 连 CDP 9222 扫官方账号近 7 天动态） | **故意不注册提醒**（风控顾虑）。参与抽奖是键鼠+OCR 实操，弹窗需用户确认 |
 | modelscope 模型库更新 | 每月；额度有余可提前 | 最新报告文件名日期：`workspace/modelscope_model_update/report_*.md`、`推荐报告_*.md` | `workspace/modelscope_model_update/SKILL.md` | 结果会**覆盖写 `data/llm/keys.json`**，必须用户确认后再写；魔搭会不定期下架模型 ID，拖太久等于模型池悄悄失效 |
-| API Key 全量健康检查 | 随时可加跑 | `GET /apikey/status` | `POST /apikey/keys/health-check-all` | 已每 12h 自动（`[loops.key_health]`），此条只是额度多时的补跑 |
+| model_data 大模型数据集增量轮（D 轮） | >1 周没动即可提议（2026-09-30 实测：历史轮间最大间隔 4 天，D51 前空窗 16 天、库内最新 release_date 停在 09-13） | `workspace/model_data/docs/` 最新 `D<NN>_REPORT.md` 文件名日期 + 该子仓 `git log -1`（嵌套独立 git，不在主仓历史里） | 按 `workspace/model_data/docs/增量更新工作流.md` S0→S5；S0 唯一清单入口 `docs/跟踪源清单.md`（§B2 有各台账页实测坑：DeepSeek 走 sitemap、阿里台账必须 zh/en 页） | **用户 2026-09-10 拍板不设 todo/loop，别顺手补提醒**；⚠️ `agent_guide` 会把该工作区任务误路由到 `adhoc.office_xlsx`（2026-09-30 实测），入口直接读该工作区 `docs/README.md`；门禁基线 ERROR 0/WARN 0、qa_outliers r1/r2 须保持 0；派采集 subagent 并发≤3；变体口径按 D51「独立测量身份」分判 |
+| API Key 全量健康检查 | 随时可加跑 | `GET /apikey/status`；每条 key 的 `status.last_health_check`（在 `data/llm/keys.json`，只看时间字段别回显密钥） | `POST /apikey/keys/health-check-all` | ⚠️ `[loops.key_health] check_interval` 只是 loop 的 **tick 间隔**；真正的检查受 `HEALTH_CHECK_INTERVAL_DAYS`（`server/llm_pool/key_store.py`）节流。未到间隔时每轮返回 `skipped=true, skip_reason=未到检查间隔`，`last_run_at` 因此会一直刷新而看起来"刚查过"——**这是正常状态，不是故障**，额度多时补跑才有意义。补跑会写 `fail_count`，`fail_count >= HEALTH_CHECK_MAX_FAILS` 即置 `works=false` 出池 |
 | 记忆压缩/维护 | 长会话后、或批量写记忆后 | `GET /memory/stats` | `POST /memory/compress`、`POST /memory/maintain` | `memory.maintain` 已每 6h 自动 |
 
 ## 已注册周期任务台账
@@ -58,7 +59,7 @@
 | `todo_df6b969a` | 每周 | `homework` | 2026-09-20 新增；"额度有余且一天没动"那档走上面机会型台账 |
 | `todo_955d1de3` | 每周 | `web_archive` | 2026-09-20 新增；对应"超链接群导出+跑一周没动" |
 
-> **已知行为，不要再当 bug 报**：`get_due_todos()` 只在 `next_due_at` 有值且 `<= today` 时判到期，而 `next_due_at` 仅由 `mark_done()` 写入。所以 `last_done_at` 有值、`next_due_at` 为 null 的条目**永远不会再进到期名单**。当前 `community_review` / `arknights_gacha` / `yihuan_gacha` 属此类，均为有意保留（后两条被上面的伞形条目覆盖）；要恢复提醒就正常跑一次并 `todos_mark_done`，`next_due_at` 会被重算。
+> **已知行为，不要再当 bug 报**：`get_due_todos()` 有两条独立的判据（`server/todos/store.py`）：① `next_due_at` 有值且 `<= today` 时判到期，而 `next_due_at` 仅由 `mark_done()` 写入——所以 `last_done_at` 有值、`next_due_at` 为 null 的条目**永远不会再进到期名单**（当前 `community_review` / `arknights_gacha` / `yihuan_gacha` 属此类，均为有意保留，要恢复提醒就正常跑一次并 `todos_mark_done`）；② **`last_done_at` 为空则恒判到期**——因此从未 `mark_done` 过的条目（如 `accounting`、`bilibili_gacha`、`todo_20c74a86`）会一直挂在 due 名单里，它们出现在名单中**不等于"本周新到期"**，别据此推断"有活要干"。
 
 ## 自动 loop 台账（不用你管的那些）
 
@@ -78,8 +79,30 @@
 | `secret_backup.run` | 432000s | 密钥文件备份 |
 | `workspace_backup.run` | 432000s | 各 workspace 声明的 `[backup]` 数据文件备份 |
 | `stock_advisor.opening` / `.closing` / `.evening` | cron `35 9 * * 1-5` / `5 15 * * 1-5` / `0 21 * * 1-5` | 股市三时段分析（evening 带 catchup） |
+| `ue_learning_copilot.log_watch` | 20s（`[loops.ue_learning_copilot] poll_interval`） | 轮询已配置的 UE 工程目录日志，追加可核实事件到 `data/ue_learning_copilot/events/`（只落文本、7 天滚动、对工程目录零写操作） |
 
-`[loop_tasks]` 声明了候选动作但**未注册实例**的：`email_source`（`[loops.email_source] enabled = false`，故意关着）、以及多数 workspace 的 `loop_actions.py`——那里只放 `GUIDE_REGISTRY_ENTRIES`（agent_guide 路由条目），不是 loop 任务。
+> **已知行为，不要再当 bug 报**：loop action 必须返回 `success`/`skipped` 两个**布尔键**（`server/activity_tracker/loop_manager.py` 的三态判断），返回 `{"status": "ok"}` 这类形状会被逐次判失败，跑满 `fail_threshold` 即 `auto_failed` 暂停且不报错。暂停状态持久化在 `data/loops/tasks.json`。**重启是否自动恢复要看计数**（`_load_state()`，2026-09-30 改）：`auto_failed` 且 `fail_count < fail_threshold` 才自动解除；`fail_count` **不再在重启时清零**，攒满阈值的任务跨重启也不会复活，必须人工 `POST /loop/tasks/{id}/resume`。`paused=true` 但 `paused_reason` 缺失的历史条目按 `manual` 保留（不再猜成 `auto_failed` 直接放行），并推一条 inbox 说明分不清。
+
+### 一个周期只烧一次：run_key 与「结局不明」（`unknown-outcome-evidence` T07/T08）
+
+每个触发周期算一个 `run_key = "{task_id}@{period_ts}"`，动作执行前写-ahead 落盘（`inflight_run_key`），返回后按结果分类（`RESULT_STATE_RULES`）处理：
+
+| 结果 | fail_count | 是否可自动暂停 | 该周期 |
+|------|-----------|----------------|--------|
+| `success` | 清零 | — | 从 inflight 解除 |
+| `skipped` | 不计数 | — | 不占用 |
+| `failed` | +1 | 是（达阈值即 `auto_failed`） | 可重跑 |
+| `unknown` | +1 | **否**（不自动暂停，也不自动重跑） | 记进 `unknown_run_keys` 等人裁决 |
+
+- **结局不明的来源**：进程被杀时 `inflight_run_key` 仍有值（`_load_state` 检测）；或动作返回体带 `"outcome_unknown": True`（无人值守 judge 判定为 `uncertain` / `run_judge_agent` 异常时会打这个标记，见 `server/activity_tracker/loop_actions.py`）。
+- **重跑是否允许由副作用档位决定**（`lib/side_effect_tier.py`，见 `docs/chat-engine.md`）：只读/本地可逆 → 交给 catch-up 正常补；外部不可逆 →  held 住不再自动烧这个周期，推 inbox 要人裁决。任务档位可被 `workspace/*/manifest.toml` 的 `[side_effect_tier]` 覆盖。
+- **catch-up 有上限**：`CronTrigger.CATCHUP_RUN_CAP = 24`，超出部分不再补跑，累计到 `missed_periods_dropped` 并推 inbox（避免重启后一次性打爆 200 轮）。
+- **inbox 去重是存储级的**：带 `dedupe_key` 的推送（`loop_unknown:<run_key>`、`loop_catchup_dropped:<task_id>:<小时槽>`、`memory:maintain_result:<ISO 周>`）由 `server/inbox.py` 的部分唯一索引保证同 key 只落一条，第二次创建返回既有条目并标 `deduplicated=True`——不依赖调用方自己记得"先查再推"。键的**粒度**要按"什么变了才算新事件"选：记忆维护告警原先在调用方比对 `stale_count`，而老化数每天都在漂，等于永不合并（实测 8 条 pending 里 4 条是同一类告警的不同天副本），2026-10-06 改按 ISO 周切。
+- `GET /loop/tasks` 的每条任务因此多出 `side_effect_tier` / `inflight_run_key` / `unknown_run_keys` / `missed_periods_dropped` 四个可核对字段。
+
+`[loop_tasks]` 声明了候选动作但**未注册实例**的：多数 workspace 的 `loop_actions.py`——那里只放 `GUIDE_REGISTRY_ENTRIES`（agent_guide 路由条目），不是 loop 任务。
+
+⚠️ `email_source` **现在是启用的**（`config.toml` `[loops.email_source] enabled = true`，2026-09-29 实测；本文档曾长期记为"故意关着"）。它的 poll 会周期性刷 `task_failure_warning` 进 inbox，同时在列的还有真实邮件通知（`category=email`）——这两类要分开看待，别把失败告警当新邮件。
 
 ## 有意不做周期化（下次别顺手补提醒）
 
@@ -94,7 +117,6 @@
 | `stock_advisor` 月度简评 | 用户裁决不提醒；`valid_until` 月底自动失效已有机制 |
 | `gh_mirror`、`stock_advisor` | 有 `recurring.*` skill 条目但由 loop 全自动驱动，**不需要**再建 todo |
 | `recorder`、`windows_forensics`、`yihuan_simulator`、`dev_toolkit`、`apikey_test`、`image_organize_remote_vl_sample`、`web_archive/dev` | 工具型/取证型，被调用才动 |
-| `homework` 的 `SKILL.md`/guide 注册 | 仍是待办：manifest 明写"agent_guide / skill 注册暂缓，待首个科目工作流跑通"。本轮只补了 todo 入口，没动注册状态 |
 
 ## 维护
 

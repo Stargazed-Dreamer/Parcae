@@ -1,4 +1,4 @@
-"""HTTP 中间件：trace_id 注入 + MCP 统计 + 用户消息注入"""
+"""HTTP 中间件：Host 白名单 + trace_id 注入 + MCP 统计 + 用户消息注入"""
 
 import asyncio
 import json
@@ -8,6 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
+from fastapi.responses import JSONResponse
 from fastapi.responses import Response as FastAPIResponse
 
 from server.user_message import (
@@ -101,8 +102,166 @@ def reset_mcp_stats() -> None:
     _save_mcp_stats({})
 
 
+# ========== Host 白名单（DNS rebinding 防护） ==========
+# 为什么 CORS 挡不住：后端只监听 127.0.0.1，但攻击者可让受害者在浏览器里访问
+# http://evil.com/ 时把该域名解析到 127.0.0.1:8766 —— 此时浏览器发出的 Origin
+# 就是 http://127.0.0.1:8766，main.py 的 allow_origin_regex 照放行。
+# 唯一能区分"真本地客户端"与"借道浏览器的外网页面"的依据是 Host 头：
+# 正常客户端发 127.0.0.1，被 rebinding 的页面发 evil.com。
+#
+# ⛔ 但光看 Host 会误伤合法客户端：Host 是客户端的内部实现细节，**与 url 里的主机名
+# 可以不一致** —— IDE 的 streamableHttp MCP 客户端 url 写 http://127.0.0.1:8766/mcp，
+# 实际发出的 Host 却是 `apiserver`（IDE 内部网关名）；经本地代理 / sidecar /
+# stdio↔http 桥 / 云转发的 harness 同理。只按 Host 判定 ⇒ 这类客户端被整体 421，
+# agent 直接失能（2026-09-23 实测）。
+# ⇒ 判据改为**合取**：像浏览器 **且** Host 不在放行集合。rebinding 只能借道浏览器，
+# 非浏览器客户端不在攻击面上 —— 既不误伤，防护强度也不降。
+_HOST_LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+# FastAPI/Starlette 的 TestClient 固定用 base_url=http://testserver（httpx 约定）。
+# 冒烟测试与大量单测走 TestClient —— 不放行会把"提交前机械防线"整体打红，
+# 因此它属于白名单而非可配置开关（攻击者无法借 rebinding 使用这个名字：
+# 浏览器只会把用户正在访问的那个域名放进 Host）。
+_HOST_TESTCLIENT = "testserver"
+# ⛔ IDE 的 streamableHttp MCP 客户端（~/.workbuddy/mcp.json 里 url 写的是
+# http://127.0.0.1:8766/mcp，但实际发出的 Host 头是 `apiserver`——IDE 内部网关名，
+# 与 URL 里的 127.0.0.1 不一致）。不放行 ⇒ **全部 MCP 工具调用 421，agent 直接失能**
+# （2026-09-23 实测：`GET /wip/wip_0d3ff369` 被拒，data/logs/server.log 留证）。
+# 安全评估与 testserver 同级：rebinding 只能借道浏览器，浏览器只会把用户正在访问的
+# 那个域名放进 Host，攻击者无法让受害者浏览器把 Host 设成 apiserver。
+# 与 testserver 一样放在代码常量而非 config：属于"工具面能工作"的硬前提，
+# 不能因为某台机器缺 config.toml 而静默退化成 agent 失能。
+_HOST_IDE_MCP = "apiserver"
+# 监听地址写成通配 = 有意暴露到局域网，此时不再自动放行，必须显式配 host_whitelist
+_HOST_WILDCARD_BIND = {"0.0.0.0", "::", ""}
+# 浏览器指纹头：现代浏览器（Chrome 76+ / Firefox 90+ / Safari 16.4+）发起的请求必带
+# Sec-Fetch-*（跨站时为 Sec-Fetch-Site: cross-site），跨站 fetch/XHR 还带 Origin。
+# 任一项出现 ⇒ 请求由浏览器发出 ⇒ 才需要校验 Host。
+_BROWSER_FINGERPRINT_HEADERS = (
+    "sec-fetch-site",
+    "sec-fetch-mode",
+    "sec-fetch-dest",
+    "sec-fetch-user",
+)
+
+_allowed_hosts_cache: set[str] | None = None
+
+
+def _looks_like_browser(request) -> bool:
+    """请求是否由浏览器发出（DNS rebinding 只能借道浏览器）。
+
+    三个信号任一命中即算：Origin 头、Sec-Fetch-* 头、Mozilla 系 User-Agent。
+    非浏览器客户端（curl / httpx / 各路 MCP harness）默认都不带 ⇒ 不会被 Host 检查误伤。
+    """
+    headers = request.headers
+    if headers.get("origin"):
+        return True
+    if any(h in headers for h in _BROWSER_FINGERPRINT_HEADERS):
+        return True
+    # UA 由浏览器决定、页面 JS 改不了 ⇒ 也是可靠指纹；curl/httpx 的 UA 不含 Mozilla/
+    return headers.get("user-agent", "").startswith("Mozilla/")
+
+
+def _reset_allowed_hosts_cache() -> None:
+    """清空白名单缓存（测试或 config 热改后用；下次请求重算）"""
+    global _allowed_hosts_cache
+    _allowed_hosts_cache = None
+
+
+def _allowed_hosts() -> set[str]:
+    """当前允许的 Host 名集合（小写、不含端口）。
+
+    组成 = 回环地址 + testserver + IDE MCP 客户端名(apiserver) + 实际监听地址(非通配时)
+    + config 的 server.host_whitelist。
+    结果缓存在模块级：config.toml 改这几项需要重启后端才生效（避免每请求读盘）。
+    """
+    global _allowed_hosts_cache
+    if _allowed_hosts_cache is not None:
+        return _allowed_hosts_cache
+
+    hosts = set(_HOST_LOOPBACK) | {_HOST_TESTCLIENT, _HOST_IDE_MCP}
+    try:
+        from server.config import get_server_config
+
+        cfg = get_server_config()
+    except Exception:  # 配置不可读时不缩小放行面，退化为纯回环
+        logger.warning("[host_guard] 读取 server 配置失败，Host 白名单退化为仅回环")
+        _allowed_hosts_cache = hosts
+        return hosts
+
+    bind = str(cfg.get("host") or "").strip().lower()
+    if bind and bind not in _HOST_WILDCARD_BIND:
+        hosts.add(bind)
+
+    extra = cfg.get("host_whitelist") or []
+    if isinstance(extra, str):
+        extra = [h for h in extra.replace(",", " ").split() if h]
+    hosts.update(str(h).strip().lower() for h in extra if str(h).strip())
+
+    _allowed_hosts_cache = hosts
+    return hosts
+
+
+def _host_header_to_name(host_header: str) -> str:
+    """'evil.com:8766' / '[::1]:8766' / 'user@host:80' → 'evil.com' / '::1' / 'host'"""
+    name = host_header.strip().lower()
+    if "@" in name:  # Host 允许带 userinfo，实际不会出现在正常请求里
+        name = name.rsplit("@", 1)[1]
+    if name.startswith("["):  # IPv6 字面量
+        end = name.find("]")
+        name = name[1:end] if end > 0 else name[1:]
+    elif ":" in name:  # IPv4 或域名带端口
+        name = name.split(":", 1)[0]
+    return name.strip(".")
+
+
 def register_middleware(app):
-    """注册所有 HTTP 中间件"""
+    """注册所有 HTTP 中间件。
+
+    注册顺序 = 执行顺序（Starlette 先注册者在外层）：host_guard 放在最外层，
+    被拒请求不再进入后续中间件与路由。
+    """
+
+    @app.middleware("http")
+    async def host_guard_middleware(request, call_next):
+        """拒绝"像浏览器发起 且 Host 不在白名单"的请求（DNS rebinding 防护）。
+
+        两个条件**合取**，缺一不可：
+          1. 像浏览器（`_looks_like_browser`：Origin / Sec-Fetch-* / Mozilla 系 UA）
+          2. Host 名不在放行集合（回环 / testserver / apiserver / 监听地址 / host_whitelist）
+
+        为什么必须加条件 1：Host 与 url 里的主机名可以不一致（IDE MCP 客户端 url 写
+        127.0.0.1 却发 `apiserver`），只按 Host 判定会把这类合法客户端整体打 421。
+        rebinding 只能借道浏览器，因此"非浏览器 + 奇怪 Host"不在攻击面上 ⇒ 放行。
+        缺失 Host 头时放行 —— 浏览器对 HTTP/1.1 必带 Host，rebinding 只能借道浏览器。
+        """
+        host_header = request.headers.get("host", "")
+        if not host_header:
+            return await call_next(request)
+
+        name = _host_header_to_name(host_header)
+        if name in _allowed_hosts():
+            return await call_next(request)
+
+        if not _looks_like_browser(request):
+            logger.debug(
+                f"[host_guard] 非浏览器客户端，放行非白名单 Host={host_header!r} "
+                f"path={request.url.path}"
+            )
+            return await call_next(request)
+
+        logger.warning(
+            f"[host_guard] 拒绝非白名单 Host={host_header!r} "
+            f"path={request.url.path} method={request.method}"
+        )
+        return JSONResponse(
+            status_code=421,  # Misdirected Request：服务器不为该 Host 提供服务
+            content={
+                "error": "host_not_allowed",
+                "message": "Host 头不在白名单内（疑似 DNS rebinding）。"
+                           "本机后端仅服务 127.0.0.1/localhost。",
+                "host": name,
+            },
+        )
 
     @app.middleware("http")
     async def trace_id_middleware(request, call_next):
@@ -229,8 +388,8 @@ def register_middleware(app):
     async def http_guard_middleware(request, call_next):
         """对 agent 调用的 approval_required 端点要求 X-Approval-Token。
 
-        仅拦截带 X-Agent-Caller: true 头的请求（agent 发起）。
-        用户/GUI 请求不带此头，直接放行。
+        仅拦截 agent 发起的请求（判据见 lib.agent_identity.is_agent_caller：
+        出现 X-Agent-Caller 头且值不是否定词）。用户/GUI 请求不带此头，直接放行。
         """
         if request.method not in ("POST", "PUT", "DELETE", "PATCH"):
             return await call_next(request)
@@ -256,7 +415,11 @@ def register_middleware(app):
         if runtime_safety != "approval_required":
             return await call_next(request)
 
-        is_agent = request.headers.get("X-Agent-Caller", "").lower() == "true"
+        # 判据真源在 lib.agent_identity：客户端发的是 "v6-lite-agent"，
+        # 旧代码写死 == "true" 会把 agent 流量误判成 GUI 用户流量而直接放行。
+        from lib.agent_identity import is_agent_caller
+
+        is_agent = is_agent_caller(request.headers)
         if not is_agent:
             return await call_next(request)
 

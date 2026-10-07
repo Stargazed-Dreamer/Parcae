@@ -6,14 +6,14 @@
     HourlySummarizeAction  — 每小时整点 LLM 总结 → YYYYMMDD_HH.md
 
 场景B（下载监控）：
-    <data_drive>:/DownloadscanAction     — 每5分钟扫描下载文件夹，超阈值时分类+推送收件箱
+    DownloadScanAction     — 每5分钟扫描下载文件夹，超阈值时分类+推送收件箱
 
 数据流：
     [每分钟]    _enum_windows()           → data/activity/raw/windows_YYYYMMDD.jsonl (append)
     [每5分钟]   _capture_fullscreen() +   → data/activity/raw/screen_YYYYMMDD.jsonl (每条含VL文本)
                 remote_vl.understand()
     [每小时]    call_llm(powerful) → data/activity/hourly/YYYYMMDD_HH.md (一条总结)
-    [每5分钟]   scan <data_drive>:/Downloads → classify_with_disposition → inbox（三类：move/inspect/unknown）
+    [每5分钟]   scan Downloads → classify_with_disposition → inbox（三类：move/inspect/unknown）
 
 内部调用：Loop Action 在后端进程内运行，直接 import screen/vision/llm_pool 的底层函数，
 不通过 HTTP。同步阻塞函数用 asyncio.to_thread 包装。
@@ -42,6 +42,18 @@ def _now_iso() -> str:
 
 def _date_str() -> str:
     return datetime.now().strftime("%Y%m%d")
+
+
+def _maintain_inbox_dedupe_key(now: datetime | None = None) -> str:
+    """记忆维护告警的去重键：同一个 ISO 周只落一条。
+
+    老化数量每天都在漂移，把 stale_count 写进键等于永不合并；键里只放周界，
+    loop 每 6 小时一次的重复推送由 InboxStore 的 dedupe_key 唯一索引兜住。
+    周界翻篇后是新键，所以不会因为本周那条被 resolve 就永久静默。
+    """
+    t = now or datetime.now()
+    iso_year, iso_week, _ = t.isocalendar()
+    return f"memory:maintain_result:{iso_year}-W{iso_week:02d}"
 
 
 def _append_jsonl(path: Path, record: dict) -> None:
@@ -91,32 +103,35 @@ def _get_dir(config: dict, key: str, default: str) -> Path:
 # ==================== 系统负载检测（供 VL OCR 兜底决策） ====================
 
 def _get_system_load() -> tuple[float, float | None]:
-    """获取当前系统负载
+    """获取当前系统负载（读常驻采样中枢，不创建进程）
 
     Returns:
         (cpu_percent, gpu_percent)
-        cpu_percent: 0-100，psutil 0.1s 采样
-        gpu_percent: 0-100，无 GPU 或查询失败时为 None
+        cpu_percent: 0-100，中枢里 psutil 差分量的最近值
+        gpu_percent: 0-100，无 NVIDIA 卡或探针不可用时为 None
+
+    调用点都在 `asyncio.to_thread` 里，允许就地补采一次（NVML 单查 ~0.03ms）。
+    旧实现每次 fork 一个 nvidia-smi（~45ms + 一次进程创建），已废弃。
+    GPU 侧只支持 NVIDIA：非 NVIDIA 机器上探针判 absent → 返回 None，
+    于是高负载门只看 CPU（与旧实现"查不到 GPU"时的判定方向一致）。
     """
-    import subprocess
-    try:
-        import psutil
-        cpu = psutil.cpu_percent(interval=0.1)
-    except Exception:
-        cpu = 0.0
-    # GPU: 优先 nvidia-smi（无需 pip install 额外包）
-    gpu: float | None = None
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=2,
-        )
-        if result.returncode == 0:
-            lines = result.stdout.strip().splitlines()
-            if lines and lines[0].strip().isdigit():
-                gpu = float(lines[0].strip())
-    except Exception:
-        pass
+    from server.resource_probe import PROBE_CPU_PERCENT, PROBE_GPU_UTIL, get_resource_hub
+
+    hub = get_resource_hub()
+    cpu_sample = hub.collect_sync(PROBE_CPU_PERCENT)
+    gpu_sample = hub.collect_sync(PROBE_GPU_UTIL)
+
+    if cpu_sample is not None:
+        cpu = cpu_sample.value
+    else:
+        # 中枢没产出 CPU 样本（整段被关闭/探针未注册）：退回 psutil 直采
+        try:
+            import psutil
+
+            cpu = psutil.cpu_percent(interval=0.1)
+        except Exception:
+            cpu = 0.0
+    gpu: float | None = gpu_sample.value if gpu_sample is not None else None
     return cpu, gpu
 
 
@@ -421,13 +436,18 @@ class ScreenVLDescribeAction(Action):
             return {"success": False, "error": f"写盘失败: {e}", "vl_status": vl_status}
         # VL 成功 或 VL 失败但 OCR 兜底成功（有 answer）→ success=True
         # VL 失败且 OCR 兜底也失败（answer=None）→ success=False
-        return {
+        result = {
             "success": answer is not None,
             "vl_status": vl_status,
             "elapsed_ms": elapsed_ms,
             "signal_state": signal.get("state"),
             "ocr_fallback_used": ocr_fallback_used,
         }
+        if answer is None:
+            # 不带 error 的话，loop_manager 的失败告警只会写「错误: unknown」，
+            # 读者看不到原因（原因在此前只存在于 vl_status 里）
+            result["error"] = f"VL 与 OCR 兜底均未产出内容（vl_status={vl_status}）"
+        return result
 
 
 # ==================== HourlySummarizeAction ====================
@@ -441,6 +461,53 @@ class HourlySummarizeAction(Action):
     """
 
     action_type = "hourly_summarize"
+
+    # 占位小时里"重跑有意义"的两类：
+    #   本时段无采集数据 —— 仅当原始数据后来出现了才重跑（整点触发早于采集落盘时会误判）
+    #   本时段 LLM 调用失败 —— 配额/超时是暂时的，重启后额度恢复就该补回
+    # 内容审核触发的占位不列：重试大概率再被拒，且占位文件里已带脱敏摘要。
+    RETRY_PLACEHOLDER_MARKERS = ("本时段无采集数据", "本时段 LLM 调用失败")
+    REVISIT_WINDOW_HOURS = 48
+    REVISIT_MAX_PER_CATCHUP = 3
+
+    def pending_retry_targets(self, context: dict) -> list[float]:
+        """回溯窗口内仍是占位、但原始数据已经存在的整点 → 交给 catchup 重做。
+
+        返回的是触发时刻（整点 epoch 秒），execute 收到 catchup_target_ts 后
+        自己减一小时定位到目标时段。已成功重做的时段会写 _vN，
+        这里靠"存在 _vN 后继"判定它已经补过，不再重复排队。
+        """
+        raw_dir = _get_dir(context["config"], "raw_data_dir", "data/activity/raw")
+        hourly_dir = _get_dir(context["config"], "hourly_data_dir", "data/activity/hourly")
+        if not hourly_dir.exists():
+            return []
+        top = datetime.now().replace(minute=0, second=0, microsecond=0)
+        targets: list[float] = []
+        for k in range(1, self.REVISIT_WINDOW_HOURS + 1):
+            tick = top - timedelta(hours=k)
+            last_hour = tick - timedelta(hours=1)
+            date_str = last_hour.strftime("%Y%m%d")
+            hour_str = last_hour.strftime("%H")
+            base = hourly_dir / f"{date_str}_{hour_str}.md"
+            if not base.exists():
+                continue
+            if any(hourly_dir.glob(f"{date_str}_{hour_str}_v*.md")):
+                continue
+            try:
+                text = base.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                logger.warning(f"HourlySummarize 占位重访读文件失败 {base.name}: {e}")
+                continue
+            if not any(marker in text for marker in self.RETRY_PLACEHOLDER_MARKERS):
+                continue
+            windows = _filter_by_hour(_read_jsonl(raw_dir / f"windows_{date_str}.jsonl"), hour_str)
+            screens = _filter_by_hour(_read_jsonl(raw_dir / f"screen_{date_str}.jsonl"), hour_str)
+            if not windows and not screens:
+                continue
+            targets.append(tick.timestamp())
+            if len(targets) >= self.REVISIT_MAX_PER_CATCHUP:
+                break
+        return targets
 
     async def execute(self, context: dict) -> dict:
         raw_dir = _get_dir(context["config"], "raw_data_dir", "data/activity/raw")
@@ -560,6 +627,9 @@ class HourlySummarizeAction(Action):
                     messages,
                     temperature=0.3,
                     max_tokens=16384,
+                    # pool.call 默认 timeout=120s，16384 tokens 的长总结跑不完会被判
+                    # "真失败"直接写占位且不重试（实测跨 5 个 provider 复发）
+                    timeout=300,
                     project="loop_hourly_summary",
                     use_case="hourly_summarize",
                     retries=1,
@@ -907,7 +977,7 @@ def _format_screens_for_prompt(records: list[dict]) -> str:
     return "\n".join(lines)
 
 
-# ==================== <data_drive>:/DownloadscanAction（场景B）====================
+# ==================== DownloadScanAction（场景B）====================
 
 # 文本类扩展名（直接读取内容）
 _TEXT_EXTS = {
@@ -978,7 +1048,7 @@ def _extract_file_content(file_path: Path, max_chars: int = 500) -> str | None:
         return None
 
 
-class <data_drive>:/DownloadscanAction(Action):
+class DownloadScanAction(Action):
     """扫描下载文件夹，文件数超阈值时分类并推送收件箱
 
     逻辑（ticket 08 起支持文件夹）：
@@ -1002,7 +1072,7 @@ class <data_drive>:/DownloadscanAction(Action):
         from server.inbox import get_store
 
         config = context["config"]
-        watch_dir = Path(config.get("watch_dir", "<data_drive>:\<system_data_root>/<data_drive>:/Downloads"))
+        watch_dir = Path(config.get("watch_dir", "<data_drive>:/<system_data_root>/Downloads"))
         threshold = config.get("file_count_threshold", 15)
         batch_size = config.get("classify_batch_size", 50)
 
@@ -1092,7 +1162,7 @@ class <data_drive>:/DownloadscanAction(Action):
             entries = [e for e in entries if not sm_instance.is_processed(e["path"])]
             skipped_processed = before_count - len(entries)
             if skipped_processed > 0:
-                logger.info(f"<data_drive>:/Downloadscan 跳过 {skipped_processed} 个已处理条目")
+                logger.info(f"DownloadScan 跳过 {skipped_processed} 个已处理条目")
 
         # 5. 分流文件/文件夹（ticket 08：文件夹走 classify_folder 类交互式协议）
         folder_batch_size = int(config.get("folder_batch_size", 10))
@@ -1115,7 +1185,7 @@ class <data_drive>:/DownloadscanAction(Action):
                 None,          # model=None，由 pool 在 tier 匹配的 key 中选
             )
         except Exception as e:
-            logger.exception("<data_drive>:/Downloadscan 分类失败")
+            logger.exception("DownloadScan 分类失败")
             return {"success": False, "error": f"分类失败: {e}"}
 
         # 5.1 文件夹分类（ticket 08：走 classify_folder 类交互式协议，仅用文件名+扩展名分布）
@@ -1123,7 +1193,7 @@ class <data_drive>:/DownloadscanAction(Action):
         if folder_entries:
             folders_to_classify = folder_entries[:folder_batch_size]
             logger.info(
-                f"<data_drive>:/Downloadscan 文件夹分类: {len(folders_to_classify)}/{len(folder_entries)} 个"
+                f"DownloadScan 文件夹分类: {len(folders_to_classify)}/{len(folder_entries)} 个"
             )
             for folder in folders_to_classify:
                 try:
@@ -1157,7 +1227,7 @@ class <data_drive>:/DownloadscanAction(Action):
                     folder_predictions.append(folder_pred)
                 except Exception as e:
                     logger.warning(
-                        f"<data_drive>:/Downloadscan 文件夹分类失败 {folder['filename']}: {e}"
+                        f"DownloadScan 文件夹分类失败 {folder['filename']}: {e}"
                     )
                     folder_predictions.append({
                         "filename": folder["filename"],
@@ -1169,7 +1239,7 @@ class <data_drive>:/DownloadscanAction(Action):
                         "reason": f"分类异常: {e}",
                     })
             predictions.extend(folder_predictions)
-            logger.info(f"<data_drive>:/Downloadscan 文件夹分类完成: {len(folder_predictions)} 个")
+            logger.info(f"DownloadScan 文件夹分类完成: {len(folder_predictions)} 个")
 
         # ===== Phase 2: 内容增强再分类（仅 inspect/unknown，仅 privacy_safe 模型）=====
         content_aware = config.get("content_aware", False)
@@ -1189,7 +1259,7 @@ class <data_drive>:/DownloadscanAction(Action):
             if phase2_files:
                 phase2_limited = phase2_files[:content_max_files]
                 logger.info(
-                    f"<data_drive>:/Downloadscan Phase2: 提取 {len(phase2_limited)}/{len(phase2_files)} 个文件内容"
+                    f"DownloadScan Phase2: 提取 {len(phase2_limited)}/{len(phase2_files)} 个文件内容"
                 )
                 content_map: dict[str, str] = {}
                 for pred in phase2_limited:
@@ -1198,7 +1268,7 @@ class <data_drive>:/DownloadscanAction(Action):
                         continue
                     # 路径遍历防护：fname 来自 LLM/predictor 输出，必须为纯文件名
                     if "/" in fname or "\\" in fname or fname.startswith(".."):
-                        logger.warning(f"<data_drive>:/Downloadscan Phase2: 跳过可疑文件名 '{fname}'")
+                        logger.warning(f"DownloadScan Phase2: 跳过可疑文件名 '{fname}'")
                         continue
                     fp = watch_dir / fname
                     if not fp.exists() or not fp.is_file():
@@ -1227,14 +1297,14 @@ class <data_drive>:/DownloadscanAction(Action):
                             if pred["filename"] in updated:
                                 pred.update(updated[pred["filename"]])
                         logger.info(
-                            f"<data_drive>:/Downloadscan Phase2 完成: {len(updated)} 个文件基于内容重新分类"
+                            f"DownloadScan Phase2 完成: {len(updated)} 个文件基于内容重新分类"
                         )
                     except Exception as e:
-                        logger.warning(f"<data_drive>:/Downloadscan Phase2 分类失败，保留 Phase1 结果: {e}")
+                        logger.warning(f"DownloadScan Phase2 分类失败，保留 Phase1 结果: {e}")
                 else:
-                    logger.info("<data_drive>:/Downloadscan Phase2: 未能提取到任何文件内容")
+                    logger.info("DownloadScan Phase2: 未能提取到任何文件内容")
             else:
-                logger.info("<data_drive>:/Downloadscan Phase2: 无 inspect/unknown 文件，跳过")
+                logger.info("DownloadScan Phase2: 无 inspect/unknown 文件，跳过")
 
         # 6. 按 disposition 分组推送 inbox
         groups: dict[str, list] = {"move": [], "inspect": [], "unknown": []}
@@ -1264,7 +1334,7 @@ class <data_drive>:/DownloadscanAction(Action):
             pushed += 1
 
         logger.info(
-            f"<data_drive>:/Downloadscan 完成: {len(entries)} 文件, 分类 {len(predictions)}, "
+            f"DownloadScan 完成: {len(entries)} 文件, 分类 {len(predictions)}, "
             f"推送 {pushed} 条 inbox (move={len(groups['move'])} inspect={len(groups['inspect'])} unknown={len(groups['unknown'])})"
         )
         return {
@@ -1408,7 +1478,7 @@ class TodosTriggerCheckAction(Action):
         import os
 
         from server.todos.router import get_todos_store
-        from server.user_message import add_message
+        from server.user_message import ORIGIN_AUTO_TRIGGER, add_message
 
         config = context["config"]
         check_interval = int(config.get("check_interval", 300))
@@ -1489,7 +1559,9 @@ class TodosTriggerCheckAction(Action):
                         title = todo.get("title", todo["id"])
                         add_message(
                             f"[触发任务] '{title}' 已满足触发条件: {result.get('reason', '')}。"
-                            f"请处理后调 todos_mark_done 重置。"
+                            f"请处理后调 todos_mark_done 重置。",
+                            # T11：到期任务自动注入的通知，不是用户刚下的指令
+                            origin=ORIGIN_AUTO_TRIGGER,
                         )
                         logger.info(f"TodosTriggerCheck 触发 {todo['id']}: {result.get('reason')}")
                         break  # 一个文件触发即可，避免同一 todo 重复触发
@@ -1518,7 +1590,7 @@ class ScreenSummaryTriggerAction(Action):
     action_type = "screen_summary_trigger"
 
     async def execute(self, context: dict) -> dict:
-        from server.user_message import add_message
+        from server.user_message import ORIGIN_SYSTEM_REMINDER, add_message
 
         config = context["config"]
         raw_dir = _get_dir(config, "raw_data_dir", "data/activity/raw")
@@ -1558,7 +1630,9 @@ class ScreenSummaryTriggerAction(Action):
         add_message(
             f"[今日总结提醒] 当日屏幕记录已达阈值 "
             f"(records={record_count}, chars={total_chars})。"
-            f"建议调 agent_guide(task_type='system.task_closure') 生成今日活动总结。"
+            f"建议调 agent_guide(task_type='system.task_closure') 生成今日活动总结。",
+            # T11：系统提醒，不是用户指令
+            origin=ORIGIN_SYSTEM_REMINDER,
         )
         try:
             marker_path.write_text(
@@ -1588,18 +1662,21 @@ def _load_optional_actions(manager) -> None:
     遍历 workspace/*/loop_actions.py 模块，调用约定的 register(manager) 函数。
     组件不存在或无 loop_actions 模块时静默跳过。主代码库不直接 import 任何
     workspace 组件，删除 workspace/<component>/ 后自动跳过注册。
+
+    用目录扫描而非 pkgutil.iter_modules：后者只枚举带 __init__.py 的包，
+    组件目录按约定不带 __init__.py（见 _load_optional_loop_defs 同款扫描）。
     """
     import importlib
-    import pkgutil
-    try:
-        import workspace as _ws
-    except ImportError:
+
+    from server.component_manifest import _WORKSPACE_DIR
+
+    if not _WORKSPACE_DIR.exists():
         return
-    for comp_info in pkgutil.iter_modules(_ws.__path__):
-        if comp_info.name.startswith('_'):
+    for child in sorted(_WORKSPACE_DIR.iterdir()):
+        if not child.is_dir() or child.name.startswith('_') or child.name.startswith('.'):
             continue
         try:
-            mod = importlib.import_module(f'workspace.{comp_info.name}.loop_actions')
+            mod = importlib.import_module(f'workspace.{child.name}.loop_actions')
         except ImportError:
             continue
         if hasattr(mod, 'register'):
@@ -1683,38 +1760,38 @@ class MemoryMaintainAction(Action):
         validate = result.get("validate", {})
 
         # 仅当存在 stale 记忆时推 inbox 告警（archived=1 是 LLM 常态建议，不算待审查事件）
-        # 去重：若 inbox 已有 pending 的 memory 维护告警且 stale_count 未变化，跳过避免刷屏
+        # 去重交给 InboxStore 的 dedupe_key（同周只落一条），不再由调用方扫 pending 比对
         stale_count = aging.get("stale_count", 0)
         archived = validate.get("archive", 0)
         if stale_count > 0:
             try:
                 from server.inbox import get_store
                 store = get_store()
-                existing = store.list(status="pending", source="memory", limit=10)
-                already_pushed = any(
-                    item.get("payload", {}).get("aging", {}).get("stale_count") == stale_count
-                    for item in existing
-                )
-                if not already_pushed:
-                    store.create({
-                        "source": "memory",
-                        "category": "maintain_result",
-                        "title": f"记忆维护告警: {stale_count} 条 stale, {archived} 条建议归档",
-                        "description": (
-                            f"老化扫描: {stale_count} 条记忆超过 "
-                            f"{aging.get('stale_threshold_days', 7)} 天未更新。\n"
-                            f"LLM 验证: {validate.get('validated', 0)} 条，"
-                            f"其中 keep={validate.get('keep', 0)}, "
-                            f"update={validate.get('update', 0)}, "
-                            f"archive={archived}。\n"
-                            f"建议归档的记忆需要用户确认后删除。"
-                        ),
-                        "payload": {
-                            "aging": aging,
-                            "validate": validate,
-                            "last_run": result.get("last_run"),
-                        },
-                    })
+                created = store.create({
+                    "source": "memory",
+                    "category": "maintain_result",
+                    "title": f"记忆维护告警: {stale_count} 条 stale, {archived} 条建议归档",
+                    "description": (
+                        f"老化扫描: {stale_count} 条记忆超过 "
+                        f"{aging.get('stale_threshold_days', 7)} 天未更新。\n"
+                        f"LLM 验证: {validate.get('validated', 0)} 条，"
+                        f"其中 keep={validate.get('keep', 0)}, "
+                        f"update={validate.get('update', 0)}, "
+                        f"archive={archived}。\n"
+                        f"建议归档的记忆需要用户确认后删除。"
+                    ),
+                    "payload": {
+                        "aging": aging,
+                        "validate": validate,
+                        "last_run": result.get("last_run"),
+                    },
+                    "dedupe_key": _maintain_inbox_dedupe_key(),
+                })
+                if created.get("deduplicated"):
+                    logger.info(
+                        "本周已有记忆维护告警 (id=%s)，跳过重复推送 (stale=%d)",
+                        created.get("id"), stale_count,
+                    )
             except Exception as e:
                 logger.warning(f"MemoryMaintain 推 inbox 失败: {e}")
 
@@ -1920,6 +1997,9 @@ class DailySummarizeAction(Action):
                     messages,
                     temperature=0.3,
                     max_tokens=16384,
+                    # 同 hourly：pool.call 默认 timeout=120s，24 小时合并的长总结跑不完
+                    # 会被判"真失败"直接写占位且不重试（实测 09-29 05:32 daily timeout）
+                    timeout=300,
                     project="loop_daily_summary",
                     use_case="hourly_summarize",  # 复用同一 use_case tier 配额
                     retries=1,
@@ -2142,6 +2222,8 @@ class HeadlessSessionAction(Action):
                 main_output=main_result.last_assistant_messages,
                 trigger_text=trigger_text,
                 config=config,
+                # T13：judge 的输入不再只有对话文本，还要有主 agent 的执行账本
+                execution_evidence=main_result.execution_evidence,
             )
         except Exception as e:
             logger.exception("HeadlessSession %s: run_judge_agent 异常", task_id)
@@ -2155,9 +2237,13 @@ class HeadlessSessionAction(Action):
                 "success": False, "error": f"run_judge_agent 异常: {e}",
                 "main_session_id": main_session_id, "judge_session_id": "",
                 "judge_verdict": "uncertain",
+                # 验收自己没跑成 → 这轮的结局不明，不该按"动作又失败一次"堆向暂停
+                "outcome_unknown": True,
             }
 
-        # 7. verdict != "success" → 整体 failed（uncertain 也算 failed）
+        # 7. verdict != "success" → 整体不算成功。
+        #    T18/T13：uncertain 单列为"结局不明"（证据不足），failed 才是执行失败；
+        #    前者计 fail_count 但不触发 auto_pause，并由调度器按副作用档决定要不要重跑。
         overall_success = (judge_result.verdict == "success")
 
         # 8. 写 memory + wip + one_shot pause
@@ -2180,6 +2266,9 @@ class HeadlessSessionAction(Action):
         }
         if not overall_success:
             result["error"] = f"judge verdict={judge_result.verdict}: {judge_result.reason}"
+        if judge_result.verdict == "uncertain":
+            # 证据不足 ≠ 失败：交给调度器按 unknown 档处置（不自动重跑不可逆动作 + 推 inbox）
+            result["outcome_unknown"] = True
         return result
 
     async def _after_run(
@@ -2588,7 +2677,7 @@ def register_loop_actions(manager) -> None:
     manager.register_action("screen_vl", ScreenVLDescribeAction())
     manager.register_action("hourly_summarize", HourlySummarizeAction())
     manager.register_action("daily_summarize", DailySummarizeAction())
-    manager.register_action("download_scan", <data_drive>:/DownloadscanAction())
+    manager.register_action("download_scan", DownloadScanAction())
     manager.register_action("cleanup_activity", CleanupActivityAction())
     manager.register_action("todos_trigger_check", TodosTriggerCheckAction())
     manager.register_action("screen_summary_trigger", ScreenSummaryTriggerAction())

@@ -26,7 +26,8 @@ class SemanticSearch:
 
     def __init__(self, store: MemoryStore, embedding_engine: EmbeddingEngine,
                  alpha: float = 0.5, vector_top_k: int = 10, bm25_top_k: int = 10,
-                 tracer: "SearchTracer | None" = None):
+                 tracer: "SearchTracer | None" = None,
+                 min_vector_similarity: float = 0.30):
         """
         Args:
             store: MemoryStore 实例
@@ -35,6 +36,10 @@ class SemanticSearch:
             vector_top_k: 向量检索返回数
             bm25_top_k: BM25 检索返回数
             tracer: SearchTracer 实例（可选，None 表示不追踪）
+            min_vector_similarity: 纯向量命中的绝对相似度下限（HONEST_EMPTY，T18）。
+                融合分数是按本次最大值归一的，"第一名"永远是 1.0，所以**相对分数
+                当不了门槛**——只能用原始余弦相似度判"到底有没有正证据"。
+                BM25 命中（词真的在文档里）不设这道门槛。
         """
         self.store = store
         self.embedding = embedding_engine
@@ -43,8 +48,11 @@ class SemanticSearch:
         self.vector_top_k = vector_top_k
         self.bm25_top_k = bm25_top_k
         self.tracer = tracer  # 可选，None 表示不追踪
+        self.min_vector_similarity = min_vector_similarity
         # 最近一次 trace_id（供 EvidenceLedger 关联，单线程安全）
         self._last_trace_id: int | None = None
+        # 最近一次被门槛挡掉的候选数（HONEST_EMPTY 留痕用，非打分依据）
+        self._last_honest_empty_dropped: int = 0
 
     def index_message(self, message_id: int, content: str) -> None:
         """为消息建立完整索引（BM25 + 向量）"""
@@ -60,6 +68,26 @@ class SemanticSearch:
                 self._index_vector(message_id, content)
             except Exception as e:
                 logger.warning(f"向量索引失败 (msg={message_id}): {e}")
+
+    def reindex_message(self, message_id: int, content: str) -> None:
+        """原地重建一条消息的索引（先清旧词/旧向量，再重建）。v6 新增。
+
+        为什么不能只调 ``index_message``：
+        - BM25 侧 ``upsert_bm25_term`` 是 **tf 累加**、且旧内容独有的词不会自动消失；
+        - 向量侧 ``_index_vector`` 按 ``(message_id, text_hash)`` 去重，换内容后会
+          新增一行而不是替换 —— 旧向量留在库里，等于旧内容仍可被语义召回。
+
+        两条都必须先显式删除，否则"当前快照"的索引会退化成新旧内容的并集。
+        """
+        try:
+            self.store.delete_bm25_terms_by_message(message_id)
+        except Exception as e:
+            logger.warning(f"清理旧 BM25 词条失败 (msg={message_id}): {e}")
+        try:
+            self.store.delete_vectors_by_message(message_id)
+        except Exception as e:
+            logger.warning(f"清理旧向量失败 (msg={message_id}): {e}")
+        self.index_message(message_id, content)
 
     def search(self, query: str, top_k: int = 10,
                since: float | None = None, until: float | None = None,
@@ -157,10 +185,28 @@ class SemanticSearch:
                 "score": round(score, 4),
                 "bm25_score": round(bm25_norm, 4),
                 "vector_score": round(vec_norm, 4),
+                # HONEST_EMPTY 用原始信号判"有没有正证据"，不用归一后的相对分
+                "raw_bm25_score": round(bm25_scores.get(mid, 0.0), 6),
+                "raw_vector_similarity": round(vector_scores.get(mid, -1.0), 6),
                 "content": msg["content"][:500],
                 "timestamp": msg["timestamp"],
                 "source": msg["source"],
             })
+
+        # T18 HONEST_EMPTY：词没命中、相似度又低于绝对下限的候选，是"看起来像"
+        # 而不是"有证据"。宁可返回空，也不给它一个位置去主导推理。
+        before_honest = len(combined)
+        combined = [
+            c for c in combined
+            if c["raw_bm25_score"] > 0
+            or c["raw_vector_similarity"] >= self.min_vector_similarity
+        ]
+        self._last_honest_empty_dropped = before_honest - len(combined)
+        if self._last_honest_empty_dropped:
+            logger.info(
+                "HONEST_EMPTY: 过滤掉 %d 条无正证据候选（向量相似度 < %.2f 且 BM25 未命中）",
+                self._last_honest_empty_dropped, self.min_vector_similarity,
+            )
 
         combined.sort(key=lambda x: x["score"], reverse=True)
         # 记录融合结果

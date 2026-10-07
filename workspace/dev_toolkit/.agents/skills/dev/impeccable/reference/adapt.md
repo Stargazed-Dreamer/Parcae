@@ -153,7 +153,7 @@ Choose appropriate breakpoints:
 
 ### Content Adaptation
 
-- Use `display: none` sparingly (still <data_drive>:/Downloads)
+- Use `display: none` sparingly (still downloads)
 - Progressive enhancement (core content first, enhancements on larger screens)
 - Lazy loading for off-screen content
 - Responsive images (`srcset`, `picture` element)

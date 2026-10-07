@@ -449,7 +449,12 @@ def _insert_section_content(body: str, section: str, content: str) -> tuple[str,
 
     返回 (new_body, section_found)。section_found=False 表示该 section 在 body 中不存在。
     """
-    pattern = re.compile(rf"^##\s+{re.escape(section)}\s*$", re.MULTILINE)
+    # 标题允许带括号注解。实际 lessons 文件里 11/16 个写的是「## 已知坑（与正常行为区分）」，
+    # 只匹配裸标题会让默认 section 在多数已有文件上永远写不进去（闭环失效）。
+    # 只放宽到括号注解，不放宽到任意后缀——否则「已知坑」会误匹配「已知坑详解」这类不同章节。
+    pattern = re.compile(
+        rf"^##\s+{re.escape(section)}(?:\s*[（(][^）)\n]*[）)])?\s*$", re.MULTILINE
+    )
     m = pattern.search(body)
     if not m:
         return body, False
@@ -690,11 +695,15 @@ async def browser_write_lesson(req: WriteLessonRequest):
 
     new_body, found = _insert_section_content(body, req.section, req.content)
     if not found:
+        # 报错必须给"这个文件里真有什么标题"。原先只列 _ALLOWED_SECTIONS，
+        # 而那些名字在这个文件里可能一个都不存在——agent 照提示换着试会原地打转。
+        present = [h.strip() for h in re.findall(r"^##\s+(.+?)\s*$", body, re.MULTILINE)]
         return WriteLessonResponse(
             success=False, action="error", file_path="", domain=req.domain,
             section=req.section, char_count=0, aliases_merged=0,
-            error=f"section {req.section!r} not found in existing file {file_path.name}. "
-                  f"Section must exist before appending. Use one of: {list(_ALLOWED_SECTIONS)}",
+            error=f"section {req.section!r} has no matching heading in {file_path.name}. "
+                  f"Headings actually in this file: {present}. "
+                  f"Pick one of those, or add the heading to the file first.",
         )
 
     new_body = _update_meta_dates(new_body, today)

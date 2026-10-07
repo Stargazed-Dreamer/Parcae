@@ -10,8 +10,6 @@
 
 import time
 
-import pytest
-
 import server.screen.uia as uia_mod
 from server.screen.uia import hit_test_clickable
 
@@ -297,8 +295,8 @@ class TestBatchClickFusion:
 # ========== B. UIA 能力标志 ==========
 
 class FakeRect:
-    def __init__(self, l, t, r, b):
-        self.left, self.top, self.right, self.bottom = l, t, r, b
+    def __init__(self, left, top, right, bottom):
+        self.left, self.top, self.right, self.bottom = left, top, right, bottom
 
 
 class FakeCtrl:
@@ -448,6 +446,7 @@ class TestScreenZoom:
 
     def test_zoom_path_output(self, client):
         import os
+
         from server.screen import routes
         routes._record_frame("zoom_snap_2", _make_png())
         resp = client.post("/screen/zoom", json={
@@ -587,8 +586,8 @@ class TestScreenOcrFrameReuse:
 
     def test_capture_records_frame(self, client):
         """capture_screen 成功后帧进缓存（zoom 可引用其 snapshot_id）"""
-        from server.screen import routes as routes_mod
         from server.screen import routes
+        from server.screen import routes as routes_mod
         # 真实截图链路在 conftest 中如何 mock 不确定——直接调 _record 验证契约即可
         snap = "cap_snap_x"
         routes_mod._record_frame(snap, _make_png())
@@ -656,8 +655,8 @@ class TestClipboard:
 
     def test_read_write_403_without_session(self, client, monkeypatch):
         """无会话授权 → 403（读写剪贴板都受会话保护）"""
-        from server.screen.session import reset_session_manager
         from server.screen import clipboard_endpoints as ce
+        from server.screen.session import reset_session_manager
 
         monkeypatch.setattr(ce, "_read_clipboard_text",
                             lambda: (True, "t", True, ""))

@@ -19,6 +19,7 @@ from client.core.agent.builtin_tools._web_anti_crawl import (
 from client.core.agent.builtin_tools.base import BuiltinTool
 from client.core.agent.builtin_tools.ssrf_guard import check_url
 from client.core.agent.types import ToolCall, ToolResult, ToolResultVariant
+from lib.agent_identity import AGENT_CALLER_HEADER_VALUE
 
 
 class WebFetchTool(BuiltinTool):
@@ -68,7 +69,7 @@ class WebFetchTool(BuiltinTool):
                     f"{self._base_url}/web/fetch",
                     params={"url": url},
                     timeout=20,
-                    headers={"X-Agent-Caller": "v6-lite-agent"},
+                    headers={"X-Agent-Caller": AGENT_CALLER_HEADER_VALUE},
                 )
                 if resp.status_code == 200:
                     return self._success(tool_call, resp.text)

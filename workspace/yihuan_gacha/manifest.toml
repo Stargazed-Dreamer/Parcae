@@ -38,6 +38,8 @@ index_section = "components"
 # "raw/" 是目录 → 备份时打 zip（raw_YYYYMMDD_HHMMSS.zip），含原始 API 响应（不可再生）
 # 消费方：tools/backup_workspace.py → backups/workspace/yihuan_gacha/<basename>_<ts>.<ext|zip>
 # 备份频次见 config.toml [loops.workspace_backup]
+# backup/ = 2026-09-30 清洗过程的中间快照（用户 2026-10-02 从 temp 移入，已在 .gitignore）；
+#           是「数据库被写坏」时的近端保险，故意不重复纳入本清单（避免备份套备份）
 paths = ["yihuan_gacha_database.json", "yihuan_gacha_summary.json", "yihuan_gacha_final.json", "yihuan_gacha_review.json", "raw/"]
 
 [tests]

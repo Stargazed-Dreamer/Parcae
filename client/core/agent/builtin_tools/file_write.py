@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from client.core.agent.builtin_tools._write_backup import backup_before_overwrite
 from client.core.agent.builtin_tools.base import BuiltinTool, is_path_safe
 from client.core.agent.types import ToolCall, ToolResult
 
 
 class FileWriteTool(BuiltinTool):
-    """写文件（覆盖模式），自动创建父目录。"""
+    """写文件（覆盖模式），自动创建父目录。
+
+    T19：覆盖已存在的文件前先留一份可回滚副本——safety 注释里的"可逆"
+    从今往后是真的可逆。
+    """
 
     operation_id = "file_write"
 
@@ -23,12 +28,16 @@ class FileWriteTool(BuiltinTool):
         try:
             from pathlib import Path
             p = Path(file_path)
+            backup_path = backup_before_overwrite(p)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
             byte_count = len(content.encode("utf-8"))
+            message = f"Wrote {byte_count} bytes to {file_path}"
+            if backup_path:
+                message += f"（覆盖前的旧内容副本：{backup_path}）"
             return self._success(
                 tool_call,
-                f"Wrote {byte_count} bytes to {file_path}",
+                message,
             )
         except PermissionError:
             return self._error(

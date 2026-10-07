@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger("localagent.mcp_gateway")
@@ -10,6 +11,60 @@ logger = logging.getLogger("localagent.mcp_gateway")
 # 响应大小保护：单个 TextContent 超阈值时截断 + 强制上报用户
 MAX_MCP_RESPONSE_CHARS = 50000   # 单个 TextContent 硬上限
 MCP_TRUNCATE_TAIL_CHARS = 2000   # 截断时保留尾部字符数
+# 超长 base64 段的识别门限：低于这个长度的连续 base64 字符多半是正常文本/哈希
+MIN_B64_RUN_CHARS = 2000
+
+_B64_RUN_RE = re.compile(rf"[A-Za-z0-9+/]{{{MIN_B64_RUN_CHARS},}}={{0,2}}")
+
+
+def _collapse_base64_runs(text: str) -> str:
+    """把超长 base64 段折成占位符。
+
+    通用截断"保留前 N 字符"对 base64 无效——它没有结构，头部和中部一样脏，
+    保留 47600 字符等于把污染原样送进 LLM 上下文。必须在长度判断之前做，
+    折完可能就根本不超阈值了。
+    """
+    def _sub(m: re.Match[str]) -> str:
+        return f"<base64 omitted: {len(m.group(0))} chars>"
+
+    return _B64_RUN_RE.sub(_sub, text)
+
+
+def _scrub_image_block(node: Any) -> tuple[Any, str | None, str | None]:
+    """深度受限地找第一个 {mcp_image_block: True, image: "..."} 字典并摘掉那两个键。
+
+    返回 (scrubbed_node, image_b64, mime)；未找到时 image_b64 为 None。
+
+    这里原先是枚举两种形状（顶层 / result 嵌套）。按形状枚举的问题是任何新包装层都会
+    静默绕过转换——browser_screenshot 把标记放在 response["data"] 下，四层防御一起漏，
+    一次调用往上下文塞了 181424 字符。改成递归查找后，包装层怎么加都不需要改这里。
+    """
+    if isinstance(node, dict):
+        if node.get("mcp_image_block") and isinstance(node.get("image"), str):
+            image = node["image"]
+            mime = node.get("mime_type", "image/png")
+            summary = {k: v for k, v in node.items() if k not in ("image", "mcp_image_block")}
+            return summary, image, mime
+        out: dict[str, Any] = {}
+        found_image: str | None = None
+        found_mime: str | None = None
+        for k, v in node.items():
+            nv, image, mime = _scrub_image_block(v)
+            out[k] = nv
+            if found_image is None and image is not None:
+                found_image, found_mime = image, mime
+        return out, found_image, found_mime
+    if isinstance(node, list):
+        out_list: list[Any] = []
+        found_image = None
+        found_mime = None
+        for v in node:
+            nv, image, mime = _scrub_image_block(v)
+            out_list.append(nv)
+            if found_image is None and image is not None:
+                found_image, found_mime = image, mime
+        return out_list, found_image, found_mime
+    return node, None, None
 
 
 def _approval_body(args) -> bytes:
@@ -273,11 +328,10 @@ def setup_mcp(app):
                         )
             except Exception as e:
                 logger.warning(f"MCP 响应紧凑化失败（回退为原响应）: {e}")
-            # 对返回 mcp_image_block=True 的工具做 ImageContent 转换
-            # 支持两种结构：
-            #   ① 直连工具：顶层 {mcp_image_block, image, ...}
-            #   ② 经 localagent_advanced_tool 网关：{success, tool, result: {mcp_image_block, image, ...}}
-            #      网关把响应包成嵌套结构，若不在此展开，base64 会泄漏到 TextContent 撑爆上下文
+            # 对返回 mcp_image_block=True 的工具做 ImageContent 转换。
+            # 形状不限：递归找第一个 {mcp_image_block, image} 字典（见 _scrub_image_block）。
+            # 原先枚举「顶层 / result 嵌套」两种形状，browser_screenshot 把标记放在
+            # response["data"] 下就两个分支都不命中，base64 直接泄漏进 TextContent。
             try:
                 for content in result:
                     if getattr(content, "type", None) != "text":
@@ -288,37 +342,20 @@ def setup_mcp(app):
                         continue
                     if not isinstance(data, dict):
                         continue
-                    # ① 直连工具：顶层 mcp_image_block
-                    if data.get("mcp_image_block") and data.get("image"):
-                        summary = {k: v for k, v in data.items() if k not in ("image", "mcp_image_block")}
-                        return [
-                            _mcp_types.TextContent(
-                                type="text",
-                                text=json.dumps(summary, ensure_ascii=False),
-                            ),
-                            _mcp_types.ImageContent(
-                                type="image",
-                                data=data["image"],
-                                mimeType=data.get("mime_type", "image/png"),
-                            ),
-                        ]
-                    # ② 网关包裹：data.result.mcp_image_block
-                    nested = data.get("result")
-                    if isinstance(nested, dict) and nested.get("mcp_image_block") and nested.get("image"):
-                        nested_summary = {k: v for k, v in nested.items() if k not in ("image", "mcp_image_block")}
-                        wrapper_summary = {k: v for k, v in data.items() if k != "result"}
-                        wrapper_summary["result"] = nested_summary
-                        return [
-                            _mcp_types.TextContent(
-                                type="text",
-                                text=json.dumps(wrapper_summary, ensure_ascii=False),
-                            ),
-                            _mcp_types.ImageContent(
-                                type="image",
-                                data=nested["image"],
-                                mimeType=nested.get("mime_type", "image/png"),
-                            ),
-                        ]
+                    summary, image_b64, mime = _scrub_image_block(data)
+                    if image_b64 is None:
+                        continue
+                    return [
+                        _mcp_types.TextContent(
+                            type="text",
+                            text=json.dumps(summary, ensure_ascii=False),
+                        ),
+                        _mcp_types.ImageContent(
+                            type="image",
+                            data=image_b64,
+                            mimeType=mime or "image/png",
+                        ),
+                    ]
             except Exception as e:
                 logger.warning(f"MCP image-block 转换失败（回退为文本）: {e}")
 
@@ -335,21 +372,34 @@ def setup_mcp(app):
             except Exception as e:
                 logger.warning(f"用户补充指令注入失败: {e}")
 
-            # 响应大小保护：单个 TextContent 超阈值时截断 + 强制上报用户
+            # 响应大小保护：先折掉超长 base64 段，仍超阈值才走通用截断 + 强制上报用户
             try:
                 for i, content in enumerate(result):
                     if getattr(content, "type", None) != "text":
                         continue
-                    text = getattr(content, "text", "")
-                    original_len = len(text)
-                    if original_len <= MAX_MCP_RESPONSE_CHARS:
+                    raw_text = getattr(content, "text", "")
+                    original_len = len(raw_text)
+                    text = _collapse_base64_runs(raw_text)
+                    if len(text) != original_len:
+                        logger.warning(
+                            f"MCP base64 折叠: tool={tool_name} "
+                            f"{original_len} -> {len(text)}chars"
+                        )
+                    if len(text) <= MAX_MCP_RESPONSE_CHARS:
+                        if text != raw_text:
+                            result[i] = _mcp_types.TextContent(type="text", text=text)
                         continue
                     head = text[:MAX_MCP_RESPONSE_CHARS - MCP_TRUNCATE_TAIL_CHARS - 400]
                     tail = text[-MCP_TRUNCATE_TAIL_CHARS:]
-                    omitted = original_len - len(head) - len(tail)
+                    omitted = len(text) - len(head) - len(tail)
+                    collapsed_note = (
+                        f"，折掉 base64 后 {len(text)} 字符"
+                        if len(text) != original_len else ""
+                    )
                     marker = (
-                        f"\n\n... [响应已截断: 省略 {omitted} 字符，共 {original_len} 字符] ...\n"
-                        f"【必须上报用户】工具 `{tool_name}` 返回内容过大（{original_len} 字符）已被截断。\n"
+                        f"\n\n... [响应已截断: 省略 {omitted} 字符，共 {len(text)} 字符] ...\n"
+                        f"【必须上报用户】工具 `{tool_name}` 返回内容过大"
+                        f"（原始 {original_len} 字符{collapsed_note}）已被截断。\n"
                         f"- 禁止静默尝试其它方案（如缩小参数重试、换工具、改用 exec_python 发 HTTP）。\n"
                         f"- 请立即向用户报告：工具名、原始大小、截断位置，并请求用户指导（是否需要 summary=true 精简模式、或缩小查询范围、或接受截断）。\n"
                         f"- 用户未明确指示前，不要继续基于截断内容做决策。\n\n"

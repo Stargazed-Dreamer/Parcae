@@ -16,9 +16,11 @@
 
 import json
 import logging
+import os
 import re
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import APIRouter, Query
@@ -52,6 +54,22 @@ _history_lock = threading.Lock()
 _history: list = []  # 最近 HISTORY_MAX_SIZE 次调用记录
 _history_loaded = False
 
+# 2026-10-01 磁盘 IO 审计修复：落盘改用「单线程池」。
+# 原实现每次调用都 `threading.Thread(daemon=True).start()`：
+#   ① 并发 replace 到同一目标在 Windows 上会失败（实测并发 4/8/12 线程均产生残留），
+#      而失败被 `except OSError: pass` 静默吞掉 ⇒ data/agent_guide/ 堆积 103 个 / 1.7 MB；
+#   ② 线程不复用，每次 /guide 都新建一个；
+#   ③ daemon 线程在进程退出时被强杀，write 与 replace 之间被打断同样会留残留。
+# 单线程池天然串行（不互踩）、复用线程，且线程非 daemon ⇒ 解释器退出时会 join。
+_save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="guide-save")
+
+
+def _on_save_done(fut: "Future[None]") -> None:
+    """落盘任务异常兜底：原 daemon 线程里的异常无人接管，这里至少留下日志。"""
+    exc = fut.exception()
+    if exc is not None:
+        logger.warning("agent_guide 落盘异常: %s", exc)
+
 
 def _ensure_usage_loaded():
     """懒加载 usage 数据（避免 import 副作用）"""
@@ -72,15 +90,22 @@ def _ensure_usage_loaded():
 
 
 def _save_usage(snapshot: dict):
-    """原子落盘 usage 快照（6-4：接收持锁快照，线程内不再读共享 _usage）"""
+    """原子落盘 usage 快照（6-4：接收持锁快照，线程内不再读共享 _usage）
+
+    2026-10-01 磁盘 IO 审计修复（tmp 残留，实测已累积 100+ 个 / 1.7 MB）：
+    - tmp 名补上 pid：原实现只带 thread id，跨进程可能撞名；
+    - 失败时删除自己的 tmp：原实现 `except OSError: pass` 会把 replace 失败
+      （Windows 上并发 replace 同一目标 / 目标被读者占用）留下的 tmp 静默遗留。
+    """
+    tmp = USAGE_FILE.with_name(
+        f"{USAGE_FILE.stem}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
     try:
         USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # tmp 文件名带线程 id：两线程并发落盘不互踩 tmp；replace 原子替换防半截文件
-        tmp = USAGE_FILE.with_name(f"{USAGE_FILE.stem}.{threading.get_ident()}.tmp")
         tmp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(USAGE_FILE)
     except OSError:
-        pass
+        _try_unlink(tmp)
 
 
 def _ensure_history_loaded():
@@ -112,17 +137,63 @@ def _ensure_history_loaded():
 
 
 def _save_history(payload: dict):
-    """原子落盘 history 快照（6-4：接收持锁快照，线程内不再读共享 _history）"""
+    """原子落盘 history 快照（6-4：接收持锁快照，线程内不再读共享 _history）
+
+    2026-10-01 磁盘 IO 审计修复：同 _save_usage（pid 入 tmp 名 + 失败清理）。
+    """
+    tmp = HISTORY_FILE.with_name(
+        f"{HISTORY_FILE.stem}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
     try:
         HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = HISTORY_FILE.with_name(f"{HISTORY_FILE.stem}.{threading.get_ident()}.tmp")
         tmp.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         tmp.replace(HISTORY_FILE)
     except OSError:
+        _try_unlink(tmp)
+
+
+def _try_unlink(path: Path) -> None:
+    """删除文件，忽略一切错误（仅供清理路径使用）。"""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
         pass
+
+
+def cleanup_stale_tmp(max_age_seconds: int = 3600) -> int:
+    """清理落盘过程遗留的孤儿 tmp 文件。
+
+    usage/history 走「写 tmp → replace」原子落盘。若进程在两步之间被终止
+    （后端重启、taskkill /F），或 replace 失败（并发/目标被读者占用），tmp 会残留。
+    2026-10-01 审计时 data/agent_guide/ 已堆积 103 个 / 1.7 MB，且全仓无清理逻辑。
+    模块加载时清一次作启动兜底；只删超过 max_age_seconds 的，不会误伤正在写的 tmp。
+    """
+    try:
+        candidates = list(USAGE_FILE.parent.glob("*.tmp"))
+    except OSError:
+        return 0
+    removed = 0
+    now = time.time()
+    for path in candidates:
+        try:
+            if now - path.stat().st_mtime > max_age_seconds:
+                path.unlink()
+                removed += 1
+        except OSError:
+            pass
+    if removed:
+        logger.info("agent_guide: 清理孤儿落盘 tmp %d 个", removed)
+    return removed
+
+
+# 启动兜底：模块加载即清理一次残留 tmp。清理失败不得影响模块可用性。
+try:
+    cleanup_stale_tmp()
+except Exception:  # pragma: no cover
+    pass
 
 
 def _record_usage(
@@ -158,7 +229,7 @@ def _record_usage(
         # 6-4: 持锁做快照传给落盘线程——原实现线程内直接 json.dumps(_usage)，
         # 与主线程 dict 变更并发可能 RuntimeError: dictionary changed size during iteration
         usage_snapshot = {k: dict(v) if isinstance(v, dict) else v for k, v in _usage.items()}
-    threading.Thread(target=_save_usage, args=(usage_snapshot,), daemon=True).start()
+    _save_executor.submit(_save_usage, usage_snapshot).add_done_callback(_on_save_done)
 
     # 2. 历史记录（FIFO，最近 HISTORY_MAX_SIZE 条）
     _ensure_history_loaded()
@@ -178,7 +249,7 @@ def _record_usage(
             del _history[:-HISTORY_MAX_SIZE]
         # 6-4: 持锁快照（浅拷贝 list，record dict 不可变使用）
         history_payload: dict = {"max_size": HISTORY_MAX_SIZE, "records": list(_history)}
-    threading.Thread(target=_save_history, args=(history_payload,), daemon=True).start()
+    _save_executor.submit(_save_history, history_payload).add_done_callback(_on_save_done)
 
 
 
@@ -746,6 +817,51 @@ _MUST_READ_MAX = 5
 # related_memory_keys，是作者显式指定的关联，优先级最高；仅 consumption_contexts 命中
 # （含 "*" 全场景通配）最宽，排最后。
 _MUST_READ_RANK: dict[str | None, int] = {None: 0, "context+keyword": 1, "keyword": 2, "context": 3}
+# v5：全场景通配（consumption_contexts=["*"] 且本轮没有关键词/具体场景命中）在必读块里
+# 最多占几个名额。0 表示完全让位给具体命中项。
+_MUST_READ_WILDCARD_QUOTA = 1
+
+
+def _select_must_read(
+    ordered: list[dict], max_items: int, wildcard_quota: int = _MUST_READ_WILDCARD_QUOTA
+) -> tuple[list[dict], list[str], int]:
+    """从已排好序的候选里挑必读项，给全场景通配限槽。
+
+    为什么要有这一步（2026-10-03 记忆库体检实测）：151 条 facts 里 35 条写着 `"*"`，
+    语义是"对所有任务永远相关"，于是任何 task_type 的候选集都被灌到 ~37 条；
+    而 `find_consumable_memories` 没有 ORDER BY，`ordered[:5]` 实际等于
+    "谁写得最晚谁上屏"——三天内 90 条记忆被反复召回又反复裁掉，一次都没上过屏。
+
+    做法遵循"少加拦截、多加可见"：**不拦通配**，只是让具体命中项优先坐位，
+    通配最多占 wildcard_quota 个名额；名额没坐满时仍用通配补位（宁少勿空）。
+    被让位的通配项进 `dropped_keys` 留痕，事后查得到是谁把它挤下去的。
+
+    Returns:
+        (chosen, dropped_keys, displaced_wildcards)
+    """
+    chosen: list[dict] = []
+    wildcards: list[dict] = []
+    quota_left = wildcard_quota
+    for item in ordered:
+        if item.get("via_wildcard") and quota_left > 0:
+            chosen.append(item)
+            quota_left -= 1
+        elif item.get("via_wildcard"):
+            wildcards.append(item)
+        else:
+            chosen.append(item)
+
+    if len(chosen) < max_items and wildcards:
+        # 名额没坐满：用通配补位，不让必读块因为限槽而变短
+        need = max_items - len(chosen)
+        chosen.extend(wildcards[:need])
+        wildcards = wildcards[need:]
+
+    chosen = chosen[:max_items]
+    chosen_keys = {str(m.get("key")) for m in chosen}
+    dropped = [str(m.get("key")) for m in ordered if str(m.get("key")) not in chosen_keys]
+    displaced = sum(1 for m in wildcards if str(m.get("key")) in dropped)
+    return chosen, dropped, displaced
 
 
 def _build_task_guide(
@@ -830,18 +946,97 @@ def _build_task_guide(
     first_action = entry.get("first_action", "")
     existing_memories = [m for m in memory_index if m.get("updated_at") is not None]
     if existing_memories:
+        # T17：进上下文前重看一眼维护器的验证状态。
+        # 判定为 archive/update 的记忆不再静默主导推理——它照样上屏（本轮明确不拦截），
+        # 但带警告且排到最后，把"这条可能已经不成立"放在模型读它之前。
+        validation_meta: dict[str, dict] = {}
+        # manager 可能没起来（后端未就绪/测试环境）；取不到 store 就跳过验证态与留痕，
+        # 记忆注入本身照常工作。
+        mem_store = getattr(mgr, "store", None) if mgr is not None else None
+        if mem_store is not None:
+            try:
+                validation_meta = mem_store.get_validation_meta(
+                    [str(m.get("key")) for m in existing_memories]
+                )
+            except Exception as e:
+                logger.debug(f"memory_meta 验证状态读取失败（不阻断）: {e}")
+
+        def _validity_doubt(item: dict) -> str | None:
+            meta = validation_meta.get(str(item.get("key"))) or {}
+            status = meta.get("validation_status")
+            if status in ("archive", "update"):
+                return f"维护器验证状态={status}"
+            warning = item.get("staleness_warning")
+            if warning:
+                return str(warning)
+            return None
+
+        doubts = {str(m.get("key")): _validity_doubt(m) for m in existing_memories}
+
         # 排序后再取前 N 条。find_consumable_memories 没有 ORDER BY，返回≈写入序（旧在前），
         # 直接切片会让最旧的通配记忆长期霸占必读块、新写的记忆永远排不进去。
-        # 主序=相关性（关键词命中优先于仅消费场景命中），次序=越新越前。
-        # updated_at 是定长 "%Y-%m-%d %H:%M:%S"，字典序即时序，故用两次稳定排序。
+        # 主序=相关性（关键词命中优先于仅消费场景命中），次序=越新越前，
+        # 第三序=有效性存疑的降到最后（T17）。
+        # updated_at 是定长 "%Y-%m-%d %H:%M:%S"，字典序即时序，故用多次稳定排序。
+        # T16：这里的重排是**显式声明**的业务档位，不是偷偷改掉检索排名——
+        # 召回原序与上屏序都进了投影记录，谁改了顺序、改了谁，事后查得到。
+        recall_order = [str(m.get("key")) for m in existing_memories]
         ordered = sorted(existing_memories, key=lambda m: str(m.get("updated_at") or ""), reverse=True)
         ordered = sorted(ordered, key=lambda m: _MUST_READ_RANK.get(m.get("matched_by"), 3))
+        ordered = sorted(ordered, key=lambda m: 1 if doubts.get(str(m.get("key"))) else 0)
+        chosen, dropped, displaced_wildcards = _select_must_read(
+            ordered, _MUST_READ_MAX
+        )
         must_read_lines = ["【必读记忆】以下记忆与当前任务相关，执行前先 memory_get 读取："]
-        for m in ordered[:_MUST_READ_MAX]:
+        for m in chosen:
+            key = str(m.get("key"))
             summary = m.get("summary") or "(无摘要)"
-            must_read_lines.append(f"- {m['key']}: {summary}")
+            doubt = doubts.get(key)
+            if doubt:
+                must_read_lines.append(
+                    f"- {key}: {summary}"
+                    f"〔⚠ 有效性存疑（{doubt}），已排到最后；引用前必须先验证，别直接当事实〕"
+                )
+            else:
+                must_read_lines.append(f"- {key}: {summary}")
         must_read_block = "\n".join(must_read_lines)
         first_action = must_read_block + "\n\n" + first_action
+
+        # T15：把"召回之后真正进了上下文的是哪些"留成一痕。
+        # 观测件，不参与排序，也不给任何放行权；写失败只记日志，绝不断注入。
+        if mem_store is not None:
+            try:
+                from server.memory.projection import (
+                    SURFACE_AGENT_GUIDE_MUST_READ,
+                    record_projection,
+                )
+
+                record_projection(
+                    mem_store.conn,
+                    mem_store._write_lock,
+                    surface=SURFACE_AGENT_GUIDE_MUST_READ,
+                    selected_keys=[str(m.get("key")) for m in chosen],
+                    injected_text=must_read_block,
+                    dropped_keys=dropped,
+                    rank_before=recall_order,
+                    rank_after=[str(m.get("key")) for m in chosen],
+                    # 本路径是 facts 定向召回（KV/消费场景匹配），没走 hybrid 检索，
+                    # 因此没有 search_traces 可关联；留痕仍要写，因为"上了屏什么"是独立事实。
+                    trace_id=None,
+                    task_type=task_type,
+                    validation_flags={k: v for k, v in doubts.items() if v},
+                    note=(
+                        "trace_id 为空：facts 定向召回不产生检索 trace"
+                        + (
+                            f"；通配限槽让位 {displaced_wildcards} 条 "
+                            f"consumption_contexts=[\"*\"] 记忆（名额 {_MUST_READ_WILDCARD_QUOTA}）"
+                            if displaced_wildcards
+                            else ""
+                        )
+                    ),
+                )
+            except Exception as e:
+                logger.debug(f"上下文投影留痕失败（不阻断）: {e}")
 
     result = {
         "mode": "task",

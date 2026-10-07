@@ -2,7 +2,7 @@
 
 问题根因：
   loop_manager.py 第 575 行读取 result['skip_reason']，
-  但 <data_drive>:/DownloadscanAction / ScreenSummaryTriggerAction 返回的是 result['reason']，
+  但 DownloadScanAction / ScreenSummaryTriggerAction 返回的是 result['reason']，
   TodosTriggerCheckAction / HourlySummarizeAction 干脆不提供原因。
   导致日志显示 "Loop 任务 download_watcher.scan 跳过（skipped）: unknown"。
 
@@ -21,7 +21,7 @@ import json
 from datetime import datetime
 
 from server.activity_tracker.loop_actions import (
-    <data_drive>:/DownloadscanAction,
+    DownloadScanAction,
     HourlySummarizeAction,
     ScreenSummaryTriggerAction,
     TodosTriggerCheckAction,
@@ -32,14 +32,14 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-# ==================== <data_drive>:/DownloadscanAction ====================
+# ==================== DownloadScanAction ====================
 
-class Test<data_drive>:/DownloadscanSkipReason:
-    """<data_drive>:/DownloadscanAction skip 场景必须返回 skip_reason"""
+class TestDownloadScanSkipReason:
+    """DownloadScanAction skip 场景必须返回 skip_reason"""
 
     def test_below_threshold_has_skip_reason(self, tmp_path):
         """文件数 ≤ 阈值 → skipped + skip_reason"""
-        action = <data_drive>:/DownloadscanAction()
+        action = DownloadScanAction()
         # 创建少量文件（低于阈值 15）
         for i in range(3):
             (tmp_path / f"file_{i}.txt").write_text("test", encoding="utf-8")
@@ -76,7 +76,7 @@ class Test<data_drive>:/DownloadscanSkipReason:
             lambda: FakeStore(),
         )
 
-        action = <data_drive>:/DownloadscanAction()
+        action = DownloadScanAction()
         result = _run(action.execute({
             "config": {
                 "watch_dir": str(tmp_path),
@@ -97,7 +97,7 @@ class Test<data_drive>:/DownloadscanSkipReason:
         旧实现返回 success=False 触发 fail_count 累积 + auto_pause + 错误日志；
         新实现返回 skipped 三态，loop 静默跳过，用户创建目录后自动恢复。
         """
-        action = <data_drive>:/DownloadscanAction()
+        action = DownloadScanAction()
         nonexistent = tmp_path / "does_not_exist"
         result = _run(action.execute({
             "config": {

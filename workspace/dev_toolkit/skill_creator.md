@@ -359,7 +359,7 @@ LLM 改写时通常做：
 
 ### 7.8 硬编码路径
 
-**反模式**：写"读取 `C:\<user_home>\project\data.json`"
+**反模式**：写"读取 `<user_home>\project\data.json`"
 
 **纠正**：用变量 `<project_root>/data/data.json` 或环境变量
 

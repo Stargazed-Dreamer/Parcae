@@ -314,7 +314,7 @@ ChatPanel `_ChatWorker` 改用 SessionFacade（不再直接构造 SessionRunner�
 
 ### chat-panel-v2 重设计（UI 层升级）
 
-**SDD 流程产物 `temp/sdd/chat-panel-v2/`（12 ticket 全部 completed）已随 temp 清理**，设计沉淀以本节和 `docs/chat-engine.md` 为准。基于 wip_45dd436b（防关机/崩溃丢失会话）扩展为完整对话面板重设计，484 项 chat 相关测试全过。
+**SDD 流程产物 `temp/sdd/chat-panel-v2/`（12 ticket 全部 completed）已整份归档进 `temp/planning_archive/sdd/chat-panel-v2/`（随仓库跟踪）**，设计沉淀以本节和 `docs/chat-engine.md` 为准。基于 wip_45dd436b（防关机/崩溃丢失会话）扩展为完整对话面板重设计，484 项 chat 相关测试全过。
 
 **EventStore 列扩展**（schema 版本以 `client/core/agent/event_store.py` 的 `_SCHEMA_VERSION` 为准）：
 - sessions 表有 `group_name TEXT`（NULL=未分组）+ `pinned INTEGER DEFAULT 0`（0/1）两列
@@ -357,7 +357,7 @@ ChatPanel `_ChatWorker` 改用 SessionFacade（不再直接构造 SessionRunner�
 
 **v16 内联等待**（`temp/sdd/exec-python-inline-wait/`）：exec_python 在 spawn 成功后默认内联等 `inline_wait_secs` 秒（`[server] exec_python_inline_wait_secs`，默认 10s）。子进程在 N 秒内结束 → 响应 `status="done"` + 完整 `stdout/stderr/exit_code/elapsed`（agent 一步搞定，无需再调 inspect）；超时仍 running → 响应 `status="running"` + `terminal_id`（同 v15，走两步流程）。`inline_wait_secs=0` 禁用回退 v15 立即返回行为。
 
-### 5 个工具（全部 MCP 直连）
+### 工具清单（全部 MCP 直连；条目以下表为准）
 
 | 工具 | 参数 | 行为 | SessionRunner 包装 |
 |------|------|------|---------------------|

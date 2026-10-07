@@ -44,6 +44,7 @@ from client.core.agent.types import (  # noqa: E402
     TOOL_STATUS_INTERRUPTED,
     TOOL_STATUS_PENDING,
     TOOL_STATUS_RUNNING,
+    TOOL_STATUS_UNKNOWN,
     TRANSITION_USER_INTERRUPTED,
     LLMResponse,
     Message,
@@ -774,24 +775,29 @@ class TestT06dReconciliation:
             tool_msgs = [m for m in messages if m.role == "tool"]
             assert len(tool_msgs) == 1
             assert tool_msgs[0].tool_call_id == "tc_dangling_1"
-            assert "interrupted" in tool_msgs[0].content.lower()
+            # T04 语义：pending = 没执行 → 文案必须让模型知道"重跑是安全的"
+            assert "never started" in tool_msgs[0].content.lower()
         finally:
             store.close()
 
     def test_reconcile_running_tool_call_fills_error_result(self, tmp_path):
-        """status=running 的 tool_call + 无 tool_result → 补 is_error=true tool_result。"""
+        """status=running 的 tool_call + 无 tool_result → 落 unknown（T04：副作用可能已落地）。
+
+        ADR-0036：running 悬挂 ≠ interrupted——执行可能已经发生，结果未知是一等终态；
+        重试与否由 lib.side_effect_tier 静态分档，不进 tool_calls_interrupted。
+        """
         store = _make_store(tmp_path)
         try:
             asyncio.run(store.create_session(session_id="s6"))
             tc = ToolCall(id="tc_dangling_2", session_id="s6", name="exec_python",
-                          args={"code": "print(1)"}, status=TOOL_STATUS_RUNNING)
+                          args={"code": "print(1)"}, status=TOOL_STATUS_PENDING)
             asyncio.run(store.append_tool_call("s6", tc))
             # 手动改为 running（append_tool_call 默认写 pending）
             asyncio.run(store.update_tool_call_status("tc_dangling_2", TOOL_STATUS_RUNNING))
 
             result = asyncio.run(reconcile(store, force=True))
 
-            assert "tc_dangling_2" in result.tool_calls_interrupted
+            assert "tc_dangling_2" in result.tool_calls_unknown
             assert "tc_dangling_2" in result.tool_results_filled
 
             # 验证补了 tool_result 消息
@@ -890,7 +896,9 @@ class TestT06dReconciliation:
             result = asyncio.run(reconcile(store, force=True))
 
             assert set(result.sessions_interrupted) == {"s10", "s11"}
-            assert set(result.tool_calls_interrupted) == {"tc_multi_1", "tc_multi_2"}
+            # T04 分档：pending → interrupted；running → unknown（副作用可能已落地）
+            assert set(result.tool_calls_interrupted) == {"tc_multi_1"}
+            assert set(result.tool_calls_unknown) == {"tc_multi_2"}
             assert set(result.tool_results_filled) == {"tc_multi_1", "tc_multi_2"}
 
             # s12 不动
@@ -1102,20 +1110,22 @@ class TestT06eEndToEnd:
             # session 被标记 interrupted
             assert "s_e2e2" in result.sessions_interrupted
 
-            # tool_call 被补 tool_result + 标记 interrupted
-            assert "tc_e2e2_1" in result.tool_calls_interrupted
+            # tool_call 被补 tool_result + 落 unknown（T04：执行中被杀 ≠ 没执行）
+            assert "tc_e2e2_1" in result.tool_calls_unknown
             assert "tc_e2e2_1" in result.tool_results_filled
 
             # 验证 tool_call 状态
             tool_calls = asyncio.run(store.load_tool_calls("s_e2e2"))
-            assert tool_calls[0].status == TOOL_STATUS_INTERRUPTED
+            assert tool_calls[0].status == TOOL_STATUS_UNKNOWN
 
             # 验证补了 is_error=true 的 tool_result
             messages = asyncio.run(store.load_messages("s_e2e2", include_invisible=True))
             tool_msgs = [m for m in messages if m.role == "tool"]
             assert len(tool_msgs) == 1
             assert tool_msgs[0].tool_call_id == "tc_e2e2_1"
-            assert "interrupted" in tool_msgs[0].content.lower()
+            # 文案必须阻止模型把"结果未知"当"失败"重跑（ADR-0036）
+            assert "unknown" in tool_msgs[0].content.lower()
+            assert "do not assume it failed" in tool_msgs[0].content.lower()
 
             # session 最终状态
             session = asyncio.run(store.get_session("s_e2e2"))

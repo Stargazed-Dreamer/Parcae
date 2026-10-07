@@ -17,8 +17,8 @@
 <external_project_root>\PictureTagger
 
 我的主要图片贮存地点（非常大，文件大多命名混乱，文件夹名称可能非常有用）：
-I:\<data_drive>:\<source_images_root>
-I:\<data_drive>:\<classified_root>\图片-来自下载-乱
-I:\<data_drive>:\<classified_root>\图片-Picture
-I:\<data_drive>:\<classified_root>\图片
-G:\<data_drive>:\<ipad_backup>
+<data_drive>:/<source_images_root>
+<data_drive>:/<classified_root>\图片-来自下载-乱
+<data_drive>:/<classified_root>\图片-Picture
+<data_drive>:/<classified_root>\图片
+<data_drive>:/<ipad_backup>

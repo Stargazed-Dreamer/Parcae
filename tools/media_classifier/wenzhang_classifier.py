@@ -19,8 +19,8 @@ import docx
 import requests
 
 # ============ 配置 ============
-ROOT = Path(r"E:\<data_drive>:\<articles_root>")
-OUTPUT = Path(r"<project_root>\output\文字篇章整理")
+ROOT = Path(r"<data_drive>:/<articles_root>")
+OUTPUT = Path(r"<project_root>\workspace\wenzhang_review")
 API = "http://127.0.0.1:8766"
 CONCURRENCY = 60
 PROJECT = "文字篇章整理"

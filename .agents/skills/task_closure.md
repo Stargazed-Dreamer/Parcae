@@ -44,15 +44,17 @@ task_type: system.task_closure
 - 只是回答问题/查资料？→ 无实质产出
 
 **当前任务授权兜底收回**：
-任务结束（完成或中断）时，若当前任务授权仍为 active，agent **必须**调 `screen_release_control` 主动收回，不把 300 秒自动撤销当正常收尾路径。
-- 调用方式：`POST /screen/control/release`（operation_id=`screen_release_control`）
+任务结束（完成或中断）时，若当前任务授权仍为 active，agent **必须**调 `screen_release_control` 主动收回，不把"空闲自动降级"当正常收尾路径。
+- 调用方式：`POST /screen/control/release`（operation_id=`screen_release_control`，reason=`agent_release`）
 - 收回后：覆盖层隐藏、内存授权清除、授权 worker 停止
-- 自动兜底：即使遗漏主动收回，最后一次成功控制操作后空闲 300 秒也会自动撤销
+- 自动兜底：即使遗漏主动收回，normal 模式最后一次成功投递后空闲满两阶段（默认 `idle_warning_seconds` 600s 进告警 + `idle_grace_seconds` 1200s 降级，共 30 分钟）也会降到无权限；watchdog 模式**不因空闲降级**，只到硬上限（默认 10h）降到 NORMAL——所以收尾必须主动 release，不能等兜底
+- ⚠️ 这道兜底只是给 agent 的纪律，服务端没有"任务结束"钩子：漏调就靠上面两条时间线兜
 
 ### 步骤 2：WIP 处理（step_2_wip）
 
 **任务完成时**：
-1. `wip_list` 检查是否有对应的 WIP 任务（按 tags 或 title 匹配）
+1. `wip_list` 检查是否有对应的 WIP 任务（按 title 匹配）
+   - 默认即轻量模式：已完结条目的标题被截断（`closed=true`），且轻量字段不含 `tags`——按完整标题或按 tags 匹配不到时，用 `status` 过滤或 `wip_get_many(ids=[...])` 取回全文
 2. 有则 `wip_update(id, {status: "completed", progress: 100})` 关闭
 3. 无则跳过（不是所有任务都有 WIP）
 
@@ -143,6 +145,7 @@ task_type: system.task_closure
 - [ ] 是否有硬编码的路径/端口/密钥？→ 移入 `config.toml`
 - [ ] `.agents/skills/_index.md` 是否需要同步？
 - [ ] `AGENTS.md` 是否需要同步？
+- [ ] **ADR 评估（强制）**：本轮是否有架构层变更（新增模块/重构边界/技术选型/移除模块/改变集成模式）或 SDD `design-decisions.md` 产出？按 `.agents/rules/project_rules.md`「ADR 评估」三项标准打分，3/3 → 写 `docs/adr/00XX-*.md`（编号取 `docs/adr/` 最高号 +1）并在 `docs/adr/README.md` 索引追加一行；2/3 → 优先撤销该设计而非补 ADR；<2/3 → CHANGELOG 足矣。详见 `AGENTS.md`「ADR 维护」
 - [ ] `CHANGELOG.md` 是否已记录本轮变更？
 - [ ] `config.example.toml` 是否需要新增模板？
 - [ ] `tools_manifest.json` 是否需要更新？
@@ -187,7 +190,7 @@ task_type: system.task_closure
 | 依赖 | 路径/接口 | 说明 |
 |------|----------|------|
 | agent_guide | `agent_guide(task_type='system.task_closure')` | 获取本 workflow |
-| WIP 模块 | `wip_list` / `wip_create` / `wip_update` | step_2 WIP 处理 |
+| WIP 模块 | `wip_list` / `wip_get_many` / `wip_create` / `wip_update` | step_2 WIP 处理（列表默认轻量，查详情走批量接口） |
 | 记忆系统 | `memory_list` / `memory_get` / `memory_set` | step_3-4 经验提炼+写入 |
 | 文档清单 | `.agents/rules/project_rules.md` | step_5 文档自查对照 |
 | neat-freak | `.agents/skills/neat-freak.md` | 完整文档审查（用户主动触发） |

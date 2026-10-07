@@ -20,6 +20,25 @@ from PySide6.QtWidgets import (
 from workspace.accounting.store import AccountingStore
 
 
+class _NoWheelCombo(QComboBox):
+    """滚轮只在下拉弹窗展开时生效，其余情况一律透传给父级（表格继续滚动）。
+
+    审核表格里嵌 QComboBox 的经典误触：鼠标滚轮滚过某个下拉框，
+    滚轮事件被 QComboBox 吃掉并切换选中值 → 凭空产生脏修改进入暂存。
+
+    v2（更严）：仅"获得焦点"不够 —— 用户点选行时经常会点到下拉框使其
+    持有焦点，随后想滚动表格时又把值切掉（2026-09-23 用户实测复现）。
+    因此改为：只有当**下拉弹窗已展开**（view().isVisible()）时才把滚轮
+    交给 QComboBox；想用滚轮换值，先点开下拉列表再滚。
+    """
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 (Qt 事件命名)
+        if self.view().isVisible():
+            super().wheelEvent(event)
+        else:
+            event.ignore()  # 交给父级（QTableWidget）处理 → 滚动表格
+
+
 def _fmt_amount(amount: float) -> str:
     """格式化金额：整数不加小数点"""
     if amount == int(amount):
@@ -46,6 +65,59 @@ def _set_combo_completion(combo: QComboBox, values: list[str]) -> None:
     completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
     line_edit.setCompleter(completer)
     combo.view().setMinimumWidth(220)
+
+
+def compute_desc_hints(
+    hints_map: dict,
+    counterparty: str,
+    category: str,
+    top_n: int = 5,
+) -> list[str]:
+    """按交易名称推荐某大类下的说明文本（移植自旧 Web 版 accounting.html 的 smartHints）。
+
+    规则：
+    - counterparty 与历史对方名**精确匹配** → 权重 = 历史次数 × 2
+      （本行自己的历史严格压过相似名，避免与模糊命中打平时被字典序反超）
+    - **模糊匹配**（权重 = 次数 × 0.5）：包含/被包含（双方非空且较短方长度 ≥2，
+      这样「正宗兰州拉面佛山华南师范大学店」能命中「华南师范大学」），
+      或公共前缀 ≥4 字（「华南师范商业」与「华南师范大学」互不包含但共享前缀）
+    - 只保留大类等于目标 category 的组合
+    - 按权重降序取 top_n，返回纯说明文本列表（供置顶进下拉框）
+    """
+    if not hints_map:
+        return []
+    key = (counterparty or "").lower().strip()
+    if not key or key == "/" or not category:
+        return []
+
+    def _fuzzy(name: str) -> bool:
+        shorter = min(len(name), len(key))
+        if shorter < 2:
+            return False
+        if name in key or key in name:
+            return True
+        common = 0
+        for a, b in zip(name, key):
+            if a != b:
+                break
+            common += 1
+        return common >= 4
+
+    scores: dict[tuple[str, str], float] = {}
+    exact = hints_map.get(key, {})
+    for (cat, desc), n in exact.items():
+        if cat == category:
+            scores[(cat, desc)] = scores.get((cat, desc), 0.0) + float(n) * 2.0
+    for name, pairs in hints_map.items():
+        if name == key or not name or not _fuzzy(name):
+            continue
+        for (cat, desc), n in pairs.items():
+            if cat != category:
+                continue
+            scores[(cat, desc)] = scores.get((cat, desc), 0.0) + n * 0.5
+
+    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0][1]))
+    return [desc for (_cat, desc), _score in ranked[:top_n]]
 
 
 class _AccountingCalendar(QCalendarWidget):
@@ -156,13 +228,16 @@ class _ReviewDataLoader(QThread):
                 cat: self._store.get_descriptions_for_category(cat)
                 for cat in all_categories
             }
-            # 6. config（板块→大类映射）
+            # 6. 一次性预取 交易名称→(大类,说明) 频次表（智能推荐用，同样避免 N+1）
+            hints_map = self._store.get_counterparty_hints()
+            # 7. config（板块→大类映射）
             config = self._store.get_config()
 
             self.data_ready.emit({
                 "months": months,
                 "txs": txs,
                 "descriptions_map": descriptions_map,
+                "hints_map": hints_map,
                 "config": config,
             })
         except Exception as e:

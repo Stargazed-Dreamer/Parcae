@@ -414,8 +414,7 @@ class LLMKey:
     # _acquire 在同可用性下优先选 saturation 低的 key，主动避免硬 429。
     saturation: float = 0.0
     saturation_updated_at: float = 0.0
-    # v15 新增：per-model disabled 状态（model_disabled + 退避 + 探针恢复）
-    # 结构：{model_name: {"disabled_at": ts, "last_probe_at": ts, "probe_in_flight": bool}}
+    # v15 新增：per-model disabled 状态（model_disabled + 退避 + 探针恢复）    # 结构：{model_name: {"disabled_at": ts, "last_probe_at": ts, "probe_in_flight": bool}}
     # consecutive_fails 存于 model_stats[m].consecutive_fails，达阈值后在此字典登记。
     # disabled 后定时放探针（probe_interval_seconds），成功解除，失败重置 last_probe_at。
     model_disabled: dict = field(default_factory=dict)
@@ -423,6 +422,10 @@ class LLMKey:
     # None = 使用全局默认 [llm.pool]（由 LLMPool.__init__ 填充）
     # 非 None = 使用 key 级自定义策略（从 keys.json pool 段加载）
     pool_policy: "ProviderPolicy | None" = None
+    # v16 新增：model_name → 上游上下文窗口（token 数），来源 keys.json 的可选
+    # context_window 字段。缺省（不在字典里 / 0）= 未知，chat 侧不据此判压缩。
+    # 唯一消费方：pool.list_models() 透出给 client/panels/chat.py 的压缩判据。
+    model_context_windows: dict = field(default_factory=dict)
 
     def __post_init__(self):
         """规范化字段：models 至少为空列表；default_model 默认取 models[0]；name 默认值；
@@ -453,6 +456,15 @@ class LLMKey:
         # v11：规范化 model_display_names
         if not isinstance(self.model_display_names, dict):
             self.model_display_names = {}
+        # v16：规范化 model_context_windows（只留正整数，非数值/0/负数视为"未知"）
+        if not isinstance(self.model_context_windows, dict):
+            self.model_context_windows = {}
+        else:
+            self.model_context_windows = {
+                m: int(v)
+                for m, v in self.model_context_windows.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and int(v) > 0
+            }
         # v12：规范化 model_cooldowns（必须是 dict，过滤掉已过期的条目避免字典无限增长）
         if not isinstance(self.model_cooldowns, dict):
             self.model_cooldowns = {}

@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING
 
 import requests
 
-from client.core.agent.compactor import ContextOverflow
+from client.core.agent.compactor import ContextOverflow, UsageAnchor
 from client.core.agent.doom_loop import (
     DOOM_LOOP_STOP_REASON,
     DoomLoopConfig,
@@ -55,6 +55,7 @@ from client.core.agent.types import (
     TOOL_STATUS_COMPLETED,
     TOOL_STATUS_FAILED,
     TOOL_STATUS_RUNNING,
+    TOOL_STATUS_UNKNOWN,
     TRANSITION_NEXT_TURN,
     TRANSITION_REACTIVE_COMPACT_RETRY,
     TRANSITION_USER_INTERRUPTED,
@@ -68,6 +69,7 @@ from client.core.agent.types import (
     ToolExecutor,
     ToolResult,
 )
+from lib.side_effect_tier import should_suggest_retry
 
 if TYPE_CHECKING:
     # 仅用于类型注解（_repair_dangling_tool_calls 的 store 参数）。
@@ -76,6 +78,37 @@ if TYPE_CHECKING:
     from client.core.agent.event_store import EventStore
 
 logger = logging.getLogger("localagent.agent.runner")
+
+
+# unknown-outcome-evidence T03/T04：结局不明时给模型的两种口径。
+# 分档决定该不该说"可以重试"——外部不可逆动作连建议都不发，因为模型会把
+# 一句"你可以重试"理解成授权，然后真的再发一遍消息/再点一次。
+_UNKNOWN_NO_RETRY_HINT = (
+    "\n\n[结果未知·不许重试] 上一步执行结果不可判定（请求超时，副作用可能已经发生）。"
+    "该操作属于外部不可逆档，禁止直接重做同一件事；先查证它到底做没做"
+    "（读回状态/列表/日志），确认没发生才动手。"
+)
+_UNKNOWN_RETRY_OK_HINT = (
+    "\n\n[结果未知] 上一步执行结果不可判定（请求超时）。该操作为只读或本地可逆档，"
+    "可以重试或先查证当前状态。"
+)
+
+
+def _resolve_terminal_status(tool_name: str, result: ToolResult) -> str:
+    """把 ToolResult 映射成 tool_calls.status，并在"结果未知"时改写给模型的口径。
+
+    unknown-outcome-evidence T03：分档判据来自 lib.side_effect_tier（静态表），
+    不交给模型临场判断。副作用不可判定的请求，工具返回文本是模型唯一能看到的
+    事实来源，所以提示语追加在 content 上，而不是只写在日志里。
+    """
+    if getattr(result, "outcome_unknown", False):
+        result.content += (
+            _UNKNOWN_RETRY_OK_HINT
+            if should_suggest_retry(tool_name)
+            else _UNKNOWN_NO_RETRY_HINT
+        )
+        return TOOL_STATUS_UNKNOWN
+    return TOOL_STATUS_FAILED if result.is_error else TOOL_STATUS_COMPLETED
 
 
 # ============================================================================
@@ -573,6 +606,11 @@ class SessionRunner:
             # timeout），不包线程会阻塞 worker 事件循环
             request = await asyncio.to_thread(self._build_request, messages)
 
+            # 压缩判据可见性（2026-10-07，wip_chat_3directions 点单②）：把
+            # "下一次请求有多大 / 上限是多少" 打成日志。只观测，不改调度——
+            # 主动触发仍未接线（判据修准之后才具备接线条件）。
+            await self._log_context_estimate(session_id, store, messages, iterations)
+
             # 3. 调 LLM
             # v6-lite-streaming-gui T02: use_stream=True 时用 gateway.stream() 流式调用
             # T08: ContextOverflow 捕获 → 触发 reactive_compact_retry
@@ -1056,7 +1094,10 @@ class SessionRunner:
                 else:
                     result = await tool_executor.execute(tc)
                 ended_at = self.deps.clock()
-                final_status = TOOL_STATUS_FAILED if result.is_error else TOOL_STATUS_COMPLETED
+                # unknown-outcome-evidence T03：结果不可判定的（HTTP 超时但请求可能已
+                # 落地）归入 unknown，不再塌成 failed —— failed 意味着"确实没成功"，
+                # 而这里意味着"不知道成没成"，两者的重试权利不同。
+                final_status = _resolve_terminal_status(tc.name, result)
                 await store.update_tool_call_status(
                     tc.id, final_status, ended_at=ended_at,
                 )
@@ -1561,12 +1602,12 @@ class SessionRunner:
             )
             await store.append_tool_call(session_id, decision_tc)
             await store.update_tool_call_status(
-                decision_tc.id, "running", started_at=self.deps.clock(),
+                decision_tc.id, TOOL_STATUS_RUNNING, started_at=self.deps.clock(),
             )
             decision_result = await tool_executor.execute(decision_tc)
             await store.update_tool_call_status(
                 decision_tc.id,
-                "failed" if decision_result.is_error else "completed",
+                _resolve_terminal_status(decision_tc.name, decision_result),
                 ended_at=self.deps.clock(),
             )
             await store.append_tool_result_message(session_id, decision_result)
@@ -1616,6 +1657,58 @@ class SessionRunner:
     # ------------------------------------------------------------------
     # 请求构建（v6-02 §1：context.build(state)）
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # 压缩判据可见性（2026-10-07）
+    # ------------------------------------------------------------------
+
+    async def _log_context_estimate(
+        self,
+        session_id: str,
+        store: EventStore,
+        messages: list[Message],
+        iterations: int,
+    ) -> None:
+        """把"下一次请求有多大 / 上限是多少"打成日志（只观测，不改调度）。
+
+        为什么每轮第 1 次必留一行：上限未知（keys.json 没填 context_window）时
+        判据永远不会触发，不打出来的话，"从没压缩"和"没接线"在证据面上长得一样。
+        估算口径：usage 表上一次调用的真实 prompt_tokens + 之后新增消息字符增量。
+        任何异常都不许影响主循环——判据观测失败降级成一条 warning。
+        """
+        compactor = self.deps.compactor
+        if compactor is None:
+            return
+        try:
+            row = await store.get_last_usage_anchor(session_id)
+        except Exception as e:
+            logger.warning("context estimate: anchor load failed (non-fatal): %s", e)
+            return
+        anchor = None
+        if row:
+            anchor = UsageAnchor(
+                prompt_tokens=int(row.get("prompt_tokens") or 0),
+                created_at=float(row.get("created_at") or 0.0),
+                last_compaction_at=float(row.get("last_compaction_at") or 0.0),
+                model=str(row.get("model") or ""),
+            )
+        estimate = compactor.estimate_context_tokens(messages, anchor)
+        limit = compactor.max_context_tokens
+        actionable = limit > 0 and estimate.tokens > int(limit * 0.6)
+        if iterations == 1 or actionable:
+            logger.info(
+                "context estimate: session=%s iter=%d ~%d tokens (basis=%s, anchor=%d, "
+                "delta=%d, msgs=%d), limit=%s%s",
+                session_id, iterations, estimate.tokens, estimate.basis,
+                estimate.anchor_tokens, estimate.delta_tokens, len(messages),
+                f"{limit}" if limit > 0 else "未知(keys.json 未填 context_window)",
+                f" = {estimate.tokens / limit:.0%}" if limit > 0 else "",
+            )
+        else:
+            logger.debug(
+                "context estimate: session=%s iter=%d ~%d tokens (basis=%s), limit=%d",
+                session_id, iterations, estimate.tokens, estimate.basis, limit,
+            )
 
     async def _persist_runner_state(
         self,

@@ -1,6 +1,6 @@
 """STT 引擎（照抄 stt-main whisperTranscriber.py，Ticket 17）
 
-源码：E:\\<data_drive>:\<working_root>\\- 工作中项目\\视频配字幕\\stt-main\\whisperTranscriber.py
+源码：<data_drive>:/<working_root>\\- 工作中项目\\视频配字幕\\stt-main\\whisperTranscriber.py
 
 照抄原因（D011）：stt-main 的 WhisperTool 经过用户多次调整，含工程优化（线程安全 + 任务进度查询
 + 词级时间戳拆分 + 模型加载/卸载）。直接照抄保留原作者所有权（项目硬约束）。

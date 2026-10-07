@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 def _resolve_stt_model_dir() -> str:
     """从 config.toml [recording.stt].model_dir 读取 STT 模型目录。
 
-    2026-07-31 T05b：移除硬编码个人路径（E:\\<data_drive>:\<working_root>\\...），改为从 config 读取，
+    2026-07-31 T05b：移除硬编码个人路径（<data_drive>:/<working_root>\\...），改为从 config 读取，
     使组件可公开发布（Apache-2.0）。config.toml 中 [recording.stt].model_dir 配置
     实际路径（如 F:\\ai model\\stt-main\\models），空字符串则用 huggingface 默认缓存。
     """

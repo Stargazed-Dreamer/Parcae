@@ -207,6 +207,33 @@ for kw, tts in sorted(shared.items(), key=lambda x: -len(x[1])):
 
 **结论**：keywords 编写层面无需变更。若未来 embedding 更换或 homework 注册，复跑 `temp/guide_history_recheck.py` 验证 O1 是否消失。
 
+> 本节的 `temp/guide_history_recheck.py` 已随 10-02 的 temp 清理丢失（连同 `guide_semantic_debug.py`）；复扫请重写探针，做法与踩坑见 §3.6。
+
+## 3.6 复扫记录（2026-10-07，history.json 最近 50 条 + 进程内归因）
+
+样本口径：`records=50`（`mode` 计数 task 39 / general 11）。扣掉 2 条空参调用与 2 条本会话自放的反向守卫，剩 7 条逐条归因，脚本 `temp/20261006_guide_attrib3.py`（取 `matched` 明细，能看见分数是从哪一路来的）。
+
+先记两条机件坑，比结论更容易复发：
+
+- **重放会吃掉被审样本**。`GET /guide?task=` 每次调用都往那 50 格环形缓冲追加：本轮 8 次 HTTP 重放之后，10-05 15:26 那条图库句已被驱逐、原文不可复原。⇒ 归因走进程内 `server.agent_guide.match_task_candidates`（同一条代码路径、零写入）；确实要走 HTTP 就先 dump 一份 `history.json`。
+- **样本不许手打**。第一版探针里我把一条曾被 `[:60]` 截断的原话**自己补了后半截**，而该中文字面量经工具往返又变成乱码 —— 有一行数字是拿"虚构 + 乱码"文本量出来的，整版作废重做。⇒ 句子一律从 `history.json` 读原文，并把"送进去的原文 + 字符数 + 是否含 U+FFFD"回显到输出里。
+
+| # | 句子（截断） | 现 top1 | matched 来源 | 判定 |
+|---|---|---|---|---|
+| 1 | 检查 …`workspace\windows_forensics\data\rootcause_…md` 的根因调查报告 | `adhoc.headless_session`=37 | bigram 25 + 7 条 kw_fuzzy「* agent」50–67% | 误拉面，见 C2/C3 |
+| 2 | 复核 Windows 高内存不回收的三份新增调查报告 | `dev.computer_use`=17 | bigram 7 + synonym 1 | 误拉，见 C2 |
+| 3 | 制定 Windows 已退出进程对象引用未释放…根因测试路线 | `dev.wayfinder`=17 | bigram 7 + kw_fuzzy:wayfinder(50%) | **不是缺口**：wayfinder 正是这件事，只是分数不到 strong 阈值 |
+| 4 | 清理一批零调用的 REST 端点，顺便把 data 里没人读的统计文件也删掉 | `dev.impeccable`=14 | bigram 7（`system.temp_cleanup` 未进 top4） | 见 C1 |
+| 5 | 后端刚重启，复验三处 server 改动是否已加载生效… | `dev.cross_workspace_advisor`=9 | bigram 3 + kw_fuzzy:写后端(50%) | 元任务句，落 general 是正确行为 |
+| 6 | 帮我把这个文件夹改名 | `adhoc.video_digest`=8 | bigram 4 | 反向守卫仍守得住（`cases.jsonl` 里 `expected_top1=null`） |
+| 7 | 10-05 15:28 一条含 U+FFFD 的语句 | 9 | `semantic_only` | **样本已坏**（当时被 shell 按 GBK 重编码），不参与判定 |
+
+三条缺口的处置：
+
+- **C1「仓库死代码 / 无人读产物」没有归宿 —— 用户 2026-10-07 裁决：不建路由。** 决策当时的现状：`system.temp_cleanup` 整篇对象锁在 `temp/`（第一句就是「对 `temp/` 下每一项依次问 Q1/Q2/Q3」），而且**动作也不匹配**——仓库死代码要改的是 `server/` 源码、`check_hard_rules` 白名单与文档引用，不是"移进回收站"；`system.project_audit` 管发现不管摘除，第一步还要求你先选 12 大类方向。⇒ 这类活继续由人发起（10-06 那次就没走任何 skill）。**要复活这件事，先定动作边界，别从加 keywords 开始。**
+- **C2 `workspace/windows_forensics` 未注册**：实测没有 `manifest.toml`，该线句子只能落 general 并被误拉。**未决，等点单。**
+- **C3 kw_fuzzy 的英文通道噪声底**：最小实验 `temp/20261006_kwfuzzy_path_experiment.py` —— 一句不含任何关键词的纯英文句子给 `adhoc.headless_session` **26 分**；同句加一段含 `localAgent` 的绝对路径 → **42**（+16，其中 +6 来自 kw_fuzzy「判定 agent(50%)」，因为项目名里嵌着 `agent`）。缓解事实：这类候选一律 `strong_match=False`，走 GeneralGuide，只污染候选清单、不误派 TaskGuide（与 §3.5 的 O2 同族）。**未决，等点单。**
+
 ## 4. 编写 keywords 的标准流程
 
 新增或修改 GUIDE_REGISTRY 条目时，按以下流程：

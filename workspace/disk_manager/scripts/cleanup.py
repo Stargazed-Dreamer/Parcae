@@ -59,7 +59,7 @@ CACHE_ITEMS = [
     (r"~\AppData\Roaming\Trae CN\logs", "Trae日志 (建议关Trae)"),
     (r"~\AppData\Roaming\Tencent\WeChat\radium\WmpfCache", "微信WmpfCache (建议关微信)"),
     (r"~\AppData\Roaming\Tencent\WeMeet\Global\Data\WebkitCacheData", "腾讯会议WebKit缓存"),
-    (r"<data_drive>:\<system_data_root>\QQMusicCache\downloadproxyNew\tp2p\.tpfs\duty", "QQ音乐播放缓存"),
+    (r"<data_drive>:/<system_data_root>\QQMusicCache\downloadproxyNew\tp2p\.tpfs\duty", "QQ音乐播放缓存"),
 ]
 
 # [2] 已卸载程序残留
@@ -160,7 +160,7 @@ def _allowed_roots():
     return [
         os.path.realpath(os.path.expanduser("~")),
         os.path.realpath(os.environ.get("ProgramData", r"C:\ProgramData")),
-        r"<data_drive>:\<system_data_root>",
+        r"<data_drive>:/<system_data_root>",
     ]
 
 

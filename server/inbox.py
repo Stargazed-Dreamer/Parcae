@@ -87,6 +87,17 @@ CREATE INDEX IF NOT EXISTS idx_inbox_source ON inbox_items(source);
 CREATE INDEX IF NOT EXISTS idx_inbox_created ON inbox_items(created_at);
 """
 
+# unknown-outcome-evidence T12：存储级去重键。
+# 此前防洪全靠调用方自己比对（loop_manager 拿 last_inbox_error、headless 各处各自判），
+# 任何一个新调用方忘了判就刷屏。这里给一个结构性兜底：同 dedupe_key 只落一条。
+# 用 partial unique index 而不是 INSERT OR IGNORE：
+# INSERT OR IGNORE 会把 id 主键冲突也一起吞掉，静默掩盖真正的重复插入 bug。
+_INBOX_DEDUPE_MIGRATION_SQL = (
+    "ALTER TABLE inbox_items ADD COLUMN dedupe_key TEXT",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_dedupe "
+    "ON inbox_items(dedupe_key) WHERE dedupe_key IS NOT NULL",
+)
+
 _INBOX_UPDATE_FIELDS = {"status", "resolution", "title", "description"}
 _INBOX_JSON_FIELDS = {"payload", "resolution"}
 
@@ -110,7 +121,16 @@ class InboxStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=5000")  # 防止并发写时 SQL locked
         self._conn.executescript(INBOX_SCHEMA_SQL)
+        self._migrate_dedupe_key(self._conn)
         self._conn.commit()
+
+    @staticmethod
+    def _migrate_dedupe_key(conn: sqlite3.Connection) -> None:
+        """老库补 dedupe_key 列与唯一索引（幂等：列已存在则跳过 ALTER）。"""
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(inbox_items)").fetchall()}
+        if "dedupe_key" not in cols:
+            conn.execute(_INBOX_DEDUPE_MIGRATION_SQL[0])
+        conn.execute(_INBOX_DEDUPE_MIGRATION_SQL[1])
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -135,12 +155,23 @@ class InboxStore:
 
     def create(self, item: dict) -> dict:
         item_id = item.get("id") or f"inbox_{uuid.uuid4().hex[:8]}"
+        dedupe_key = item.get("dedupe_key")
         with self._write_lock:  # 5-8: 写操作包锁
+            if dedupe_key:
+                # T12：同一 dedupe_key 只保留一条，后来者复用既有条目
+                existing = self.conn.execute(
+                    "SELECT id FROM inbox_items WHERE dedupe_key = ?", (str(dedupe_key),)
+                ).fetchone()
+                if existing is not None:
+                    row = self.get(str(existing["id"]))
+                    if row is not None:
+                        row["deduplicated"] = True
+                        return row
             self.conn.execute(
                 """INSERT INTO inbox_items (id, source, category, title, description,
-                       payload, status, resolution, created_at, updated_at)
+                       payload, status, resolution, created_at, updated_at, dedupe_key)
                    VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL,
-                       datetime('now', 'localtime'), datetime('now', 'localtime'))""",
+                       datetime('now', 'localtime'), datetime('now', 'localtime'), ?)""",
                 (
                     item_id,
                     item["source"],
@@ -148,6 +179,7 @@ class InboxStore:
                     item["title"],
                     item.get("description", ""),
                     json.dumps(item.get("payload", {}), ensure_ascii=False),
+                    str(dedupe_key) if dedupe_key else None,
                 ),
             )
             self.conn.commit()

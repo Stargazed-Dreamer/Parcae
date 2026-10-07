@@ -1,12 +1,12 @@
 """工具启动器核心组件
 
-从 tools_launcher.py 迁移而来，提供：
+GUI 工具运行组件，提供：
 - ScriptRunner：subprocess 执行命令 + 实时读输出（QThread）
 - QueueManager：任务队列串行执行（QThread）
 - ToolDetailWidget：单个工具的选项表单 + 运行/停止/加入队列 + 输出区
 - CategoryPageWidget：分类页面，Tab 展示分类下所有工具
-- ToolLauncherWindow：独立的工具启动器主窗口（兼容旧 launcher.bat）
-- main：旧版入口，被 tools_launcher.py shim 调用
+- ToolLauncherWindow：独立的工具启动器主窗口（可脱离主窗口单独启动）
+- main：独立启动入口
 """
 
 import json
@@ -557,13 +557,13 @@ class CategoryPageWidget(QWidget):
         return self.findChild(QTabWidget)
 
 
-# ===== 旧版工具启动器主窗口（用于 shim 兼容） =====
+# ===== 独立工具启动器主窗口 =====
 
 class ToolLauncherWindow(QMainWindow):
-    """独立的工具启动器主窗口（旧版 launcher.bat 入口）
+    """独立的工具启动器主窗口
 
-    保留此窗口让旧 launcher.bat 仍能启动独立的工具启动器，
-    客户端主窗口的 Tools 面板会复用 ToolDetailWidget/CategoryPageWidget/QueueManager。
+    脱离主窗口单独启动；客户端主窗口的 Tools 面板会复用
+    ToolDetailWidget/CategoryPageWidget/QueueManager。
     """
 
     def __init__(self, show_all: bool = False):
@@ -799,7 +799,7 @@ class ToolLauncherWindow(QMainWindow):
 
 
 def main():
-    """旧版工具启动器入口（被 tools_launcher.py shim 调用）"""
+    """独立启动入口"""
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("LocalAgent 工具启动器")
 

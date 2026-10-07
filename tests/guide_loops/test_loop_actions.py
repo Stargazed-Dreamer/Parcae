@@ -40,7 +40,10 @@ def store():
 def captured_messages(monkeypatch):
     """捕获 add_message 调用，避免真正推送到 user_message 模块"""
     msgs = []
-    def _fake_add_message(text: str):
+    # unknown-outcome-evidence T11 后 add_message 多了 origin 关键字参数
+    # （系统提醒不再被冠成"用户补充指令"）。桩件跟着接住它，仍然只记文本，
+    # 既有断言（条数/内容）语义不变。
+    def _fake_add_message(text: str, origin: str = "human"):
         msgs.append(text)
     monkeypatch.setattr("server.user_message.add_message", _fake_add_message)
     return msgs

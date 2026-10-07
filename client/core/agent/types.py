@@ -207,6 +207,32 @@ TOOL_STATUS_RUNNING = "running"      # 执行中
 TOOL_STATUS_COMPLETED = "completed"  # 成功完成
 TOOL_STATUS_FAILED = "failed"        # 执行失败（error-as-output-variant）
 TOOL_STATUS_INTERRUPTED = "interrupted"  # 被中断（T06）
+# unknown-outcome-evidence T01：结局不可判定——请求可能已落地，也可能没有。
+# 它不等于 failed：failed 意味着"确实没成功"，unknown 意味着"不知道成没成"，
+# 因此不许据此自动重试（见 lib.side_effect_tier.should_suggest_retry）。
+TOOL_STATUS_UNKNOWN = "unknown"
+
+# 终态集合：一旦进入，任何原地改写都必须被拒绝（只能追加修订事件）
+TOOL_STATUS_TERMINAL = frozenset({
+    TOOL_STATUS_COMPLETED,
+    TOOL_STATUS_FAILED,
+    TOOL_STATUS_INTERRUPTED,
+    TOOL_STATUS_UNKNOWN,
+})
+
+# 悬挂态：崩溃恢复时需要处置的"未落终态"
+TOOL_STATUS_DANGLING = frozenset({
+    TOOL_STATUS_PENDING,
+    TOOL_STATUS_RUNNING,
+})
+
+# unknown-outcome-evidence T05：server 侧无人值守会话的 id 前缀。
+# 真源放这里是因为 reconciler（client）必须跳过这些会话，而 client 不许 import
+# server（C4 硬规则，tools/check_hard_rules.py:91-100）；server 侧的
+# headless_runner 反过来 import 本模块是其白名单方向。
+HEADLESS_SESSION_PREFIX = "headless-"
+HEADLESS_JUDGE_SESSION_PREFIX = "headless-judge-"
+SERVER_SIDE_SESSION_PREFIXES = (HEADLESS_SESSION_PREFIX, HEADLESS_JUDGE_SESSION_PREFIX)
 
 
 # transition_reason 7 种（v6-02 §2，T02 先实现 next_turn，其余 T03/T07/T08 补）
@@ -347,6 +373,10 @@ class ToolResult:
     approval_id: str | None = None
     # variant=TIMEOUT 时填
     timeout_seconds: float | None = None
+    # unknown-outcome-evidence T03：True 表示"无法判定副作用是否已落地"
+    # （典型是 HTTP 请求超时——请求可能已到后端）。审批等待超时**不该**置 True，
+    # 那种是"确定没执行"。runner 据此把 tool_call 归入 TOOL_STATUS_UNKNOWN。
+    outcome_unknown: bool = False
     # T05+: 大结果落盘路径（L0，v6-lite W5）
     artifact_path: str | None = None
     preview: str = ""  # 大结果时的预览

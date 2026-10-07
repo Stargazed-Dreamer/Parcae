@@ -4,8 +4,11 @@
 - 检测 thinking_delta 流的尾重复（LLM 卡在重复推理循环中）
 - 检测窗口：最近 N 字符（tail_size，默认 2000）
 - 命中条件：tail 末尾有长度 ≥ min_repeat_len 的 pattern 连续重复 ≥ repeat_threshold 次
-- 命中后：mid-stream abort + retry budget disarm + backoff + 重新请求（注入"避免重复"提示）
-- 最多重试 3 次，连续命中写 error event 终止
+- 命中后（B1 / spec D10 重构后的**现行行为**）：mid-stream abort，**不再 retry、不注入 nudge**。
+  实现见 runner.py 的 DOOM_LOOP_STOP_REASON 分支：已收到的 partial 以 source="partial" 落库 →
+  invalidate 已合并事件 → 写一条 source="system_warning"（用户可见、对 LLM 不可见）→
+  RunOutcome(status="interrupted", stop_reason="doom_loop_detected")。用户下一条消息即隐式 nudge。
+- max_retries / backoff 字段仅为兼容保留，不再参与决策。
 
 算法（D10）：滑动窗口 O(n²)，tail_size=2000 可接受。
 对于 L 从 max_L 到 min_repeat_len，取末尾 L 字符作为 pattern，检查 tail 是否以 pattern * N 结尾。

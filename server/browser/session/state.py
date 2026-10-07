@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from playwright.async_api import Dialog, Download, FileChooser, Page
+    from patchright.async_api import Dialog, Download, FileChooser, Page
 
 
 @dataclass
@@ -23,6 +23,15 @@ class TabSession:
     page: Page  # Playwright Page 对象（TYPE_CHECKING 下标注，运行时仅字符串注解）
     url: str  # 创建时的 URL（运行时 page.url 可能变化）
     title: str = ""
+    # 2026-10-02 归属权：创建者的 caller id（lib.agent_identity.get_caller_id）。
+    # "anonymous"=内部调用/老脚本；"gui"=人在操作；其余为具体 agent 名。
+    # close / url_pattern 抢绑按此校验；cleanup 按"有主/无主"选租约时长。
+    owner: str = "anonymous"
+    # 2026-10-02 可追溯：session 被关闭的原因与时间（LRU/idle/手动/外部关闭），
+    # 写入 SessionManager._closed_log 墓碑，后续操作拿到 SESSION_CLOSED 明确报错
+    # 而不是静默死 session（2026-09-30 探针 tab 被关事故的直接教训）。
+    closed_reason: str = ""
+    closed_at: float = 0.0
     created_at: float = field(default_factory=time.time)
     last_used_at: float = field(default_factory=time.time)
     # 控制台日志缓冲（评估文档 P1 第 2 项：since_cursor 增量返回）
@@ -58,12 +67,12 @@ class TabSession:
     pending_dialogs: list[dict] = field(default_factory=list)
     pending_popups: list[dict] = field(default_factory=list)
     pending_filechoosers: list[dict] = field(default_factory=list)
-    pending_<data_drive>:/Downloads: list[dict] = field(default_factory=list)
+    pending_downloads: list[dict] = field(default_factory=list)
     pending_events_max_len: int = 100
     pending_dialogs_dropped_count: int = 0
     pending_popups_dropped_count: int = 0
     pending_filechoosers_dropped_count: int = 0
-    pending_<data_drive>:/Downloads_dropped_count: int = 0
+    pending_downloads_dropped_count: int = 0
     # asyncio.Event 用于 wait_for 阻塞等待新事件（仅 session 模式有效）
     dialog_event: asyncio.Event = field(default_factory=asyncio.Event)
     popup_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -86,6 +95,11 @@ class TabSession:
     last_filechooser_obj: FileChooser | None = field(default=None, repr=False)
     # _on_download 回调中存放最新的 Download 对象引用（wait_for 可调 save_as 保存到指定路径）
     last_download_obj: Download | None = field(default=None, repr=False)
+    # 2026-09-30 patchright 迁移：按需 console 捕获的 CDP 会话句柄（enable_console_capture
+    # 创建，Runtime.enable 后收 consoleAPICalled/exceptionThrown）。强引用防 GC；
+    # page 关闭时 CDP session 随 target 消失自动失效，无需手动 detach。
+    cdp_log_session: object = field(default=None, repr=False)
+    console_capture_enabled: bool = False
 
     def touch(self) -> None:
         self.last_used_at = time.time()
@@ -93,7 +107,7 @@ class TabSession:
     def _append_pending(self, queue_name: str, item: dict) -> None:
         """向 pending_* 队列追加事件，超出上限时丢弃最旧的并累计 dropped_count。
 
-        queue_name: "pending_dialogs" / "pending_popups" / "pending_filechoosers" / "pending_<data_drive>:/Downloads"
+        queue_name: "pending_dialogs" / "pending_popups" / "pending_filechoosers" / "pending_downloads"
         """
         q: list[dict] = getattr(self, queue_name)
         q.append(item)
@@ -136,8 +150,8 @@ class TabSession:
 
     def pop_pending_download(self) -> dict | None:
         """取出一个未消费的 download 事件。"""
-        if self.pending_<data_drive>:/Downloads:
-            return self.pending_<data_drive>:/Downloads.pop(0)
+        if self.pending_downloads:
+            return self.pending_downloads.pop(0)
         return None
 
     def has_pending_dialog(self) -> bool:

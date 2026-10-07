@@ -25,9 +25,15 @@
 
 ### bilibili_gacha (bilibili_gacha) [recurring]
 
-- **描述**：<data_drive>:\<bilibili_videos>互动抽奖动态扫描+开奖检查+取关
+- **描述**：<data_drive>:/<bilibili_videos>互动抽奖动态扫描+开奖检查+取关
 - **task_type**：`recurring.bilibili_gacha`
 - **Skill 文件**：`workspace/bilibili_gacha/SKILL.md`
+
+### chat_digest (chat_digest) [adhoc]
+
+- **描述**：通用微信群聊「定向同步+时间窗口导出+总结」：任意群按名解析，产出 MD/JSON 切片供总结，依赖 wechatDecode 项目
+- **task_type**：`adhoc.chat_digest`
+- **Skill 文件**：`workspace/chat_digest/SKILL.md`
 
 ### community_review (community_review) [recurring]
 
@@ -35,9 +41,15 @@
 - **task_type**：`recurring.community_review`
 - **Skill 文件**：`workspace/community_review/SKILL.md`
 
+### cs2_trades (cs2_trades) [recurring]
+
+- **描述**：CS2 饰品交易台账：trades.xlsm（4 sheet）+ 平台订单截图证据 + 手续费口径与读图说明
+- **task_type**：`recurring.cs2_trade_ledger`
+- **Skill 文件**：`workspace/cs2_trades/SKILL.md`
+
 ### disk_manager (disk_manager) [adhoc]
 
-- **描述**：磁盘空间分析与清理建议、系统环境全面备份（浏览器/游戏存档/桌面/系统设置）
+- **描述**：磁盘空间分析与清理建议（含 SpaceSniffer 快照导入）、系统环境全面备份（浏览器/游戏存档/桌面/系统设置/文件关联，含 assoc_snapshot/diff/restore 三件套）、设置看门狗引擎（settings_watch/watch.py 统一 snapshot/diff/restore，纳管文件关联·PATH/环境变量·默认浏览器/URL协议·开机自启·Winlogon登录劫持）、迁移易漏四组导出（backup_groups.py：凭据/外观/系统策略/开发工具配置，全量备份自动跑）
 - **task_type**：`adhoc.disk_cleanup`
 - **Skill 文件**：`workspace/disk_manager/SKILL.md`
 
@@ -59,7 +71,17 @@
 - **task_type**：`adhoc.exam_prep`
 - **Skill 文件**：`workspace/exam_prep/SKILL.md`
 
-<!-- private component removed from public package -->
+### gh_mirror (gh_mirror) [recurring]
+
+- **描述**：GitHub 私有镜像仓库监控 - 按 config.toml [loops.gh_mirror] monitor_interval 定期调 GitHub API 检查 PAT/上游/同步/落后 4 类状态，告警推 inbox
+- **task_type**：`recurring.gh_mirror_monitor`
+- **Skill 文件**：`workspace/gh_mirror/SKILL.md`
+
+### homework (homework) [recurring]
+
+- **描述**：作业自动化工作区 - 五段流水线(获取/检查/完成/汇总/人工提交)+科目档案+可迁移清单
+- **task_type**：`recurring.homework`
+- **Skill 文件**：`workspace/homework/SKILL.md`
 
 ### mindforge (mindforge) [adhoc]
 
@@ -97,17 +119,53 @@
 - **task_type**：`recurring.stock_advisor`
 - **Skill 文件**：`workspace/stock_advisor/SKILL.md`
 
+### task_room (task_room) [adhoc]
+
+- **描述**：微信「任务记录」群定向全量同步+按时间排序导出+四类分类（待办/想法/资料/杂事），依赖 wechatDecode 项目
+- **task_type**：`adhoc.task_room`
+- **Skill 文件**：`workspace/task_room/SKILL.md`
+
+### ue_learning_copilot (ue_learning_copilot) [adhoc]
+
+- **描述**：UE 学习副驾 - 常驻读 UE 日志成事件流，热键提问时以可核实出处回答 UE 5.8 用法
+- **task_type**：`adhoc.ue_copilot`
+- **Skill 文件**：`workspace/ue_learning_copilot/SKILL.md`
+
+### video_digest (video_digest) [adhoc]
+
+- **描述**：视频内容总结管线：复用/驱动 r2t2_stt 转录（whisper 桥作显式 fallback）+ PyAV 自适应抽关键帧 → packet，交 agent 通读+看图合成结构化 MD。第一阶段本地文件，预留 URL 拓展
+- **task_type**：`adhoc.video_digest`
+- **Skill 文件**：`workspace/video_digest/SKILL.md`
+
+### vm_vnc_ctl (vm_vnc_ctl) [adhoc]
+
+- **描述**：虚拟机操作方案组件 - VNC 通道驱动 VMware guest（装机期/nogui 期），方法正文在 docs/vm-ops.md
+- **task_type**：`adhoc.vm_ops`
+- **Skill 文件**：`workspace/vm_vnc_ctl/SKILL.md`
+
 ### web_archive (web_archive) [adhoc]
 
-- **描述**：小黑盒/微信/飞书云文档/腾讯文档批量存档为MD（含评论+图片）
+- **描述**：小黑盒/微信/飞书云文档/腾讯文档批量存档为MD（含评论+图片）；森空岛文章纯图片下载；doc.weflow.top 全站归档产物（WARC+离线镜像+MD，脚本已回收、方法学见 SKILL.md）
 - **task_type**：`adhoc.web_archive`
 - **Skill 文件**：`workspace/web_archive/SKILL.md`
+
+### wechat_file_cleanup (wechat_file_cleanup) [recurring]
+
+- **描述**：微信 FileStorage/File 留存文件按月清理：内容识别+md5查重 → 分档清单 → 人工确认 → 回收站删除 → 分类索引
+- **task_type**：`recurring.wechat_file_cleanup`
+- **Skill 文件**：`workspace/wechat_file_cleanup/SKILL.md`
 
 ### wuwa_gacha (wuwa_gacha) [recurring]
 
 - **描述**：鸣潮抽卡记录日志解密/内存扫描+API采集
 - **task_type**：`recurring.wuwa_gacha`
 - **Skill 文件**：`workspace/wuwa_gacha/SKILL.md`
+
+### x_link_harvest (x_link_harvest) [adhoc]
+
+- **描述**：微信会话「更新微信源 + 时间窗口链接导出 + x 视频下载」：按会话名解析，抽 type=1 文本消息里的链接，x 系链接交给 x_video_dl.py 批量下载
+- **task_type**：`adhoc.x_link_harvest`
+- **Skill 文件**：`workspace/x_link_harvest/SKILL.md`
 
 ### yihuan_gacha (yihuan_gacha) [recurring]
 
@@ -132,7 +190,7 @@
 - **`skill-creator.md`** 包含完整的 Skill 编写规范、模板和反模式——创建或修改 Skill 时必读
 - **`neat-freak.md`** 包含文档审查与同步规范——会话结束或用户说"整理一下"时触发
 - 新 Skill 目录命名：英文小写+连字符，如 `internal-workflow/SKILL.md`；历史扁平文件按原名维护
-- **提交前机械防线**：pre-commit hook 会跑 `tools/check_hard_rules.py`（BOM/硬编码密钥/文档路径越界/import 边界），违反即拦截 commit；GUI 面板结构参考 `data/feature_map.json`，guide 路由改动需回测 `tests/guide_eval/`（`run_eval.py`，基线 88.9%）
+- **提交前机械防线**：pre-commit hook 会跑 `tools/check_hard_rules.py`（BOM/硬编码密钥/文档路径越界/import 边界/MCP 工具名），违反即拦截 commit；GUI 面板结构参考 `data/feature_map.json`，guide 路由改动需回测 `tests/guide_eval/`（`run_eval.py`，基线 88.9%）
 
 ---
 
@@ -178,14 +236,14 @@
 4. 优先使用指定窗口模式，避免误操作其他程序
 5. 每次操作后必须截图验证结果
 
-**紧急停止**：`Ctrl + `` 反引号键，触发后10秒内禁止Agent操作
+**紧急停止**：`Ctrl + `` 反引号键；触发即**永久撤销**任务授权（必须让用户重新批准才能继续），并在 `emergency_cooldown_seconds`（默认 10 秒）内拒绝一切新操作
 
 **工作流**：
-1. 第一次副作用操作前调 `screen_request_control`，由用户选择本次接管或当前任务授权
+1. 第一次副作用操作前调 `screen_request_control`，用户在确认窗点「允许接管」即按 agent 请求的 mode 开启当前任务授权（点「拒绝」则状态完全不变；界面已无「只允许本次」勾选项）
 2. 获取窗口列表 → 截取目标窗口 → 原生控件优先 UIA，浏览器优先 DOM，文字 fallback 用 OCR bbox
 3. 纯图标/无文字元素用 `understand_image` 描述，仍无法定位时才调用 `vision_locate`
 4. 思考决策 → 执行普通操作（任务授权内免重复确认；危险操作仍确认）→ OCR/DOM 验证
-5. 任务结束调 `screen_release_control`；遗漏时空闲 300 秒自动撤销
+5. 任务结束调 `screen_release_control`；遗漏时由 normal 模式空闲两阶段降级兜底（`[screen] idle_warning_seconds`+`idle_grace_seconds`，默认 10min 进告警 + 再过 20min 撤销）
 
 ---
 
@@ -218,13 +276,13 @@
 | **触发词** | 留档、存档、标记未完成、WIP、断头工作、继续之前的工作、有哪些未完成、工作进度 |
 | **Skill 文件** | `.agents/skills/wip_tracker.md` |
 | **数据存储** | `wip_tasks` 表（SQLite，共享 memory.db） |
-| **MCP 工具** | `wip_list` / `wip_create` / `wip_get` / `wip_update` / `wip_delete` |
+| **MCP 工具** | `wip_list`（默认轻量）/ `wip_get` / `wip_get_many`（批量查详情）/ `wip_create` / `wip_update` / `wip_delete` |
 | **用途** | 中断任务留档、查询未完成任务、恢复断头工作、去重识别 |
 
 **核心功能**：
-- **留档**：任务中断时 `wip_create` 创建一条记录（含 title/goal/progress/next_steps/current_state/related_files/extra_data）
-- **查询**：`wip_list` 汇总所有未完成 WIP（可按 status 过滤）
-- **恢复**：`wip_get` 读详情，从 next_steps 继续执行
+- **留档**：任务中断时 `wip_create` 创建一条记录（含 title/goal/next_steps/current_state/related_files/extra_data；`progress` 只能后续用 `wip_update` 推进）
+- **查询**：`wip_list` 汇总 WIP（可按 status 过滤）。默认轻量模式：未完结条目给 id/title/status/priority/progress/updated_at，已完结条目进一步压成 id/title(截断)/status/updated_at + `closed=true`，且响应首字段 `guidance` 给出用法建议
+- **恢复**：`wip_get(id)` 读单条详情、`wip_get_many(ids=[...])` 批量读详情，从 next_steps 继续执行；不要为看详情把 `summary` 关掉整表拉取
 - **更新**：`wip_update` 推进进度/改状态（active/blocked/paused/completed）
 - **去重**：用户重复提需求时，先 `wip_list` 搜索识别已有探索
 - **富字段**：`extra_data` 字段存储非标准字段（JSON 对象），保留迁移前的完整上下文
@@ -407,7 +465,7 @@
 | **触发词** | 归档 WIP、清理已完成 WIP、把完成的 WIP 转记忆、WIP 太多、WIP 膨胀 |
 | **Skill 文件** | `.agents/skills/wip_archive.md` |
 | **task_type** | `system.wip_archive` |
-| **依赖** | `wip_list`（直连）/ `localagent_advanced_tool(wip_get/wip_delete)` / `memory_set` |
+| **依赖** | `wip_list`（直连，默认轻量）/ `wip_get_many`（直连，批量取全文）/ `localagent_advanced_tool(wip_delete)` / `memory_set` |
 
 **用途**：批量筛选 `completed` WIP → 提炼经验 → 写入结构化记忆 → 物理删除 WIP 记录。解决 WIP 表膨胀阻碍网页审查面板渲染和 `wip_list` 查询可读性。
 
@@ -1183,6 +1241,21 @@
 
 ---
 
+### 63. 抖音视频批量下载 (douyin_abdm_download) [daily]
+
+| **项** | **内容** |
+|------|------|
+| **Skill 文件** | `.agents/skills/daily/douyin_abdm_download/SKILL.md`（+ `batch_download.py` / `close_abdm_popups.py` 在该 skill 的 `scripts/` 下 + `.agents/skills/daily/douyin_abdm_download/references/pitfalls.md`） |
+| **触发词** | 抖音下载、下载抖音视频、抖音分享链接、批量下载视频、抖音极速版、ABDM |
+| **task_type** | `daily.douyin_abdm_download` |
+| **用途** | 用 ABDM Chrome 插件在 9222 调试浏览器批量静默下载抖音分享链接视频（嗅探→静默→规整命名→清弹窗）；2026-10-07 实测 19/19 零失败 |
+
+**工作流**：①提取链接到 `temp/<任务名>_<日期>/links.txt`（每行 `标题【作者】 \| URL` 或纯链接）→ ②就绪检查（后端 8766 / 调试浏览器 9222 / ABDM 三在线）→ ③脚本自动写静默配置 → ④`batch_download.py` 后台批量（单条约 30s，`--start N` 续跑）→ ⑤`close_abdm_popups.py --dry-run` 先看清单再关 → ⑥汇报文件清单。
+
+**硬性约束**：调试浏览器只由后端拉起（agent 手拉的会被回收）；静默必须直写 chrome.storage.local（UI 合成点击无效）；下载目录看 ABDM 设置（`<data_drive>:/<system_data_root><data_drive>:/Downloads`）禁止全盘搜；收尾必须清 ABDM 进度小窗（用户明确要求）。坑位详见 `references/pitfalls.md`。
+
+---
+
 ### 60. README 编写 (readme_author) [adhoc]
 
 | 属性 | 值 |
@@ -1223,6 +1296,21 @@
 
 ---
 
+### 62. Windows 进程磁盘 I/O 审计 (windows-process-disk-io-audit) [dev]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 审计磁盘读写、磁盘 I/O 审计、过量写盘、偷偷写文件、进程 IO 统计、落盘量级、磁盘读写审计、I/O 归因 |
+| **Skill 文件** | `.agents/skills/dev/windows-process-disk-io-audit/SKILL.md`（方法论真源；落地脚本 `tools/disk_io_audit/`，参数与用法速查该目录 `README.md`） |
+| **task_type** | `dev.windows_process_disk_io_audit` |
+| **用途** | 三层方法审计常驻服务日常磁盘读写量（进程级计数器 + 文件级快照 diff 归因 + 单次操作微基准），定位不合理的高频/过量落盘 |
+
+**何时用**：怀疑某后台服务"写太多"、要回答"谁在偷偷写文件"、要给某次操作定单次落盘成本、或需要为 SSD 磨损/日志膨胀找量级依据。
+
+**关键坑**：动手前先做口径自校验（stdout/管道计入、回环 socket 不计入 ⇒ 测量脚本绝不能经被测服务自己的 `exec_python` 跑）；存活判定 = 心跳新鲜 ∧ pid 真在；「次数 × 文件大小」只是上界，必须用进程级实测封顶；SQLite 附属文件（`-wal`/`-shm`/`-journal`）要从文件主榜剔除单列；先看攒批阈值再判"每次调用都落盘"。
+
+---
+
 ## 后端 API 接口
 
 > 完整 API 速查已移至 [docs/api-reference.md](../../docs/api-reference.md)（按功能分桶、精简描述、浏览器 API 分 Session/核心/辅助三层）。
@@ -1240,9 +1328,9 @@
 | LLM | `agent_chat` `agent_score` | `docs/llm-pool.md` |
 | OCR | `ocr_file` `ocr_path` | `.agents/skills/ocr.md` |
 | 视觉 | `vision_locate` `understand_image` | `computer_use/SKILL.md` |
-| 待办 | `todos_due` `wip_list` `wip_get` | `task_reminder.md` |
-| 高级网关 | `localagent_advanced_tool` (116 工具) | `docs/mcp-reference.md` |
-| MCP | `/mcp`（44 个直连工具，含任务授权 request/release；其余走网关） | `docs/mcp-reference.md` |
+| 待办 | `todos_due` `wip_list` `wip_get` `wip_get_many` | `task_reminder.md` |
+| 高级网关 | `localagent_advanced_tool`（网关工具数见 docs/mcp-reference.md） | `docs/mcp-reference.md` |
+| MCP | `/mcp`（直连工具，含任务授权 request/release；其余走网关） | `docs/mcp-reference.md` |
 
 ## 配置
 

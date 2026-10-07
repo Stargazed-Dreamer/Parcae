@@ -66,7 +66,7 @@ async def find_gacha_url_from_cloud() -> str | None:
     4. 从 iframe.webview-core.src 提取认证 URL
     """
     try:
-        from playwright.async_api import async_playwright
+        from patchright.async_api import async_playwright
     except ImportError:
         print("[错误] 未安装 playwright，请运行: uv add playwright")
         return None

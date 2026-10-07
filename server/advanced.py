@@ -496,7 +496,7 @@ _PROJECT_DOCS: list[dict] = [
      "description": "工具详细用法：exec_python/exec_cmd 机制、exec_* 工具表、参数说明",
      "category": "core", "max_chars": 20000},
     {"name": "skills-index", "path": ".agents/skills/_index.md",
-     "description": "系统内置 60+ skill 清单（日报/股票/抽卡/记账/浏览器/屏幕操作等），agent_guide 可路由到这些 skill",
+     "description": "系统内置 skill 清单（日报/股票/抽卡/记账/浏览器/屏幕操作等；条数随 skill 增减，以本文件或 agent_guide 无参返回为准），agent_guide 可路由到这些 skill",
      "category": "core", "max_chars": 40000},
     {"name": "computer-use-skill", "path": ".agents/skills/computer_use/SKILL.md",
      "description": "Computer Use 核心流程：安全铁律、窗口操作铁律、标准操作流程、软件经验闭环（用 screen_* 工具操作桌面前必读）",

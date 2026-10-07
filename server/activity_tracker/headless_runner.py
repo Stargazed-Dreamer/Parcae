@@ -30,6 +30,15 @@ import uuid as _uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+# session_id 前缀约定（spec Implementation Decisions 节）
+# unknown-outcome-evidence T05：前缀真源改挂 client.core.agent.types——reconciler
+# 必须按同一份前缀跳过无人值守会话，而 client 不许 import server（C4），所以真源
+# 只能放在被两边看到的地方。server→client 方向是本文件白名单内的既有用法。
+from client.core.agent.types import (
+    HEADLESS_JUDGE_SESSION_PREFIX,
+    HEADLESS_SESSION_PREFIX,
+)
+
 logger = logging.getLogger("localagent.headless_runner")
 
 # ============================================================================
@@ -49,9 +58,8 @@ DEFAULT_JUDGE_WALL_CLOCK_BUDGET_SECS = 300  # 5 分钟
 # judge 取主 agent 最后 N 条 assistant 消息作为判定材料
 DEFAULT_JUDGE_MAIN_OUTPUT_MESSAGES = 20
 
-# session_id 前缀约定（spec Implementation Decisions 节）
-HEADLESS_MAIN_PREFIX = "headless-"
-HEADLESS_JUDGE_PREFIX = "headless-judge-"
+HEADLESS_MAIN_PREFIX = HEADLESS_SESSION_PREFIX
+HEADLESS_JUDGE_PREFIX = HEADLESS_JUDGE_SESSION_PREFIX
 
 
 # ============================================================================
@@ -132,6 +140,9 @@ class MainAgentResult:
     session_id: str
     outcome: Any  # RunOutcome（用 Any 避免 import cycle）
     last_assistant_messages: list[str] = field(default_factory=list)
+    # T13：主 agent 的执行账本（终态计数 + 非成功项），judge 的判定材料之一。
+    # 此前 judge 只能读主 agent 说了什么——"说完成了"就算完成。
+    execution_evidence: dict = field(default_factory=dict)
     error: str = ""
 
 
@@ -147,15 +158,53 @@ JUDGE_PROMPT_TEMPLATE = """你是任务成功判定 agent。下面给你一个 h
 【主 agent 的对话历史（最后 {msg_count} 条消息）】
 {main_output}
 
+【执行账本（结构化证据，来自事件存储，不是主 agent 的自述）】
+{execution_evidence}
+
 【判定规则】
-- success：主 agent 完成了任务描述要求的工作，输出明确表示完成或给出了所需结果
-- failed：主 agent 明确报告失败、无法完成、或输出与任务要求不符
-- uncertain：主 agent 输出含"不确定""可能""大概""未确认"等模糊表述，或主 agent 中途中断/未给出明确结论
+- success：主 agent 完成了任务描述要求的工作，输出明确表示完成或给出了所需结果，
+  **且执行账本里没有 failed / interrupted / unknown 的调用**
+- failed：主 agent 明确报告失败、无法完成，或输出与任务要求不符
+- uncertain：出现以下任一情况都判 uncertain，不要勉强判成功——
+  主 agent 输出含"不确定""可能""大概""未确认"等模糊表述；主 agent 中途中断/未给出明确结论；
+  执行账本里存在 unknown（结果未知）或 interrupted（被打断）的调用；
+  账本与主 agent 的自述互相矛盾（它说做完了，但账本里有非成功项）
+
+叙述可以撒，账本不会。以执行账本为准。
 
 【输出格式】
 严格输出以下 JSON，不要其他内容：
 {{"verdict": "success" | "failed" | "uncertain", "reason": "简短说明（一句话）"}}
 """
+
+
+def format_execution_evidence(evidence: dict | None) -> str:
+    """执行账本 dict → judge prompt 里那段可读文本（T13）。"""
+    if not evidence:
+        return "(无执行账本数据：拿不到事件存储，请按证据不足处理，倾向 uncertain)"
+    counts = evidence.get("counts") or {}
+    total = evidence.get("total", 0)
+    non_success = evidence.get("non_success") or []
+    rejected = evidence.get("rejected_terminal_writes", 0)
+    lines = [
+        f"工具调用总数：{total}",
+        "终态分布：" + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "无",
+    ]
+    if non_success:
+        shown = non_success[:20]
+        lines.append(
+            "非成功项（failed/interrupted/unknown/pending/running）："
+            + "; ".join(f"{i.get('name')}→{i.get('status')}" for i in shown)
+        )
+        if len(non_success) > len(shown):
+            lines.append(f"（另有 {len(non_success) - len(shown)} 项未列出）")
+    else:
+        lines.append("非成功项：无")
+    if rejected:
+        lines.append(
+            f"被拒绝的终态回写次数：{rejected}（有旧写入试图覆盖已落定的事实，需人工看一眼）"
+        )
+    return "\n".join(lines)
 
 
 # ============================================================================
@@ -280,10 +329,19 @@ async def run_main_agent(
             store, sid, DEFAULT_JUDGE_MAIN_OUTPUT_MESSAGES
         )
 
+        # T13：同时取执行账本。judge 不能只听主 agent 自述，必须看到
+        # 这一轮工具调用里有多少 completed / failed / interrupted / unknown。
+        evidence: dict = {}
+        try:
+            evidence = await store.tool_call_outcome_summary(sid)
+        except Exception as e:
+            logger.warning("读取执行账本失败 (session=%s): %s", sid, e)
+
         return MainAgentResult(
             session_id=sid,
             outcome=outcome,
             last_assistant_messages=last_msgs,
+            execution_evidence=evidence,
         )
 
     except Exception as e:
@@ -442,6 +500,7 @@ async def run_judge_agent(
     *,
     session_id: str | None = None,
     interrupt_event: asyncio.Event | None = None,
+    execution_evidence: dict | None = None,
 ) -> JudgeResult:
     """启动 judge agent 会话（mode="headless_judge"）判定主 agent 任务成败。
 
@@ -461,6 +520,9 @@ async def run_judge_agent(
         config: HeadlessConfig（judge_model / judge_max_iterations 等字段用）
         session_id: 可选 judge session_id（留空自动生成 headless-judge-{uuid}）
         interrupt_event: 可选中断事件（Ticket 07 REST 端点用）
+        execution_evidence: 主 agent 的执行账本（EventStore.tool_call_outcome_summary
+            的形状）。T13：判定材料不再只有对话文本；缺省时 prompt 里如实标注
+            "拿不到账本"，规则会倾向 uncertain 而不是勉强判成功。
 
     Returns:
         JudgeResult：含 verdict + reason + session_id + raw_output
@@ -517,6 +579,7 @@ async def run_judge_agent(
             task=trigger_text,
             msg_count=len(main_output),
             main_output=main_output_text,
+            execution_evidence=format_execution_evidence(execution_evidence),
         )
 
         facade = SessionFacade(deps=deps, config=runner_config)

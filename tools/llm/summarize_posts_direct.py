@@ -37,9 +37,9 @@ from server.llm_pool import (
 
 # ========== 配置 ==========
 
-OUTPUT_BASE = Path(r"<project_root>\output\社群")
-REPORT_DIR = Path(r"<project_root>\output\社群\reports")
-SUMMARIES_DIR = Path(r"<project_root>\output\社群\summaries")  # 单篇总结文件目录
+OUTPUT_BASE = PROJECT_ROOT / "workspace" / "community_review"
+REPORT_DIR = OUTPUT_BASE / "reports"
+SUMMARIES_DIR = OUTPUT_BASE / "summaries"  # 单篇总结文件目录
 
 KEYS_FILE = PROJECT_ROOT / "temp" / "mimo_keys_tested.json"
 SAVE_INTERVAL = 100

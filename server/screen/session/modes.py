@@ -1,9 +1,17 @@
-"""权限模式定义 + 端点分类。
+"""权限模式定义。
 
-三档权限模式：
+三档权限模式（时限真源是 `[screen]` 配置键，不在这里写数字）：
 - NO_PERMISSION: 只读端点放行，副作用端点返回 403
-- NORMAL: 普通执行模式，10 分钟告警 + 30 分钟降级到无权限
-- WATCHDOG: 看门狗模式，默认 10h（1-999h 可调），到期降级到 NORMAL
+- NORMAL: 普通执行模式，空闲两阶段（`idle_warning_seconds` 进告警 +
+  `idle_grace_seconds` 撤销）后降级到无权限
+- WATCHDOG: 看门狗模式，不因空闲撤销，`watchdog_default_hours` 硬上限到期降级到 NORMAL
+
+副作用端点**不靠名单判定**：每个受把关的 handler 在开头显式调用
+`server/screen/routes.py::_enforce_session_permission()`。曾在此文件维护过
+`ENDPOINTS_SIDE_EFFECT`/`ENDPOINTS_READONLY` 两张名单，但它们全仓零消费、内容还和
+实际把关集合不一致（2026-09-30 删除）。需要清单时调
+`routes.gated_side_effect_operations()`（现场扫描路由表，`/health` 的
+`screen.takeover_confirm.protected_endpoints` 即其结果）。
 """
 
 from __future__ import annotations
@@ -17,44 +25,3 @@ class Mode(StrEnum):
     NO_PERMISSION = "no_permission"
     NORMAL = "normal"
     WATCHDOG = "watchdog"
-
-
-# 副作用端点名单：无权限模式下返回 403
-# 这些端点会改变系统状态（键鼠操作 / 窗口操作 / 桌面事务）
-ENDPOINTS_SIDE_EFFECT: frozenset[str] = frozenset({
-    "screen_action",
-    "screen_batch_actions",
-    "screen_desktop_transaction",
-    "screen_semantic_action",
-    "screen_focus_window",
-    "screen_window_minimize",
-    "screen_window_restore",
-    "screen_window_raise",
-    "screen_window_close",
-    "screen_app_launch",
-    "screen_app_wait",
-    "screen_preview_action",
-})
-
-# 只读端点名单：无权限模式下正常执行，且任何模式下调用语重置 idle 计时
-ENDPOINTS_READONLY: frozenset[str] = frozenset({
-    "screen_capture",
-    "screen_ocr",
-    "screen_snapshot",
-    "screen_accessibility_snapshot",
-    "screen_wait_for",
-    "screen_analyze",
-    "screen_app_list",
-    "screen_window_resolve",
-    "screen_list_windows",
-})
-
-
-def is_side_effect_endpoint(operation_id: str) -> bool:
-    """判断端点是否为副作用端点（无权限时返回 403）。"""
-    return operation_id in ENDPOINTS_SIDE_EFFECT
-
-
-def is_readonly_endpoint(operation_id: str) -> bool:
-    """判断端点是否为只读端点（无权限时放行）。"""
-    return operation_id in ENDPOINTS_READONLY

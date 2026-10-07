@@ -1,7 +1,7 @@
 """通过 CDP 连接已有调试浏览器（Chromium 内核）并打开高分面经标签页"""
 import asyncio
 
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 
 RECOMMENDED = [
     {"title": "游戏客户端面经及经历分享(47分)", "url": "https://www.nowcoder.com/discuss/860341579272212480"},

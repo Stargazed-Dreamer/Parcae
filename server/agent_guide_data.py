@@ -397,12 +397,12 @@ GUIDE_REGISTRY: dict[str, dict] = {
                      "额度很多", "额度有余", "额度多余", "额外额度", "空闲额度", "长期自动化", "顺便跑", "能跑什么"],
         "description": "检查周期任务到期+WIP待办汇总；用户表示额度有余/想跑长期自动化时按周期台账自查可跑项",
         "memory_key": None,
-        "first_action": "调用 todos_due 获取到期任务；调用 wip_list(summary=true) 获取 WIP 摘要。需要单个 WIP 详情时用 wip_get(task_id='wip_xxx')（直连 MCP 工具，免审批），禁止用 exec_python 发 HTTP 调本地 API\n\n用户说\"额度很多/想跑长期自动化/有什么可以顺便跑的\"时：读 docs/periodic-task-inventory.md 的「空闲额度自查流程」台账，逐项实测每项的上次活动信号（文件 mtime / GET /loop/tasks 的 last_run_at / GET /inbox）与阈值比较，一次性报告超期项并等用户点单，禁止不核对就断言都新鲜、禁止未点单就开跑",
-        "workflow_summary": "1.todos_due 取到期任务 2.wip_list 取WIP 3.汇总报告 4.完成后 todos_mark_done",
+        "first_action": "调用 todos_due 获取到期任务；调用 wip_list 获取 WIP 摘要（默认已轻量，无需传参；已完结条目只给 id/截断标题/状态+closed=true）。需要详情时单条用 wip_get(task_id='wip_xxx')、多条用 wip_get_many(ids=[...])（均为直连 MCP 工具，免审批），禁止用 exec_python 发 HTTP 调本地 API\n\n用户说\"额度很多/想跑长期自动化/有什么可以顺便跑的\"时：读 docs/periodic-task-inventory.md 的「空闲额度自查流程」台账，逐项实测每项的上次活动信号（文件 mtime / GET /loop/tasks 的 last_run_at / GET /inbox）与阈值比较，一次性报告超期项并等用户点单，禁止不核对就断言都新鲜、禁止未点单就开跑",
+        "workflow_summary": "1.todos_due 取到期任务 2.wip_list 取WIP（默认轻量） 3.汇总报告 4.完成后 todos_mark_done",
         "mcp_tools_priority": [
             "todos_due",
             "wip_list",
-            "wip_get (直连，查详情)",
+            "wip_get / wip_get_many (直连，单条/批量查详情)",
             "todos_mark_done",
             "todos_check_trigger (triggered 类型手动检查触发条件)",
             "exec_python (from datetime import date; print(date.today()))",
@@ -423,16 +423,16 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "keywords": ["留档", "存档", "标记未完成", "WIP", "断头工作", "继续之前的工作", "有哪些未完成", "工作进度"],
         "description": "中断任务留档+恢复",
         "memory_key": None,
-        "first_action": "调用 wip_list 获取所有 WIP 任务。需要详情用 wip_get(task_id='wip_xxx')（直连 MCP 工具，免审批），禁止用 exec_python 发 HTTP",
-        "workflow_summary": "留档：wip_create 创建 | 查询：wip_list | 恢复：wip_get 读详情 | 更新：wip_update",
+        "first_action": "调用 wip_list 获取所有 WIP 任务（默认即轻量模式：已完结条目压成 id/截断标题/状态+closed=true）。需要详情用 wip_get(task_id='wip_xxx') 单条或 wip_get_many(ids=[...]) 批量（直连 MCP 工具，免审批），禁止用 exec_python 发 HTTP；也不要为看详情把 summary 关掉整表拉取（体积约为轻量模式一个数量级以上）",
+        "workflow_summary": "留档：wip_create 创建 | 查询：wip_list（默认轻量） | 恢复：wip_get 单条 / wip_get_many 批量读详情 | 更新：wip_update",
         "mcp_tools_priority": [
             "wip_list",
-            "wip_get (直连，查详情)",
+            "wip_get / wip_get_many (直连，单条/批量查详情)",
             "localagent_advanced_tool(wip_create/wip_update/wip_delete)",
         ],
         "key_pitfalls": [
             "留档：JSON 字段用结构化格式（next_steps 数组、current_state 对象）",
-            "去重：用户重复提需求时先 wip_list 搜索识别已有探索",
+            "去重：用户重复提需求时先 wip_list 搜索识别已有探索；默认轻量模式下已完结条目标题被截断（closed=true），按完整标题匹配前先用 wip_get_many 取回全文",
             "状态：active/blocked/paused/completed",
         ],
         "level": "standard",
@@ -465,7 +465,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "workflow_summary": "1.评估状态+当前任务授权收回 2.WIP处理 3.经验提炼+可消费性自检 4.查重写入 5.文档自查 6.收尾报告",
         "mcp_tools_priority": [
             "screen_release_control (step_1 当前任务授权主动收回，若授权仍 active)",
-            "wip_list / wip_update / wip_create (step_2 WIP处理)",
+            "wip_list / wip_get_many / wip_update / wip_create (step_2 WIP处理；列表默认轻量，查详情走 wip_get 单条 / wip_get_many 批量)",
             "memory_list / memory_get / memory_set (step_3-4 经验提炼+写入)",
             "Read / Edit / Grep (step_5 文档自查)",
         ],
@@ -498,9 +498,12 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "step_2_wip": {
                 "name": "WIP 处理",
                 "instruction": (
-                    "任务完成：wip_list 检查对应 WIP → 有则 wip_update(status=completed, progress=100) → 无则跳过\n"
+                    "任务完成：wip_list 检查对应 WIP（默认轻量模式，已完结条目标题被截断，按标题匹配不到时用 status 过滤或 wip_get_many 取回全文）→ 有则 wip_update(status=completed, progress=100) → 无则跳过\n"
                     "任务中断：wip_list 检查 → 有则 wip_update(progress/next_steps/current_state) → 无则 wip_create\n"
-                    "wip_create 必填：title/goal/progress/next_steps(可执行数组)/current_state(dict)/related_skills/related_files"
+                    "需要多条详情时用 wip_get_many(ids=[...]) 一次取回，不要用 summary=false 整表拉取\n"
+                    "wip_create 必填：title/goal/next_steps(可执行数组)/current_state(dict)/related_skills/related_files"
+                    "（⚠ progress 只在 wip_update 有，create 传 progress 会被 422 extra_forbidden 拒；"
+                    "字段真源见 server/todos/models.py 的 WipTaskCreate / WipTaskUpdate）"
                 ),
             },
             "step_3_extract": {
@@ -701,7 +704,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "keywords": ["操作电脑", "屏幕操作", "点击", "截图", "帮我操作", "自动操作"],
         "description": "UIA 语义层（P0-1 CoInitialize + P1-4 硬编码 ControlType） + OCR/DOM 优先定位 + 图像描述兜底 + 键鼠操控（P0 焦点安全 + P0-2 Unicode 代理对 + P0-3 状态语义 + P0-4 format=path + P1-1 dry_run + P1-2 canonical_window 刷新 + P1-3 hwnd 统一 + P1-A OCR 可观测性 + P1-B 窗口生命周期 + P2-1 desktop_transaction）",
         "memory_key": None,
-        "first_action": "在第一次副作用 Computer Use 操作前先调 screen_request_control(task_description=具体任务, source='agent')，由用户决定仅允许本次还是勾选当前任务授权；获准后再用 screen_app_list/screen_window_resolve 拿 window_token→focus_window→capture_screen→按 UIA > 浏览器 DOM > OCR bbox > vision_locate 定位→危险操作先 dry_run 且始终逐次确认→多步原子操作用 screen_desktop_transaction→任务结束调 screen_release_control。三档权限模式：NO_PERMISSION(无授权)→NORMAL(普通执行,10min 告警+20min 降级)→WATCHDOG(看门狗,默认10h到期降级到 NORMAL,不因空闲撤销)",
+        "first_action": "在第一次副作用 Computer Use 操作前先调 screen_request_control(task_description=具体任务, source='agent')，用户在确认窗点「允许接管」即按你请求的 mode 开启当前任务授权（点拒绝则状态不变；界面已无「只允许本次」的勾选项）；获准后再用 screen_app_list/screen_window_resolve 拿 window_token→focus_window→capture_screen→按 UIA > 浏览器 DOM > OCR bbox > vision_locate 定位→危险操作先 dry_run 且始终逐次确认→多步原子操作用 screen_desktop_transaction→任务结束调 screen_release_control。三档权限模式：NO_PERMISSION(无授权)→NORMAL(普通执行,10min 告警+20min 降级)→WATCHDOG(看门狗,默认10h到期降级到 NORMAL,不因空闲撤销)",
         "workflow_summary": "1.screen_request_control 请求用户介导的当前任务授权（normal/watchdog 由 agent 在请求时指定，用户只能允许/拒绝不能改模式） 2.screen_app_list/window_resolve 拿 window_token 3.focus_window 激活目标 4.capture_screen 拿 snapshot_id 5.定位按 UIA > browser DOM > OCR bbox > vision_locate 6.语义动作用 screen_semantic_action 7.坐标动作用 execute_action/batch_actions 8.检查 transport/delivery/postcondition 9.危险操作 dry_run 后仍逐次确认 10.多步原子操作用 screen_desktop_transaction 11.WINDOW_TOKEN_INVALID 后重新 resolve 12.任务结束 screen_release_control；NORMAL 模式 10min 无操作进告警(黄色),30min 自动降级到 NO_PERMISSION；WATCHDOG 模式默认 10h 到期降级到 NORMAL(不直接释放)",
         "mcp_tools_priority": [
             "screen_request_control (第一次副作用操作前请求；task_description 写清任务，source=agent)",
@@ -727,8 +730,8 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "优先指定窗口模式，避免误操作其他程序",
             "紧急停止：Ctrl+` 反引号键，触发后10秒内禁止操作",
             "完全不能执行就放弃，不要硬做/瞎点",
-            "当前任务授权（三档权限模式）：第一次副作用操作前调 screen_request_control；agent 在请求时指定 mode=normal 或 mode=watchdog，用户只能允许/拒绝不能改模式。NO_PERMISSION(无授权)只读操作放行,副作用端点 403；NORMAL(普通执行)10min 无操作进告警(黄色)+20min 自动降级到 NO_PERMISSION,副作用成功后 extend idle 计时；WATCHDOG(看门狗)默认 10h 到期降级到 NORMAL(不直接释放),不因空闲撤销,可选允许关机。危险、不可逆、require_confirm=true 和安全阻断永不绕过,watchdog 模式下 CONFIRM 级别操作仍弹窗=超时 deny。收到 success=false/status=cancelled 后不要重试施压；GUI 异常或 30 秒超时均 fail-closed",
-            "受控托管模式（API 兼容名 mode=watchdog）：用户要求持续监控/看门场景（如睡前盯着任务跑完）时，调 screen_request_control(mode='watchdog', task_description='...', max_duration_hours=10)。watchdog 模式不因空闲撤销，默认 10h 硬上限到期降级到 NORMAL（config takeover_watchdog_default_hours/watchdog_max_hours 可调，1-999h 范围）。用户 AFK 时必须 fail-closed：无法通过已授权、可观测、安全路径解决的问题直接停止，不得绕过确认、放宽安全策略、切换未授权通道、修改配置或无限重试。不确定是否安全就放弃。takeover_confirm 禁用（用户不在场）。CONFIRM 级别操作仍弹窗=超时 deny；DANGER_KEYWORDS_BLOCK 仍拦截。关机不走 computer use，走 auto_shutdown 模块（独立 CLI 子进程）",
+            "当前任务授权（三档权限模式）：第一次副作用操作前调 screen_request_control；agent 在请求时指定 mode=normal 或 mode=watchdog，用户只能允许/拒绝不能改模式。NO_PERMISSION(无授权)只读操作放行,副作用端点 403；NORMAL(普通执行)10min 无操作进告警(黄色)+20min 自动降级到 NO_PERMISSION,副作用成功后 extend idle 计时；WATCHDOG(看门狗)默认 10h 到期降级到 NORMAL(不直接释放),不因空闲撤销,可选允许关机。危险、不可逆、调用方显式 require_confirm=true 和安全阻断永不绕过；watchdog 模式下 danger_level=confirm 的动作**自动跳过弹窗**（ADR-0026：授权看门狗=同意 confirm 范围内的动作），所以 AFK 时不能指望这道窗替你拦住手滑。收到 success=false/status=cancelled 后不要重试施压；GUI 异常或 30 秒超时均 fail-closed",
+            "受控托管模式（API 兼容名 mode=watchdog）：用户要求持续监控/看门场景（如睡前盯着任务跑完）时，调 screen_request_control(mode='watchdog', task_description='...', max_duration_hours=10, needs_shutdown=True)（任务要收尾关机时必须带 needs_shutdown；已有 watchdog 但缺关机位时它是升级开关，会弹第二次确认窗，不需要先 release）。watchdog 模式不因空闲撤销，默认 10h 硬上限到期降级到 NORMAL（config watchdog_default_hours/watchdog_max_hours 可调，1-999h 范围）。用户 AFK 时必须 fail-closed：无法通过已授权、可观测、安全路径解决的问题直接停止，不得绕过确认、放宽安全策略、切换未授权通道、修改配置或无限重试。不确定是否安全就放弃。takeover_confirm 静默放行（会话 active 时不弹窗）。CONFIRM 级动作自动跳过弹窗（ADR-0026，调用方显式 require_confirm=true 仍弹）；DANGER_KEYWORDS_BLOCK 仍拦截。关机不走 computer use，走 auto_shutdown 模块（独立 CLI 子进程）",
             "OCR bbox 已修复：普通文字控件直接定位；VL 昂贵且慢，默认只描述图像，坐标定位仅作无文字兜底",
             "verify_prompt 只用于高风险/失败重试/复杂视觉状态；普通文字操作优先 OCR/DOM 验证；batch_actions 不支持",
             # 评估文档 P0 焦点安全
@@ -1151,7 +1154,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "memory_key": None,
         "first_action": "读取 .agents/skills/dev/wayfinder/SKILL.md 了解双模式：chart the map（建图）vs work through the map（执行）",
         "workflow_summary": "1.识别 fog of war 2.chart the map 建图(workspace/wayfinder/) 3.work through the map 领取 ticket 执行 4.wip_create(type='wayfinder_map'/'wayfinder_ticket')",
-        "mcp_tools_priority": ["Read / Write", "wip_create / wip_list / wip_update"],
+        "mcp_tools_priority": ["Read / Write", "wip_create / wip_list / wip_get_many / wip_update"],
         "key_pitfalls": [
             "ticket 类型：research/prototype/grilling/task（HITL vs AFK）",
             "claim 机制：wip_update(extra_data={claimed_by, claimed_at})",
@@ -1206,7 +1209,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "memory_key": None,
         "first_action": "读取 .agents/skills/dev/triage/SKILL.md 获取分诊角色和状态机",
         "workflow_summary": "1.收集 issue 2.推荐 category(bug/enhancement)+state 3.可选 grill-with-docs 4.应用 outcome 5.wip_update(extra_data={category, state})",
-        "mcp_tools_priority": ["Read", "wip_list / wip_update (extra_data.category, extra_data.state)"],
+        "mcp_tools_priority": ["Read", "wip_list / wip_get_many / wip_update (轻量列表不含 extra_data，按 category/state 分诊前先用 wip_get_many 取回)"],
         "key_pitfalls": [
             "AI disclaimer 必填：> *This was generated by AI during triage.*",
             "category: bug/enhancement",
@@ -1341,6 +1344,30 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "vendor_path": ".agents/skills/dev/hallmark/upstream/",
     },
 
+    "dev.windows_process_disk_io_audit": {
+        "skill": "windows-process-disk-io-audit",
+        "name": "Windows 进程磁盘 I/O 审计",
+        "skill_file": ".agents/skills/dev/windows-process-disk-io-audit/SKILL.md",
+        "keywords": ["审计磁盘读写", "磁盘 I/O 审计", "过量写盘", "偷偷写文件", "进程 IO 统计", "落盘量级", "磁盘读写审计", "I/O 归因"],
+        "description": "三层方法（进程级计数器 + 文件级快照 diff 归因 + 单次操作微基准）审计常驻服务日常磁盘读写量，定位不合理的高频/过量落盘",
+        "memory_key": None,
+        "first_action": "读取 .agents/skills/dev/windows-process-disk-io-audit/SKILL.md（方法论真源，含动手前必做的口径自校验）；脚本参数与用法速查 tools/disk_io_audit/README.md",
+        "workflow_summary": "1.selftest_io_channels.py 校口径 2.probe.py / daily_run.py 采量级（探针走后端终端）3.目录快照 diff 归因到具体文件 4.microbench.py 测单次操作成本 5.按 SKILL.md「从审计到修复」表提整改项",
+        "mcp_tools_priority": [
+            "exec_terminal_spawn（长跑探针必须经后端终端启动，agent 的 bash 沙箱会冻结进程）",
+            "exec_python（跑 tools/disk_io_audit/*.py；禁止用被测服务自己的 exec_python 做测量）",
+            "Read / Edit（按归因结果改代码）",
+        ],
+        "key_pitfalls": [
+            "GetProcessIoCounters 是进程逻辑 I/O 不是磁盘 I/O：stdout/管道计入、回环 socket 不计入 ⇒ 测量脚本绝不能经被测服务自己的 exec_python 跑",
+            "存活判定 = 心跳新鲜 ∧ pid 真在；只看心跳会连撒谎 90 秒并报出已不存在的 pid",
+            "「次数 × 文件大小」只是上界：估算合计 > 进程级实测时必须等比折算，宁可低估不虚报",
+            "*.db-wal / *.db-shm / *.db-journal 要从文件主榜剔除单列，否则每 tick 凭空多 2×32 KiB 幽灵写入并把真实写手挤出 Top",
+            "先看攒批阈值再判「每次调用都落盘」：把攒批误读成逐条会把写入量高估一个数量级",
+        ],
+        "level": "standard",
+    },
+
     # ────────────── daily（日常事务，借鉴 mattpocock/skills 改造）──────────────
     "daily.teach": {
         "skill": "teach",
@@ -1386,6 +1413,31 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "level": "full",
         "vendor_repo": "https://github.com/kangarooking/cangjie-skill",
         "vendor_path": ".agents/skills/daily/cangjie_extraction/upstream/",
+    },
+
+    # ────────────── daily.浏览器自动化下载 ──────────────
+    "daily.douyin_abdm_download": {
+        "skill": "douyin_abdm_download",
+        "name": "抖音视频批量下载（ABDM 插件）",
+        "skill_file": ".agents/skills/daily/douyin_abdm_download/SKILL.md",
+        "keywords": ["抖音下载", "下载抖音视频", "抖音分享链接", "批量下载视频", "抖音极速版", "ABDM", "douyin download", "复制打开抖音"],
+        "description": "用 ABDM Chrome 插件在 9222 调试浏览器批量静默下载抖音分享链接视频：嗅探→静默下载→规整命名→清弹窗",
+        "memory_key": None,
+        "first_action": "读取 .agents/skills/daily/douyin_abdm_download/SKILL.md；按就绪检查确认后端 8766 / 调试浏览器 9222 / ABDM 三者在线；把分享链接整理到 temp/<任务名>_<日期>/links.txt",
+        "workflow_summary": "1.提取链接(links.txt，格式「标题【作者】 | URL」) 2.就绪检查 3.ensure_silent 静默 4.batch_download.py 批量(后台) 5.close_abdm_popups.py 清弹窗 6.汇报文件清单",
+        "mcp_tools_priority": [
+            "exec_python (后端拉起 start_debug_browser.py)",
+            "Read / Write (links.txt)",
+            "Bash (batch_download.py / close_abdm_popups.py)",
+        ],
+        "key_pitfalls": [
+            "调试浏览器只能后端拉起（exec_python 跑 tools/browser/start_debug_browser.py），agent 自己 Start-Process 的会被回收",
+            "静默开关 UI 点击无效（React 只认真实 click），必须直写 chrome.storage.local 的 silentAddDownload/silentStartDownload",
+            "下载目录以 ABDM 设置为准（<data_drive>:/<system_data_root>\<data_drive>:/Downloads），禁止全盘 find 搜索",
+            "收尾必须 close_abdm_popups.py 清 ABDM 进度小窗（每个下载弹一个 675x240 小窗且叠同位）",
+            "websocket 连 9222 要 suppress_origin=True；douyinvod 直链带签名有时效，不要提前抓直链",
+        ],
+        "level": "full",
     },
 
     # ────────────── daily.思维工具集（12 个通用思维 Prompt，来自文章 https://mp.weixin.qq.com/s/NAdhdFrUq9-BKelqzqpwBQ）──────────────
@@ -1708,11 +1760,11 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "keywords": ["归档 wip", "清理已完成 wip", "把完成的 wip 转记忆", "wip 太多", "wip 膨胀", "wip archive"],
         "description": "批量归档 completed WIP 到项目记忆 + 物理删除记录",
         "memory_key": None,
-        "first_action": "按 wip_archive_workflow 逐步执行：1.wip_list(summary=true) 筛选 completed 2.逐条 wip_get 提炼经验+填 consumption_contexts/trigger_keywords 3.生成清单→用户审核→memory_set 写入 4.wip_delete 物理删除",
+        "first_action": "按 wip_archive_workflow 逐步执行：1.wip_list(status='completed') 取已完结清单（默认轻量，标题被截断，仅用于挑 id） 2.wip_get_many(ids=[...]) 批量取回全文提炼经验+填 consumption_contexts/trigger_keywords 3.生成清单→用户审核→memory_set 写入 4.wip_delete 物理删除",
         "workflow_summary": "1.筛选 completed 2.提炼经验+可消费性自检 3.用户审核+写入 4.物理删除",
         "mcp_tools_priority": [
-            "wip_list (step_1 筛选 completed，直连免审批)",
-            "localagent_advanced_tool(wip_get) (step_2 读详情，网关 GET 免审批)",
+            "wip_list(status='completed') (step_1 取清单，直连免审批)",
+            "wip_get_many (step_2 批量取回全文，直连免审批)",
             "memory_set (step_3 写入结构化记忆)",
             "localagent_advanced_tool(wip_delete) (step_4 物理删除，网关 DELETE)",
         ],
@@ -1729,7 +1781,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "step_1_filter": {
                 "name": "筛选 completed WIP",
                 "instruction": (
-                    "调用 wip_list(summary=true) 获取所有 WIP 摘要，筛选 status='completed' 的条目。\n"
+                    "调用 wip_list(status='completed') 获取所有已完结 WIP 的清单（默认轻量模式：已完结条目标题被截断，这里只用于拿 id，不是用来读内容的）。\n"
                     "若没有 completed 的，告知用户无需归档并结束。\n"
                     "wip_list 是直连 MCP 工具，免审批。"
                 ),
@@ -1886,6 +1938,7 @@ _DEV_ROLES: dict[str, str] = {
     "dev.client_dev": "tool",
     "dev.impeccable": "tool",
     "dev.hallmark": "tool",
+    "dev.windows_process_disk_io_audit": "tool",
 }
 
 # dev 桶入口决策树：开发任务第一步根据目标清晰度选入口
@@ -1908,7 +1961,7 @@ GENERAL_GUIDE = {
         "2. 根据用户任务调 agent_guide(task='...') 获取指导；未匹配时浏览下方全量清单选 task_type",
         "3. 【仅新会话首次任务】agent 评估本次任务可能用得上的 skill（基于 task 匹配结果 + 任务上下文 + 用户历史偏好），主动用 AskUserQuestion(multiSelect=true) 询问用户要加载哪些 skill。用户可多选、可跳过（选'其他'或直接说不需要）。本项目不分 model/user-invoked，所有 skill 都可选。用户选定后 agent 自己 Read 对应 skill 文件加载工作流。后续会话中途不再重复询问，除非用户主动要求。",
         "4. 按需读相关记忆：memory_get(<skill 的 memory_key>) 了解上次进度；通用偏好 memory_get('preferences')（轻量，按需）",
-        "5. 用户问'有什么任务'/'待办'/'上次没做完的'时，再调 agent_guide(task_type='system.task_reminder') 或 wip_list(summary=true) —— 不要主动检查，避免无关查询污染上下文",
+        "5. 用户问'有什么任务'/'待办'/'上次没做完的'时，再调 agent_guide(task_type='system.task_reminder') 或 wip_list（默认即轻量，直接调即可）—— 不要主动检查，避免无关查询污染上下文",
     ],
     "session_closure": [
         "1. 任务完成/中断/会话结束前，调 agent_guide(task_type='system.task_closure') 获取收尾指引",

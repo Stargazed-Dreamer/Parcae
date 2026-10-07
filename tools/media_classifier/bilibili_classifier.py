@@ -1,4 +1,4 @@
-"""<data_drive>:\<bilibili_videos>视频分类脚本 Phase 1
+"""<data_drive>:/<bilibili_videos>视频分类脚本 Phase 1
 - 扫描 <media_root> 和 <media_root> (排除 暂存音乐/、充电视频限免/、加密文件)
 - 提取文件名 + 弹幕样本
 - LLM 高并发分类 (10类)
@@ -17,19 +17,19 @@ from pathlib import Path
 import requests
 
 # ============ 配置 ============
-ROOTS = [r'<media_root>', r'<media_root>', r'E:\<data_drive>:\<backup_root>\<data_drive>:\<bilibili_videos>视频']
+ROOTS = [r'<media_root>', r'<media_root>', r'<data_drive>:/<backup_root>\<data_drive>:/<bilibili_videos>视频']
 EXCLUDE_DIRS = [
     r'<media_root>\暂存音乐',
     r'<media_root>\充电视频限免',
-    r'E:\<data_drive>:\<backup_root>\<data_drive>:\<bilibili_videos>视频\充电视频限免',
+    r'<data_drive>:/<backup_root>\<data_drive>:/<bilibili_videos>视频\充电视频限免',
 ]
 EXCLUDE_EXTS = {'.qmcflac', '.mflac', '.qmcogg', '.aria2'}
 VIDEO_EXTS = {'.mp4', '.flv', '.aac'}        # 主视频/音频文件
 SUBTITLE_EXTS = {'.ass', '.srt'}             # 关联字幕/弹幕
-OUTPUT = Path(r'<project_root>\output\<data_drive>:\<bilibili_organized_output>')
+OUTPUT = Path(r'<project_root>\workspace\bilibili_video')
 API = 'http://127.0.0.1:8766'
 CONCURRENCY = 40
-PROJECT = '<data_drive>:\<bilibili_videos>视频分类'
+PROJECT = '<data_drive>:/<bilibili_videos>视频分类'
 MAX_DANMAKU_CHARS = 800                      # 弹幕样本截断长度
 MAX_DANMAKU_LINES = 40                        # 最多取前N条弹幕
 
@@ -39,7 +39,7 @@ CATEGORIES = {
     6: '生活社会', 7: '动漫二次元', 8: '虚拟主播', 9: '擦边涩涩', 10: '无法分类',
 }
 
-SYSTEM_PROMPT = """你是<data_drive>:\<bilibili_videos>视频分类引擎。根据视频文件名和弹幕内容（如有），判断视频属于哪个分类。
+SYSTEM_PROMPT = """你是<data_drive>:/<bilibili_videos>视频分类引擎。根据视频文件名和弹幕内容（如有），判断视频属于哪个分类。
 
 ## 分类选项（必须选一个编号）
 1.搞笑鬼畜 - 沙雕新闻、鬼畜、meme、名场面、玩梗、空耳、恶搞、社死

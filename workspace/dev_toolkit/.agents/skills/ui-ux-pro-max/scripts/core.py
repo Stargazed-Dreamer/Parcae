@@ -130,9 +130,9 @@ class BM25:
         text = re.sub(r'[^\w\s]', ' ', str(text).lower())
         return [w for w in text.split() if len(w) >= 2]
 
-    def fit(self, <data_drive>:\Documents):
-        """Build BM25 index from <data_drive>:\Documents"""
-        self.corpus = [self.tokenize(doc) for doc in <data_drive>:\Documents]
+    def fit(self, documents):
+        """Build BM25 index from documents"""
+        self.corpus = [self.tokenize(doc) for doc in documents]
         self.N = len(self.corpus)
         if self.N == 0:
             return
@@ -150,7 +150,7 @@ class BM25:
             self.idf[word] = log((self.N - freq + 0.5) / (freq + 0.5) + 1)
 
     def score(self, query):
-        """Score all <data_drive>:\Documents against query"""
+        """Score all documents against query"""
         query_tokens = self.tokenize(query)
         scores = []
 
@@ -188,12 +188,12 @@ def _search_csv(filepath, search_cols, output_cols, query, max_results):
 
     data = _load_csv(filepath)
 
-    # Build <data_drive>:\Documents from search columns
-    <data_drive>:\Documents = [" ".join(str(row.get(col, "")) for col in search_cols) for row in data]
+    # Build documents from search columns
+    documents = [" ".join(str(row.get(col, "")) for col in search_cols) for row in data]
 
     # BM25 search
     bm25 = BM25()
-    bm25.fit(<data_drive>:\Documents)
+    bm25.fit(documents)
     ranked = bm25.score(query)
 
     # Get top results with score > 0

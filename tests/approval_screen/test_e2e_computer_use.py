@@ -191,34 +191,82 @@ def watchdog_with_shutdown():
     _release_session("watchdog_shutdown_teardown")
 
 
+def _window_is_live(hwnd: int) -> bool:
+    """用 Win32 直接判定句柄活性（IsWindow + GetWindowRect，且矩形有面积）。
+
+    为什么不能用 /screen/capture 当探针：capture 走 PrintWindow，对僵尸宿主窗口会
+    **假成功**（AGENTS.md「force_fullscreen_crop」那条同源），而 /screen/ocr 内部用
+    GetWindowRect，同一个句柄在那里抛 1400 无效窗口句柄 → 500。探针必须问真正会失败
+    的那条路，否则 fixture 把死句柄放过去，用例端着它跑到后半段才炸。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        if not user32.IsWindow(wintypes.HWND(hwnd)):
+            return False
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+            return False
+        return (rect.right - rect.left) > 0 and (rect.bottom - rect.top) > 0
+    except Exception:
+        return False
+
+
+def _live_calc_windows(client) -> list[int]:
+    """当前标题为「计算器」且句柄活性通过的窗口列表。"""
+    found: list[int] = []
+    resp = client.post("/screen/app/wait", json={"title": "计算器", "timeout": 1})
+    data = resp.json()
+    if data.get("status") in ("found", "ambiguous"):
+        found += [int(m["hwnd"]) for m in data.get("matches", []) if m.get("hwnd")]
+    resp = client.post("/screen/window/resolve", json={"title": "计算器"})
+    if resp.json().get("status") in ("found", "WINDOW_AMBIGUOUS"):
+        canonical = _extract_canonical_hwnd(resp.json())
+        if canonical:
+            found.append(int(canonical))
+    return [h for h in dict.fromkeys(found) if _window_is_live(h)]
+
+
+def _wait_no_calc_window(client, timeout: float = 12.0) -> None:
+    """等「计算器」窗口彻底消失再启动新实例。
+
+    上一用例的 teardown 只杀 CalculatorApp.exe（不能杀系统级 ApplicationFrameHost 宿主），
+    宿主框架会带着标题"计算器"滞留，且滞留期是"可见但正在销毁"的竞态：此刻拿到句柄，
+    用例跑一半就变无效句柄（实测同一条用例里 /screen/capture 先 200、随后 /screen/ocr
+    抛 GetWindowRect 1400 → 500，看着像环境坏了，其实是夹具给了将死的窗口）。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not _live_calc_windows(client):
+            return
+        time.sleep(0.3)
+
+
 def _launch_calc(client) -> int | None:
-    """启动计算器并等待窗口出现，返回 hwnd（可能为 canonical_hwnd 或普通 hwnd）。"""
+    """启动计算器并返回**连续两次复探仍活性通过**的窗口句柄（canonical 或普通 hwnd）。
+
+    为什么这么绕（2026-09-28 全量跑定位）：两条用例连跑即可复现——前一条 teardown 杀掉
+    CalculatorApp.exe 后，`/screen/app/wait` 与 `resolve` 会立刻报"找到"，但那是正在销毁的
+    宿主框架；用 IsWindow+GetWindowRect 单次判定也会通过（窗口此刻确实还在），于是死句柄
+    被交给用例，跑到 /screen/ocr 才炸 500。因此先等旧窗口消失，再对新窗口做稳定性复探。
+    全部失败则返回 None，由 fixture 走 skip，而不是把将死的句柄交给用例。
+    """
+    _wait_no_calc_window(client)
+
     resp = client.post("/screen/app/launch", json={"command": "calc.exe"})
     if resp.status_code != 200 or not resp.json().get("success"):
         return None
 
+    stable: int | None = None
     # 等待窗口出现，循环尝试 wait + resolve
     for _ in range(20):
-        # 1. 用 app/wait 拿 hwnd（ApplicationFrameHost 宿主窗口）
-        resp = client.post("/screen/app/wait", json={"title": "计算器", "timeout": 1})
-        data = resp.json()
-        if data.get("status") in ("found", "ambiguous"):
-            matches = data.get("matches", [])
-            if matches:
-                hwnd = matches[0].get("hwnd")
-                if hwnd:
-                    return hwnd
-
-        # 2. 用 window/resolve 拿 canonical_hwnd（更稳定）
-        # 注意：UWP 计算器窗口属于 ApplicationFrameHost.exe，process_name 用宿主名
-        resp = client.post("/screen/window/resolve", json={
-            "title": "计算器",
-        })
-        if resp.json().get("status") in ("found", "WINDOW_AMBIGUOUS"):
-            hwnd = _extract_canonical_hwnd(resp.json())
-            if hwnd:
-                return hwnd
-
+        candidates = _live_calc_windows(client)
+        if candidates and candidates[0] == stable:
+            return stable
+        # 句柄变了（旧窗口刚销毁/新窗口刚出现）：记下候选，下一轮复探确认它还在
+        stable = candidates[0] if candidates else None
         time.sleep(0.5)
 
     return None

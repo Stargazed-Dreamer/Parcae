@@ -178,13 +178,16 @@ class TestJudgePromptTemplate:
 
     def test_template_can_be_formatted(self):
         """模板能 format 不抛 KeyError。"""
+        # T13：模板多了一段执行账本占位符
         prompt = JUDGE_PROMPT_TEMPLATE.format(
             task="测试任务",
             msg_count=3,
             main_output="主 agent 输出",
+            execution_evidence="工具调用总数：1",
         )
         assert "测试任务" in prompt
         assert "主 agent 输出" in prompt
+        assert "工具调用总数：1" in prompt
 
 
 # ============================================================================

@@ -9,7 +9,7 @@ MiMo LRC 歌词分析器
   uv run python tools/media_classifier/mimo_lrc_analyze.py --musearc-db <external_project_root>\\MuseArc\\realLib\\db\\musearc.db --musearc-lib <external_project_root>\\MuseArc\\realLib
 
   # 分析测试目录中的歌词
-  uv run python tools/media_classifier/mimo_lrc_analyze.py --test-dir "E:\\<data_drive>:\<projects_root>\\歌曲分类\\测试文件"
+  uv run python tools/media_classifier/mimo_lrc_analyze.py --test-dir "<data_drive>:/<projects_root>\\歌曲分类\\测试文件"
 
   # 两者同时
   uv run python tools/media_classifier/mimo_lrc_analyze.py --musearc-db ... --musearc-lib ... --test-dir ...

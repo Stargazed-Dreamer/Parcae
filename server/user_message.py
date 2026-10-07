@@ -5,6 +5,11 @@
 
 工作端点（如 /llm/pool/*）被排除，因为它们由脚本调用而非 agent 直接使用。
 MCP 工具调用通过 monkey-patch 单独处理（在 _patched_execute_api_tool 中注入）。
+
+消息带 origin（unknown-outcome-evidence T11）：周期任务触发、系统提醒和真人输入
+共用这一条队列。旧实现把所有条目都重新冠上 `[用户补充指令]` 前缀，于是
+"到点该做记账了"这条系统提醒进了上下文之后，读起来就像用户刚说了这句话——
+agent 会把它当授权执行。前缀必须由 origin 决定，不能统一。
 """
 
 import logging
@@ -22,22 +27,53 @@ router = APIRouter(prefix="/user", tags=["用户消息"])
 # ========== 线程安全消息存储 ==========
 
 _lock = threading.Lock()
-_pending_messages: list[dict] = []  # [{"text": "...", "timestamp": 123.0, "id": 0}]
+# 每条消息形状：{"id", "text", "timestamp", "origin"}
+_pending_messages: list[dict] = []
 _next_id = 1
 
+# ========== 消息来源 ==========
 
-def add_message(text: str) -> dict:
-    """添加一条用户补充消息"""
+ORIGIN_HUMAN = "human"                # 真人敲的（GUI / REST）
+ORIGIN_SYSTEM_REMINDER = "system_reminder"  # 系统提醒（到期任务等）
+ORIGIN_AUTO_TRIGGER = "auto_trigger"  # triggered todo 到点自动注入
+
+_MESSAGE_PREFIXES = {
+    ORIGIN_HUMAN: "用户补充指令",
+    ORIGIN_SYSTEM_REMINDER: "系统提醒·非用户指令",
+    ORIGIN_AUTO_TRIGGER: "自动触发任务·非用户指令",
+}
+
+# 非人类来源附一句边界说明，避免"标了但读者还是当成指令往下做"
+_ORIGIN_DISCLAIMERS = {
+    ORIGIN_SYSTEM_REMINDER: "（这是系统自己产生的提醒，不是用户刚刚下的指令；"
+                            "要不要做、怎么做，需要用户确认或你按既有 skill 判断）",
+    ORIGIN_AUTO_TRIGGER: "（这是到期任务自动触发的通知，不是用户刚刚下的指令；"
+                         "它描述的是待办，不构成对新动作的授权）",
+}
+
+
+def add_message(text: str, origin: str = ORIGIN_HUMAN) -> dict:
+    """添加一条待注入消息。
+
+    origin 默认 human —— REST `/user/message` 就是用户自己在 GUI/API 里发的。
+    系统与自动触发必须显式传自己的 origin。
+    """
     global _next_id
+    if origin not in _MESSAGE_PREFIXES:
+        logger.warning("未知的消息来源 %r，按 system_reminder 处理", origin)
+        origin = ORIGIN_SYSTEM_REMINDER
     with _lock:
         msg = {
             "id": _next_id,
             "text": text,
             "timestamp": time.time(),
+            "origin": origin,
         }
         _next_id += 1
         _pending_messages.append(msg)
-        logger.info(f"用户补充消息已暂存 (id={msg['id']}): {text[:80]}...")
+        logger.info(
+            f"待注入消息已暂存 (id={msg['id']}, origin={origin}): {text[:80]}..."
+        )
         return msg
 
 
@@ -107,17 +143,29 @@ def should_inject(path: str) -> bool:
     return all(not (path == prefix or path.startswith(prefix + "/")) for prefix in EXCLUDED_PREFIXES)
 
 
+def _format_one(msg: dict, *, numbered: bool) -> str:
+    origin = msg.get("origin") or ORIGIN_HUMAN
+    label = _MESSAGE_PREFIXES.get(origin, _MESSAGE_PREFIXES[ORIGIN_SYSTEM_REMINDER])
+    header = f"[{label} #{msg['id']}]" if numbered else f"[{label}]"
+    disclaimer = _ORIGIN_DISCLAIMERS.get(origin, "")
+    text = msg["text"]
+    if disclaimer:
+        # 提醒类：先给边界说明再给内容，让"这不是授权"出现在第一行
+        return f"{header}{disclaimer}\n{text}"
+    return f"{header} {text}"
+
+
 def get_supplement_text() -> str | None:
-    """消费待发送消息，返回格式化的补充指令文本（无消息则返回 None）"""
+    """消费待发送消息，返回按来源分别标注的注入文本（无消息则返回 None）。
+
+    T11：只有 origin=human 的消息才配得上"用户补充指令"这个标题。
+    """
     msgs = consume_pending()
     if not msgs:
         return None
     if len(msgs) == 1:
-        return f"[用户补充指令] {msgs[0]['text']}"
-    parts = []
-    for m in msgs:
-        parts.append(f"[用户补充指令 #{m['id']}] {m['text']}")
-    return "\n".join(parts)
+        return _format_one(msgs[0], numbered=False)
+    return "\n".join(_format_one(m, numbered=True) for m in msgs)
 
 
 # ========== REST 端点 ==========

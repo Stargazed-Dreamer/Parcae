@@ -96,14 +96,15 @@ screen_request_control(
 |------|------|---------|------|
 | `NO_PERMISSION` | 只读端点放行，副作用端点 403 | 无 | — |
 | `NORMAL`（普通执行） | 副作用放行，危险/CONFIRM 仍逐次确认 | 10min 无操作进告警(黄色)+20min 降级 | → `NO_PERMISSION` |
-| `WATCHDOG`（看门狗） | 同 NORMAL，可选允许关机 | 不因空闲撤销；默认 10h 到期降级 | → `NORMAL` |
+| `WATCHDOG`（看门狗） | 同 NORMAL，但 `danger_level=confirm` 自动跳过弹窗（ADR-0026）；可选允许关机 | 不因空闲撤销；默认 10h 到期降级 | → `NORMAL` |
 
 **用户确认窗**：agent 在请求时指定 `mode`，用户只能允许/拒绝，不能改模式。
 - normal 模式：只有允许/拒绝按钮
 - watchdog 模式：额外显示时长输入(1-999h，默认 10)和"允许关机"复选框(默认勾选)
+- 任务需要关机时带 `needs_shutdown=true`：已有 watchdog 但缺关机位属于权限升级，会弹第二次窗（不必先 release）；什么都不缺时重复请求只返回 `skipped`，不改任何授权
 
 **续期规则**：
-- 危险/不可逆操作、`require_confirm=true` 和既有安全阻断仍逐次生效（watchdog 模式下 CONFIRM 仍弹窗=超时 deny）。
+- BLOCK 级危险关键词、调用方显式 `require_confirm=true` 和既有安全阻断逐次生效；watchdog 下 `danger_level=confirm` **自动跳过弹窗**（ADR-0026），所以 AFK 时不要指望这道窗替你拦住手滑。
 - 30 秒未响应默认取消；NORMAL 模式最后一次成功投递控制操作后 10min 进告警，30min 自动降级到 NO_PERMISSION。
 - 只读、dry-run、blocked、cancelled、failed 或 delivery leaked 不续期。
 - 任务完成或中断时调用 `screen_release_control` 主动收回，不依赖自动降级收尾。
@@ -387,18 +388,18 @@ execute_action(action="click", x=880, y=495, hwnd=xxx, dry_run=False)  # 真实�
 
 ### 接管确认与当前任务授权
 
-`screen_request_control` 是主动入口，受用户可见 GUI 介导，不会自行授权。弹窗展示任务说明、安全边界、5 分钟空闲撤销规则，以及默认未勾选的任务授权复选框。
+`screen_request_control` 是唯一的授权入口，受用户可见 GUI 介导，不会自行授权。弹窗展示任务说明、紧急停止热键提示、倒计时（默认 30 秒，超时按 `takeover_timeout_action` 处理，默认取消）和可选反馈框；请求 `mode="watchdog"` 时额外显示时长输入与"允许关机"复选框（**默认勾选**）。用户点"允许接管"即批准 agent 请求的那一档模式（决策 17：用户不能改模式），点"拒绝"则一条状态都不改。
 
 当前任务授权覆盖 `execute_action`、`focus_window`、`batch_actions`、`desktop_transaction`、`screen_semantic_action` 等普通副作用控制入口。授权期间：
 
 - 普通操作跳过重复接管和默认逐动作确认。
-- 危险关键词、窗口关闭、`require_confirm=true` 仍弹逐动作确认；block 类危险操作仍拒绝。
+- BLOCK 级危险关键词永远拒绝；`danger_level=confirm`（删除/支付/卸载等）在 normal 模式弹逐动作确认、在 watchdog 模式自动跳过弹窗（ADR-0026）；调用方显式传 `require_confirm=true` 时两种模式都仍弹窗。
 - 焦点保护、窗口边界、STALE_COORDINATES、紧急停止、后验检查不受影响。
-- 成功且未泄漏的控制投递才把 300 秒截止时间向后延长。
+- 成功且未泄漏的控制投递才重置空闲计时（normal 模式两阶段：`idle_warning_seconds` 进告警 + `idle_grace_seconds` 撤销，默认 10min + 20min）。
 
-未主动请求授权时，副作用端点仍通过 `takeover_confirm` 做被动兜底。GUI 不可用、用户拒绝或 30 秒超时都返回 cancelled，禁止重复请求向用户施压。`takeover_confirm_enabled=false` 会关闭被动兜底（不推荐），但不会自动创建当前任务授权。
+未主动请求授权时，副作用端点直接返回 403（`_enforce_session_permission`）；`takeover_confirm` 只是纵深防御兜底闸门，正常路径下弹不到它（能走到闸门说明会话已 active）。唯一的授权入口是 `screen_request_control`。GUI 不可用、用户拒绝或 30 秒超时都 fail-closed，禁止重复请求向用户施压。`takeover_confirm_enabled=false` 会关闭这层兜底（不推荐），但不会自动创建当前任务授权。
 
-> **`confirm_start` 与 `screen_request_control` 的关系**：`confirm_start`（`POST /screen/confirm/start`）是早期版本的接管确认端点，仅弹简单确认窗（task_description + hotkey_hint），无任务授权复选框、无 5 分钟空闲撤销、无 source 字段。**已被 `screen_request_control` 完全取代**——agent 应统一用 `screen_request_control`，不要再调 `confirm_start`。`confirm_start` 端点保留仅为向后兼容，未来可能删除。
+> **`confirm_start` 与 `screen_request_control` 的关系**：`confirm_start`（`POST /screen/confirm/start`）是早期版本的接管确认端点，仅弹简单确认窗（task_description + hotkey_hint），不创建当前任务授权、无 watchdog 时长/关机位、无 source 字段。**已被 `screen_request_control` 完全取代**——agent 应统一用 `screen_request_control`，不要再调 `confirm_start`。`confirm_start` 端点保留仅为向后兼容，未来可能删除。
 
 ### 审批机制补充说明
 
@@ -406,12 +407,12 @@ execute_action(action="click", x=880, y=495, hwnd=xxx, dry_run=False)  # 真实�
 
 **历史 bug**：`gui_client.hide_overlay()` 曾在内部调用 `release_task_control("overlay_hidden")`，导致 agent 在持久授权期间调任何截图端点（`capture_screen`/`screen_ocr`/`screen_snapshot`/`screen_wait_for`/`screen_analyze`，这些端点截图前会临时隐藏覆盖层）后，任务授权意外丢失。
 
-**当前修复**（2026-08）：`hide_overlay()` 不再调用 `release_task_control`，仅做视觉隐藏。任务授权的撤销只发生在以下显式场景：
-- `screen_release_control` 端点（agent 主动收回）
-- 紧急停止触发（`EmergencyStopManager._trigger` 显式调 `release_task_control("emergency_stop")`）
-- 5 分钟空闲超时（`ControlGrantManager.expire_if_idle` 内部撤销）
+**当前修复**：`hide_overlay()` 不再调用任何撤销逻辑，仅做视觉隐藏。任务授权的撤销只发生在以下显式场景：
+- `screen_release_control` 端点（agent 主动收回，reason=`agent_release`）/ GUI"收回授权"按钮（reason=`user_button`）
+- 紧急停止触发（`EmergencyStopManager._trigger` 显式调 `SessionManager.release("emergency_stop")`，**永久撤销**）
+- normal 模式空闲两阶段到期（`SessionManager._expire_if_idle`：`idle_warning_seconds` 进告警，再加 `idle_grace_seconds` 降到无权限，默认 600s+1200s）
 
-**回归检测**：截图后调 `gui_client.is_persistent_mode()` 应返回 True；若返回 False 说明 hide_overlay 副作用回归。
+**回归检测**：截图后调 `get_session_manager().is_active()` 应返回 True；若返回 False 说明 hide_overlay 副作用回归。
 
 #### 2. 紧急停止覆盖面
 
@@ -434,28 +435,28 @@ execute_action(action="click", x=880, y=495, hwnd=xxx, dry_run=False)  # 真实�
 2. _validate_action_params 失败    →  status=blocked
 3. 窗口范围检查失败                →  status=blocked
 4. STALE_COORDINATES               →  status=blocked
-5. danger_level=block              →  status=blocked（危险关键词拦截）
-6. _ensure_takeover_approved 失败  →  status=cancelled（接管确认未通过）
+5. danger_level=block              →  status=blocked（危险关键词拦截，任何模式都拦）
+6. _ensure_takeover_approved 失败  →  status=cancelled（纵深防御兜底；会话无授权时第 0 步就 403 了，见"唯一授权入口"）
 7. auto_skip（坐标缓存命中 + danger=safe + 非 explicit_confirm）→ 跳过确认
-8. danger_level=confirm            →  强制 require_confirm=True（覆盖任务授权）
+8. danger_level=confirm            →  normal 模式强制 require_confirm=True；**watchdog 模式自动跳过弹窗**（ADR-0026），调用方显式 require_confirm=true 时仍弹窗
 9. _task_authorization_is_active() →  require_confirm=False（任务授权短路）
 10. config require_confirm_by_default=True → 弹确认窗
 ```
 
 **关键点**：
 - `danger_level=block` 永远拒绝，无法被任务授权绕过
-- `danger_level=confirm`（如 `delete`/`format` 等危险关键词）永远弹确认窗，任务授权也不绕过
+- `danger_level=confirm` 在 **normal 模式弹确认窗**，在 **watchdog 模式自动跳过弹窗**（ADR-0026：授权看门狗=同意 confirm 范围内的动作）；调用方显式 `require_confirm=true` 时两种模式都弹窗
 - `auto_skip` 只在 `danger_level=safe` 时生效，且 agent 显式 `require_confirm=True` 可强制确认
 - 任务授权只短路"普通"操作（`danger_level=safe` 且不在 auto_skip 缓存）
 
 #### 4. 任务授权续期条件
 
-任务授权的 5 分钟空闲倒计时**仅在控制操作成功投递且焦点未泄漏时**才向后延长（`_touch_task_authorization_after_delivery`）：
+normal 模式的两阶段空闲计时（`idle_warning_seconds` 进告警 + `idle_grace_seconds` 降级，默认 600s+1200s）**仅在控制操作成功投递且焦点未泄漏时**才重置（`_touch_task_authorization_after_delivery`）：
 
 ```python
 if not success or dry_run or delivery_status == "leaked":
     return False  # 不续期
-gui_client.touch_input_time()  # 续期
+get_session_manager().extend()  # 续期（watchdog 下只更新 last_activity_at，不重置硬上限时钟）
 ```
 
 **不续期的场景**：
@@ -480,21 +481,21 @@ gui_client.touch_input_time()  # 续期
 
 | 维度 | normal 模式 | watchdog 模式 |
 |------|------------|---------------|
-| idle_timeout | 5 分钟空闲撤销 | **不生效**（agent 合理等待不被判定为空闲） |
-| takeover_confirm | 顶栏未显示时弹窗 | **禁用**（用户不在场，弹窗会阻塞） |
-| 硬上限 | 无 | **10h 到期撤销**（config `takeover_watchdog_max_duration_seconds` 可调，默认 36000s） |
-| require_confirm | safe 短路，CONFIRM 弹窗 | **不变**（safe 短路，CONFIRM 仍弹窗=超时 deny） |
+| idle_timeout | 两阶段：`idle_warning_seconds`(默认 10min) 进告警 + `idle_grace_seconds`(默认 20min) 降级 | **不生效**（agent 合理等待不被判定为空闲） |
+| takeover_confirm | 会话 active 即静默放行；无授权时端点先 403，弹不到接管窗 | 同左（watchdog 必然 active） |
+| 硬上限 | 无 | **10h 到期降级到 NORMAL**（config `watchdog_default_hours` 可调，1-999h 范围） |
+| require_confirm | safe 短路，CONFIRM 弹窗 | **CONFIRM 自动跳过弹窗**（ADR-0026）；显式 `require_confirm=true` 仍弹窗 |
 | DANGER_KEYWORDS_BLOCK | 拦截 | **不变**（永远拦截"关机/重启/格式化"等） |
-| EmergencyStop | Ctrl+` 撤销+冷却 | **不变**（用户随时可中断） |
+| EmergencyStop | Ctrl+\` 撤销授权 + `emergency_cooldown_seconds` 冷却 | **不变**（用户随时可中断；⚠️ 授权撤销是**永久**的，冷却只挡若干秒的"新操作"——想继续必须让用户重新批准） |
 
 **撤销条件**（三重保障）：
-1. 用户主动撤销（GUI 按钮 / `screen_release_control` 端点）
-2. 紧急停止触发（Ctrl+`）
-3. 硬上限到期（`max_duration_exceeded`，默认 10h）
+1. 用户主动撤销（GUI 按钮 reason=`user_button` / `screen_release_control` 端点 reason=`agent_release`）
+2. 紧急停止触发（Ctrl+\`，reason=`emergency_stop`）
+3. 硬上限到期（`max_duration_exceeded`，默认 10h）——降级到 NORMAL 而不是直接释放，且关机位归零
 
 **关键约束**：
 - **AFK 时必须 fail-closed**：用户不在场且遇到无法通过已授权、可观测、安全路径解决的问题时，立即停止并报告；不得绕过确认、放宽安全策略、切换未授权工具/通道、修改配置、无限重试或用替代动作“碰运气”。不确定是否安全时，一律按无法解决处理并放弃。
-- watchdog 模式**不豁免 CONFIRM 级别操作**（删除/支付/卸载等仍弹窗，用户不在场=超时 deny=操作被阻止）
+- watchdog 模式**会跳过 CONFIRM 级别弹窗**（删除/支付/卸载等 `danger_level=confirm` 直接执行，ADR-0026：授权看门狗=同意 confirm 范围内的动作）——AFK 时这条 fail-closed 纪律是唯一防线，别指望弹窗替你拦；调用方显式传 `require_confirm=true` 时仍弹窗
 - watchdog 模式**不豁免 DANGER_KEYWORDS_BLOCK**（关机/重启/格式化等永远拦截）
 - watchdog 模式**不影响 command_guard**（exec_python/exec_cmd 的命令审批逻辑不变，agent 不能通过 exec_python 直接调 shutdown）
 - 关机走专门端点（`POST /auto_shutdown/trigger`，agent 自己跑 loop + 调端点，**不走 computer use**）
@@ -517,12 +518,12 @@ gui_client.touch_input_time()  # 续期
 | `focus_protection_enabled` | `true` | 焦点安全总开关（关闭后等同旧版行为，不推荐） |
 | `protected_processes` | `["ChatGPT.exe", "Codex.exe", "trae.exe", "Trae.exe", "cursor.exe", "Cursor.exe"]` | 受保护进程列表（留空用默认） |
 | `allow_unfocused_input_default` | `false` | 键盘动作未验证焦点时是否放行的全局默认 |
-| `takeover_confirm_enabled` | `true` | 接管确认总开关。顶栏未显示时 agent 调键鼠端点前弹窗询问用户 |
+| `takeover_confirm_enabled` | `true` | 接管确认闸门开关。**现状**：所有副作用端点先做会话权限检查（无授权 403），闸门只在漏检/竞态时才可能弹窗，属纵深防御 |
 | `takeover_confirm_timeout_seconds` | `30` | 接管确认弹窗超时秒数 |
 | `takeover_timeout_action` | `"cancel"` | 接管弹窗超时行为；默认 fail-closed，兼容旧配置 `proceed` |
 | `takeover_persistent_enabled` | `true` | 当前任务授权功能总开关（旧配置名保留兼容） |
-| `takeover_idle_timeout_seconds` | `300` | 最后一次成功控制投递后的空闲撤销秒数 |
-| `takeover_watchdog_max_duration_seconds` | `36000` | 看门狗模式硬上限秒数（10h），到期自动撤销授权 |
+| `takeover_idle_timeout_seconds` | `300` | ⚠️ **遗留展示值**，不再决定撤销时机（只进 `/health` 的 `configured_idle_timeout_seconds`）。真正的 normal 空闲策略是 `idle_warning_seconds` + `idle_grace_seconds` |
+| `takeover_watchdog_max_duration_seconds` | `36000` | ⚠️ **遗留展示值**；watchdog 硬上限实际来自 `watchdog_default_hours`（小时，1-999），到期**降级到 NORMAL** 而非直接释放 |
 
 `/health` 的 `screen.takeover_persistent` 兼容字段返回结构化当前任务授权状态，包括 `configured`、`active`、`mode`（"normal"/"watchdog"）、`task_description`、`source`、`last_activity_at`、`expires_at`、`remaining_seconds`（watchdog 模式下为距硬上限剩余）、`max_duration_seconds` 和 `revoked_reason`。
 

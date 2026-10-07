@@ -1,11 +1,28 @@
 """T04: 参数使用率统计测试（spec D10）。"""
 from pathlib import Path
 
+import pytest
+
+import server.tool_usage_stats as tus
 from server.tool_usage_stats import (
     _bucket_code_length,
     get_stats,
     record_exec_python_call,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_stats_cache(monkeypatch):
+    """隔离模块级内存缓存（2026-09-28 修复顺序依赖）。
+
+    `_stats_cache` 是节流落盘的进程内缓存：同目录里先跑的 `test_exec.py` /
+    `test_exec_python_inline_wait.py` 会经 exec 路径把它从真实
+    `data/tool_usage_stats.json` 灌满（实测累计 5756 次），而本文件原来的用例
+    只 monkeypatch `_STATS_FILE`——路径换了，缓存没换，于是单独跑绿、整目录跑必红。
+    """
+    monkeypatch.setattr(tus, "_stats_cache", None)
+    monkeypatch.setattr(tus, "_dirty_since_save", 0)
+    monkeypatch.setattr(tus, "_last_save_monotonic", 0.0)
 
 
 def test_bucket_code_length():

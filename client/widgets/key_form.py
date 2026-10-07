@@ -752,6 +752,35 @@ class KeyForm(QDialog):
         return None
 
 
+def merge_edited_model(
+    original: dict,
+    *,
+    name: str,
+    scope: list[str],
+    tier: int,
+    enabled: bool,
+    display_name: str,
+) -> dict:
+    """表单那 5 个字段回写进原 model dict，**其余键原样保留**。
+
+    为什么单独抽出来：批量编辑对话框早先是从零拼 `{"name","scope","tier","enabled"}`，
+    于是表单不管辖的字段（v16 的 `context_window`，以及以后加的任何一个）在用户
+    改一次 tier 之后就被静默抹掉——这是会丢用户数据的那类 bug，必须能脱离 Qt 测。
+    """
+    merged = dict(original)
+    merged["name"] = name
+    merged["scope"] = scope
+    merged["tier"] = tier
+    merged["enabled"] = enabled
+    # v11：display_name 非空且与 name 不同才输出；清空要真的把旧值摘掉
+    cleaned = (display_name or "").strip()
+    if cleaned and cleaned != name:
+        merged["display_name"] = cleaned
+    else:
+        merged.pop("display_name", None)
+    return merged
+
+
 class _BatchEditModelsDialog(QDialog):
     """批量编辑一个 key 下所有 model 的启用状态 / Tier / scope
 
@@ -1036,12 +1065,16 @@ class _BatchEditModelsDialog(QDialog):
                 tier = 3
             # v11：收集 display_name（非空且与 name 不同才输出）
             display_name = self._display_name_edits[row].text().strip()
-            new_m = {"name": name, "scope": scope,
-                     "tier": tier,
-                     "enabled": self._enabled_cbs[row].isChecked()}
-            if display_name and display_name != name:
-                new_m["display_name"] = display_name
-            result.append(new_m)
+            # 从原 dict 起步再覆盖表单管辖的字段：表单不管辖的键（如 v16 的
+            # context_window）必须活着回去——见 merge_edited_model
+            result.append(merge_edited_model(
+                m,
+                name=name,
+                scope=scope,
+                tier=tier,
+                enabled=self._enabled_cbs[row].isChecked(),
+                display_name=display_name,
+            ))
         if not result:
             QMessageBox.warning(self, "验证失败", "至少保留一个 model")
             return

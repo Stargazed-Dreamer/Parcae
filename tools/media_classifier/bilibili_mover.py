@@ -1,4 +1,4 @@
-"""<data_drive>:\<bilibili_videos>视频分类移动脚本 Phase 2
+"""<data_drive>:/<bilibili_videos>视频分类移动脚本 Phase 2
 - 读取 classification_results.jsonl
 - 按分类+置信度分层 move 到 <media_root>视频整理\\
 - 高置信(>=0.8) 和 待确认(<0.8) 分开存放
@@ -13,8 +13,8 @@ from collections import defaultdict
 from pathlib import Path
 
 # ============ 配置 ============
-JSONL = Path(r'<project_root>\output\<data_drive>:\<bilibili_organized_output>\classification_results.jsonl')
-OUTPUT = Path(r'<project_root>\output\<data_drive>:\<bilibili_organized_output>')
+JSONL = Path(r'<project_root>\workspace\bilibili_video\classification_results.jsonl')
+OUTPUT = Path(r'<project_root>\workspace\bilibili_video')
 MAPPING_FILE = OUTPUT / 'move_mapping.json'
 DEST_ROOT = Path(r'<media_root>视频整理')
 CONFIDENCE_THRESHOLD = 0.8

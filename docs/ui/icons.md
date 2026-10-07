@@ -114,7 +114,7 @@ lambda on: btn.setIcon(icon("star", tokens.ICON_ACTIVE if on else tokens.ICON_DE
 | `sliders` | 系统工具 / 参数调整 |
 | `trending-up` | 股市 / 趋势（stock_advisor 面板、指数） |
 | `dices` | 抽卡采集 |
-| `tv` | <data_drive>:\<bilibili_videos>工具 / 视频源 |
+| `tv` | <data_drive>:/<bilibili_videos>工具 / 视频源 |
 | `hard-drive` | 磁盘管理 / 存储 |
 | `target` | 目标 / 异环模拟器 / 关注焦点 |
 | `clipboard-list` | 面经 / 清单 / 分析结果 |

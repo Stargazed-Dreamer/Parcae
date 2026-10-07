@@ -45,6 +45,7 @@ from typing import Any
 
 from client.core.agent.types import (
     TOOL_STATUS_PENDING,
+    TOOL_STATUS_TERMINAL,
     Event,
     Message,
     Session,
@@ -133,7 +134,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     name TEXT NOT NULL,
     args_json TEXT,
     safety TEXT DEFAULT 'read_only',
-    status TEXT DEFAULT 'pending',  -- pending / running / completed / failed / interrupted
+    status TEXT DEFAULT 'pending',  -- pending/running/completed/failed/interrupted/unknown
+                                     -- 后四者（含 unknown）为终态，禁止原地回写
     started_at REAL,
     ended_at REAL,
     trace_id TEXT,
@@ -1251,18 +1253,30 @@ class EventStore:
     async def update_tool_call_status(
         self, tool_call_id: str, status: str,
         started_at: float | None = None, ended_at: float | None = None,
-    ) -> None:
-        """更新工具调用状态（pending → running → completed/failed/interrupted）。
+    ) -> bool:
+        """更新工具调用状态（pending → running → completed/failed/interrupted/unknown）。
 
         C7（spec D11）：DB 操作包装到 asyncio.to_thread。
+
+        unknown-outcome-evidence T01：**终态不可回写**。已落入 completed/failed/
+        interrupted/unknown 的记录，任何改向其他终态或退回非终态的写入都被拒绝，
+        只追加一条 tool_call_status_write_rejected 审计事件——要修正只能追加事实，
+        不能覆盖事实。返回 False 表示本次写入被拒绝或记录不存在。
         """
-        def _sync() -> str | None:
+        def _sync() -> tuple[str | None, str | None, str]:
             row = self.conn.execute(
-                "SELECT session_id FROM tool_calls WHERE id = ?", (tool_call_id,)
+                "SELECT session_id, status FROM tool_calls WHERE id = ?", (tool_call_id,)
             ).fetchone()
             if row is None:
-                return None
+                return (None, None, "missing")
             session_id = row["session_id"]
+            current = row["status"]
+
+            if current in TOOL_STATUS_TERMINAL:
+                if current == status and started_at is None and ended_at is None:
+                    # 同值且不带时间字段：幂等 no-op，不写库也不造审计噪音
+                    return (session_id, current, "noop")
+                return (session_id, current, "reject")
 
             # 构造更新字段
             sets = ["status = ?"]
@@ -1280,17 +1294,70 @@ class EventStore:
                 params,
             )
             self.conn.commit()
-            return session_id
+            return (session_id, current, "write")
 
-        session_id = await self._run_write_sync(_sync)
+        session_id, prior_status, mode = await self._run_write_sync(_sync)
         if session_id is None:
             logger.warning("update_tool_call_status: tool_call %s not found", tool_call_id)
-            return
+            return False
+        if mode == "reject":
+            await self.append_event(session_id, "tool_call_status_write_rejected", {
+                "tool_call_id": tool_call_id,
+                "attempted_status": status,
+                "terminal_status": prior_status,
+                "started_at": started_at,
+                "ended_at": ended_at,
+            })
+            logger.warning(
+                "update_tool_call_status: refused to overwrite terminal status %s → %s "
+                "for tool_call %s (terminal records are append-only)",
+                prior_status, status, tool_call_id,
+            )
+            return False
+        if mode == "noop":
+            return True
         # 写 event（状态流转审计）
         await self.append_event(session_id, "tool_call_status_changed", {
             "tool_call_id": tool_call_id, "status": status,
             "started_at": started_at, "ended_at": ended_at,
         })
+        return True
+
+    async def tool_call_outcome_summary(self, session_id: str) -> dict[str, Any]:
+        """本会话工具调用的终态计数 + 非成功项清单。
+
+        unknown-outcome-evidence T13：给无人值守 judge 当**结构化证据**用。
+        此前 judge 只看主 agent 说了什么，"说完成了"就算完成；现在必须同时看到
+        执行账本里有多少 completed / failed / interrupted / unknown。
+        """
+        def _sync() -> dict[str, Any]:
+            rows = self.conn.execute(
+                "SELECT id, name, status FROM tool_calls WHERE session_id = ? "
+                "ORDER BY seq ASC",
+                (session_id,),
+            ).fetchall()
+            counts: dict[str, int] = {}
+            problems: list[dict[str, str]] = []
+            for r in rows:
+                status = r["status"] or TOOL_STATUS_PENDING
+                counts[status] = counts.get(status, 0) + 1
+                if status not in ("completed",):
+                    problems.append({
+                        "id": r["id"], "name": r["name"], "status": status,
+                    })
+            rejected_row = self.conn.execute(
+                "SELECT COUNT(*) AS cnt FROM events WHERE session_id = ? "
+                "AND type = 'tool_call_status_write_rejected'",
+                (session_id,),
+            ).fetchone()
+            return {
+                "total": len(rows),
+                "counts": counts,
+                "non_success": problems,
+                "rejected_terminal_writes": int(rejected_row["cnt"] or 0),
+            }
+
+        return await self._run_sync(_sync)
 
     async def load_tool_calls(
         self, session_id: str, status: str | None = None,
@@ -1435,6 +1502,39 @@ class EventStore:
                 (session_id,),
             ).fetchall()
             return [dict(r) for r in rows]
+        return await self._run_sync(_sync)
+
+    async def get_last_usage_anchor(self, session_id: str) -> dict | None:
+        """取该会话最近一次 LLM 调用的真实 usage，作为压缩判据的锚点（2026-10-07）。
+
+        为什么按 created_at 而不是 seq：usage.seq 存的是 runner 迭代轮数
+        （runner.py `append_usage(seq=iterations)`），每起一次新 run 都从 1 重计，
+        跨 run 不可比；created_at 才是全局时序。
+
+        一并返回该会话最近一次压缩的时间戳 last_compaction_at：压缩会重写
+        messages，比它更早的锚点算的是"压缩前那份上下文"，不能当增量基准。
+
+        Returns:
+            None（该会话从未有过 LLM 调用）或
+            {prompt_tokens, created_at, model, last_compaction_at}
+        """
+        def _sync() -> dict | None:
+            row = self.conn.execute(
+                "SELECT prompt_tokens, created_at, model FROM usage "
+                "WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            anchor = dict(row)
+            comp = self.conn.execute(
+                "SELECT MAX(created_at) AS at FROM compactions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            comp_at = comp["at"] if comp is not None else None
+            anchor["last_compaction_at"] = float(comp_at) if comp_at else 0.0
+            return anchor
+
         return await self._run_sync(_sync)
 
     async def get_total_tokens(self, session_id: str | None = None) -> int:

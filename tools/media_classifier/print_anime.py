@@ -1,6 +1,9 @@
 import json
+import sys
 
-jsonl = r'<project_root>\output\<data_drive>:\<bilibili_organized_output>\classification_results.jsonl'
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
+jsonl = r'<project_root>\workspace\bilibili_video\classification_results.jsonl'
 items = []
 with open(jsonl, encoding='utf-8') as f:
     for line in f:

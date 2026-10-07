@@ -190,7 +190,7 @@ async def browser_evaluate(req: BrowserEvaluateRequest):
 
     # 优先用持久 session（热态 <250ms）
     if req.session_id:
-        from .session.manager import get_session_manager
+        from .session.manager import get_closed_hint, get_session_manager
         mgr = await get_session_manager()
         sess = mgr.get_session(req.session_id)
         page = await mgr.get_page(req.session_id) if sess else None
@@ -202,7 +202,7 @@ async def browser_evaluate(req: BrowserEvaluateRequest):
                     error_code="TAB_NOT_FOUND",
                     error_message=BROWSER_ERROR_CODES["TAB_NOT_FOUND"],
                     phase="connect",
-                    debug_detail=f"session_id {req.session_id} 不存在或已失效",
+                    debug_detail=f"session_id {req.session_id} 不存在或已失效" + get_closed_hint(req.session_id),
                     elapsed_ms=elapsed,
                 ),
             )

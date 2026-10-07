@@ -9,7 +9,7 @@ state.json schema:
     "/path/to/file.jpg": {"category": "图片", "timestamp": "2026-07-22T22:50:00"}
   },
   "column_widths": {"col_0": 40, "col_1": 350, ...},
-  "last_source_dir": "<data_drive>:\<system_data_root>/<data_drive>:/Downloads",
+  "last_source_dir": "<data_drive>:/<system_data_root>/Downloads",
   "loaded_categories_config": "tools/file_classifier/categories.json"
 }
 """
@@ -22,7 +22,7 @@ from datetime import datetime
 class StateManager:
     """文件分类工具状态管理器
 
-    GUI 和后端 <data_drive>:/DownloadscanAction 共享同一 state.json 文件。
+    GUI 和后端 DownloadScanAction 共享同一 state.json 文件。
     每次写操作立即持久化，确保跨实例/跨进程可见。
     """
 

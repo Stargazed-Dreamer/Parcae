@@ -162,8 +162,10 @@ async def vl_providers():
     """返回 VL providers 详情（per-key_id 运行时状态）
 
     暴露 remote_vl.status().providers 列表，供客户端"模型池"面板的 VL 子面板展示。
-    每个 provider 含: key_id/label/model/base_url/available/cooldown_remaining/
+    每个 provider 含: key_id/label/model/models/base_url/available/cooldown_remaining/
     active_count/max_concurrency/last_error/privacy_warning。
+    models[] 按模型展开（Ticket 04）：每项含 name/current/dead_today——判死是
+    (key_id, model) 粒度，同 key 其余模型是否还能用只能从这里看出来。
     """
     from server.vl.remote_vl import remote_vl
     remote_vl.reload_config()
@@ -177,7 +179,43 @@ async def vl_providers():
         "daily_exhausted_at": vstatus.get("daily_exhausted_at", ""),
         "daily_exhausted_reason": vstatus.get("daily_exhausted_reason", ""),
         "providers": vstatus.get("providers", []),
+        "provider_exhausted": vstatus.get("provider_exhausted", {}),
     }
+
+
+class VisionResetResponse(BaseSchema):
+    """POST /vision/reset 响应：清了多少，逐项回报（0 也要如实返回 0）。"""
+    success: bool
+    dead_models_cleared: int = 0            # 解除的 (key_id, model) 判死条数
+    dead_model_keys_cleared: int = 0        # 涉及多少个 key_id
+    provider_exhausted_cleared: int = 0     # 解除的 key 级冷却数
+    daily_exhausted_cleared: bool = False   # 原本是否处于聚合耗尽态
+    quota_daily_exhausted_cleared: bool = False  # 配额文件侧是否同步解除
+    message: str = ""
+
+
+@router.post("/reset", response_model=VisionResetResponse, operation_id="vision_reset")
+async def vision_reset():
+    """手动解除 VL 当日累积的不可用标记（一键复位）。
+
+    清三处：模型级"今日判死"名单、key 级额度/5xx 冷却、聚合 daily_exhausted
+    （含 vl_quota 侧的持久标记）。不动限流冷却与 used_today 消耗计数。
+
+    用途：上游把模型 ID 补回来（或你往 keys.json 换了新 ID）之后，不必等到
+    次日 00:00 的自动重置——复位即重新参与选路。
+    """
+    from server.vl.remote_vl import remote_vl
+    cleared = remote_vl.reset_daily_state()
+    logger.warning(
+        "VL 复位：判死模型 %d 条 / 冷却 provider %d 个 / 聚合耗尽 %s / 配额侧 %s",
+        cleared["dead_models_cleared"], cleared["provider_exhausted_cleared"],
+        cleared["daily_exhausted_cleared"], cleared["quota_daily_exhausted_cleared"],
+    )
+    return VisionResetResponse(
+        success=True,
+        **{k: v for k, v in cleared.items()
+           if k in VisionResetResponse.model_fields},
+    )
 
 
 @router.post("/understand", response_model=UnderstandResponse, operation_id="understand_image")

@@ -1,6 +1,6 @@
 """集成测试：Florence-2(cap+ocr) + LLM池分类，验证全流程。
 用 cuda10 conda 环境运行：
-  <data_drive>:\<miniconda_root>\\envs\\cuda10\\python.exe temp\test_pipeline.py
+  <data_drive>:/<miniconda_root>\\envs\\cuda10\\python.exe temp\test_pipeline.py
 """
 import json
 import time
@@ -47,11 +47,11 @@ SYSTEM_PROMPT = """你是图片分类与标签提取引擎。根据图片的路�
 
 # 5 张代表性测试图
 TEST_IMAGES = [
-    r"I:\<data_drive>:\<source_images_root>\森空岛\白金\DM_20251128163046_001.webp",
-    r"I:\<data_drive>:\<classified_root>\图片\搞笑图片\5aff86666667b.jpg",
-    r"G:\<data_drive>:\<ipad_backup>\ipad\100APPLE\IMG_0041.JPG",
-    r"I:\<data_drive>:\<classified_root>\图片-Picture\4 壁纸\3\568.jpg",
-    r"I:\<data_drive>:\<classified_root>\图片\毕业照\同学照\丁沁菲.jpg",
+    r"<data_drive>:/<source_images_root>\森空岛\白金\DM_20251128163046_001.webp",
+    r"<data_drive>:/<classified_root>\图片\搞笑图片\5aff86666667b.jpg",
+    r"<data_drive>:/<ipad_backup>\ipad\100APPLE\IMG_0041.JPG",
+    r"<data_drive>:/<classified_root>\图片-Picture\4 壁纸\3\568.jpg",
+    r"<data_drive>:/<classified_root>\图片\毕业照\同学照\丁沁菲.jpg",
 ]
 
 def load_florence():

@@ -231,7 +231,8 @@ uv run python tools/llm/llm_token_stats.py --import
 
 所有 LLM/VL/AIGC key 统一存储在 `data/llm/keys.json`，单一 key 来源。
 
-- **单 key 多模型**：单条 record 含 `models: list[dict]`，一个物理 key 支持多模型；每个 model 对象含 `name`/`scope`/`tier`/`enabled`/`display_name` 等字段，模型可独立禁用，Key 的 `enabled` 是总开关。**tier (1-5)** 由 keys.json 中每个 model 的 `tier` 字段定义；`default_tier` 使用 `[min,max]` 范围，优先范围内更低 tier
+- **单 key 多模型**：单条 record 含 `models: list[dict]`，一个物理 key 支持多模型；每个 model 对象含 `name`/`scope`/`tier`/`enabled`/`display_name`/`context_window` 等字段，模型可独立禁用，Key 的 `enabled` 是总开关。**tier (1-5)** 由 keys.json 中每个 model 的 `tier` 字段定义；`default_tier` 使用 `[min,max]` 范围，优先范围内更低 tier
+- **`context_window`（可选，正整数）**：该 model 的上游上下文窗口（token 数），唯一消费方是 chat 面板的压缩判据（`docs/chat-engine.md` §6.3）。没填 = 判据报"上限未知"并且**不判压缩**——不会拿一个编出来的默认值去比。透出路经：keys.json → `LLMKey.model_context_windows` → `GET /llm/pool/models` 每条目的 `context_window`（0 = 未填）→ `ChatPanel.pick_context_window()`（同名多 provider 取**最小**非零值）→ `Compactor(max_context_tokens=...)`。⚠️ keys.json 的写侧（`_to_dict`）与 Key 表单（`merge_edited_model`）都必须原样带着这个键回去，否则用户在 keys.json 填的值会被一次 GUI 保存静默抹掉（两侧各有用例钉着）
 - **VL provider 参数**：存 keys.json 中含 `vl` scope model 的 key 记录的 `vision` 段；`config.toml [vision]` 段只保留全局开关和编码参数，选 key 由 `use_case` 驱动（`key_store.resolve_keys(use_case)`）
 - **协议分发**：key 级 `protocol` 字段（`"openai"` 默认 / `"anthropic"`）决定走 `_call_openai()` 或 `_call_anthropic()`；model 级 `display_name` 为可选展示名。迁移幂等：已有 key 补 `protocol: "openai"` 默认值
 

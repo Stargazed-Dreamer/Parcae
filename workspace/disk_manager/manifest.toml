@@ -1,7 +1,7 @@
 [component]
 name = "disk_manager"
-version = "0.3.0"
-description = "磁盘空间分析与清理建议（含 SpaceSniffer 快照导入）、系统环境全面备份（浏览器/游戏存档/桌面/系统设置）"
+version = "0.4.0"
+description = "磁盘空间分析与清理建议（含 SpaceSniffer 快照导入）、系统环境全面备份（浏览器/游戏存档/桌面/系统设置/文件关联，含 assoc_snapshot/diff/restore 三件套）、设置看门狗引擎（settings_watch/watch.py 统一 snapshot/diff/restore，纳管文件关联·PATH/环境变量·默认浏览器/URL协议·开机自启·Winlogon登录劫持）、迁移易漏四组导出（backup_groups.py：凭据/外观/系统策略/开发工具配置，全量备份自动跑）"
 project_tag = "disk_manager"
 enabled = true
 

@@ -113,3 +113,8 @@ class WipTaskUpdate(BaseSchema):
     blocked_reason: Optional[str] = None
     related_memory_keys: Optional[list[str]] = None
     extra_data: Optional[dict] = None
+
+
+class WipBatchGetRequest(BaseSchema):
+    """批量取 WIP 详情：一次拿几条，替代关掉 summary 全量拉取。"""
+    ids: list[str] = Field(..., min_length=1, max_length=100)

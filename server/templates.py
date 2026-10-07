@@ -198,7 +198,7 @@ else:
              "description": "每次滚动后等待秒数"},
         ],
         "template": '''import asyncio
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 
 async def main():
     async with async_playwright() as p:
@@ -600,7 +600,7 @@ async def template_tool(req: TemplateExecRequest):
                             f"模板 '{req.template}' 参数 '{p['name']}' 需要 "
                             f"{p['type']} 类型，收到: {value!r}"
                         ),
-                    )
+                    ) from None
             params[p["name"]] = value
         else:
             params[p["name"]] = p["default"]

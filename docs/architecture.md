@@ -1,44 +1,15 @@
 # 架构与设计决策
 
-本文档是 LocalAgent 的架构总览和关键设计决策深度论述。适合希望理解项目设计哲学、模块组织、数据流和"为什么这样设计"的读者。
+> **真源分工**（三份文档不互相复述）：
+> - `AGENTS.md` = 每次会话必读的约束与速查（技术栈、项目结构、硬规则）；
+> - `docs/project-intro.md` = 人类读者的叙事导览（比喻主干、章 → 模块映射表、FAQ）；
+> - 本文 = 架构深挖与决策理由 + ADR 索引（后端模块清单、一次任务的完整数据流、关键决策的来龙去脉）。
 
-> 如果只想快速部署使用，看 [README_public.md](../README_public.md) 和 [deployment.md](deployment.md) 就够了。本文档面向架构读者。
-
-## 概述
-
-LocalAgent 是一个跑在 Windows 上的本地 Agent 系统，由四个核心组件构成：
-
-1. **FastAPI 后端**（端口 8766）—— Agent 的"大脑"和"状态仓库"。提供 200+ REST 路由 + MCP 网关，承载所有业务逻辑、记忆系统、LLM 池、Skill 路由。
-2. **PySide6 GUI 客户端**—— 桌面可视化层。多分组面板（对话/概览/待办/工具/监控/设置等，由 `PanelRegistry` 扫 `client/panels/` 自动发现，另加载 workspace manifest 声明的组件面板）通过 HTTP + SSE 直连后端，附带 v6-lite 对话引擎。
-3. **Chromium 调试浏览器实例**（CDP 9222）—— 浏览器自动化执行器。独立用户数据目录，与工作浏览器隔离。
-4. **`.agents/skills/` + `workspace/`** —— 60+ Skill 定义和任务工作区，是 Agent 的"经验库"和"工作台"。
-
-**核心契约**：所有组件通过 MCP（Streamable HTTP）或 REST 通信，没有进程间共享状态。Agent 的"状态"——记忆、WIP、待办、偏好——全部存在后端 SQLite。
+本文档面向想理解"为什么这样设计"的架构读者；只想快速部署使用，看 [README_public.md](../README_public.md) 和 [deployment.md](deployment.md) 就够了。
 
 ## 架构总览
 
-```
-┌──────────────┐   MCP (Streamable HTTP)   ┌──────────────────────────┐
-│  IDE / 桌面  │ ───────────────────────── │      FastAPI 后端        │
-│  客户端里的  │                           │  (port 8766, /mcp 端点)   │
-│    LLM       │ ◀─────────────────────────│                          │
-└──────────────┘     工具调用结果回灌       │  ┌──────────────────┐    │
-                                              │  │  agent_guide     │ ← 任务路由入口
-┌──────────────┐   HTTP / SSE                │  │  memory (×3 层)  │    │
-│  PySide6 GUI │ ────────────────────────── │  │  llm_pool        │    │
-│  (多分组面板)│                            │  │  ocr / vl / exec │    │
-└──────────────┘                            │  │  browser (CDP)   │    │
-                                              │  │  screen / uia    │    │
-┌──────────────┐                            │  │  todos / wip     │    │
-│  Chromium    │ ◀── CDP 9222 ──────────────│  │  loop / inbox    │    │
-│  调试浏览器  │                            │  │  ...             │    │
-└──────────────┘                            │  └──────────────────┘    │
-                                              └──────────────────────────┘
-                                                                       │
-                                                                       ▼
-                                                              .agents/skills/ (60+ Skill)
-                                                              workspace/      (任务工作区)
-```
+> 四组件职责与端口、目录地图、数据流一张图见 [docs/project-intro.md](project-intro.md) 第 2 章「四个角色」「数据流一张图」；组件与端口速查见 `AGENTS.md`「技术栈」「项目定位」。本节只保留本文独有的后端模块清单与一次任务的完整数据流。
 
 ### 后端模块清单
 
@@ -155,20 +126,7 @@ LocalAgent 是一个跑在 Windows 上的本地 Agent 系统，由四个核心�
 }
 ```
 
-写入记忆时强制填两个消费场景字段：
-
-```json
-{
-  "key": "accounting_refund_handling",
-  "data": {"preference": "退款单独标记，不与消费对冲"},
-  "consumption_contexts": ["recurring.accounting"],
-  "trigger_keywords": ["退款", "账单对冲"]
-}
-```
-
-下次调 `agent_guide(task_type='recurring.accounting')` 时，后端会自动返回所有 `consumption_contexts` 匹配的记忆清单，并在 `first_action` 前注入"【必读记忆】"指令——agent 不需要记得读哪些记忆，guide 会主动推送。
-
-**这个约束的代价**：每次写入记忆都要填两个消费场景字段——但凡写了没人读的记忆，就是噪音。这个约束逼着经验提炼时就想清楚"这条经验未来在什么场景下会被消费"。
+写入记忆时强制填这两个消费场景字段——JSON 形状与强制原因见 `AGENTS.md`「记忆消费闭环（核心约束）」，写入端的动机见 [docs/project-intro.md](project-intro.md) 第 6.5 节；`agent_guide` 随之自动召回并注入"【必读记忆】"的机制见 `AGENTS.md` 同节。这个约束逼着经验提炼时就想清楚"这条经验未来在什么场景下会被消费"。
 
 **这个约束的收益**：
 
@@ -180,40 +138,9 @@ LocalAgent 是一个跑在 Windows 上的本地 Agent 系统，由四个核心�
 
 ### 3. SDD 流程作为上下文压缩防护
 
-长任务（多 ticket 实现、跨会话开发）很容易触发上下文压缩。压缩后 LLM 有一个不好的倾向：**认为压缩的历史是次要的、当前要求是主要的，于是重新拆任务或重写方案**——这会丢掉已审核的 spec 和已完成的工作。
+> **完整规则**（真源层级、硬规则、四阶段 `grill-me → to-spec → to-tickets → implement`、Anti-Cheat 约束）见 `AGENTS.md`「上下文压缩防护」与 [docs/project-intro.md](project-intro.md) 第 12.4 节「SDD：给会失忆的承包商提前立字据」；skill 编排见 [.agents/skills/dev/goal_engineering/SKILL.md](../.agents/skills/dev/goal_engineering/SKILL.md)。
 
-**真源层级**（从高到低）：
-
-1. `temp/sdd/<slug>/spec.md` + `tickets.md` —— 方案与任务真源（最高权威，工作记忆，不进 git）
-2. 压缩历史中的用户明确要求 —— 用户意图权威
-3. 压缩历史中的 agent 中间产物 —— 可重建，非权威
-
-**项目的硬规则**：
-
-- 真源是 `temp/sdd/<slug>/spec.md` + `tickets.md`，**不进 git**，是工作记忆。
-- 压缩后 agent 醒来**第一步必须读 spec 和 tickets**，对照当前 ticket 状态续跑。
-- **禁止**因压缩而重新拆任务（重写 `tickets.md`）或重写方案（重写 `spec.md`），除非用户明确要求"重新规划"。
-- 每完成一个 ticket 立刻更新 `tickets.md` 的 Status 字段（ready → in_progress → completed），作为压缩后的恢复锚点。
-- 执行阶段遇到不确定，读 spec 的 Anti-Cheat 节和 Bounds 节自行决策，**不回头问用户**。
-- 拿不准的写进 `temp/sdd/<slug>/BLOCKED.md`，跳过继续做别的，最后随交付提交。
-
-**SDD 流程四阶段**：
-
-1. **`grill-me`**：追问用户，把模糊需求变成清晰目标（输出 design-decisions 草稿）。
-2. **`to-spec`**：把目标变成 spec.md（含 Anti-Cheat 节防作弊 + Bounds 节防范围蔓延）。
-3. **`to-tickets`**：把 spec 拆成 tickets.md（每个 ticket 是 ready → in_progress → completed 三态）。
-4. **`implement`**：按 ticket 顺序实现，每完成一个立刻更新 Status。
-
-**这套规则的本质**：承认 LLM 在长任务里会忘，于是把"它应该记得什么"提前固化到文件里，把"它该怎么做"提前写到 Anti-Cheat 节里，让 LLM 在压缩后能自我对齐。这是项目里最像"为 LLM 的局限性做工程"的部分。
-
-**反作弊约束（Anti-Cheat）**：
-
-- spec 必须含 Anti-Cheat 节，列举"agent 容易偷懒的地方"和"如何检测"。
-- 红测试（必须失败的测试）先行，绿测试（必须通过的测试）跟上。
-- 每个 ticket 完成后必须更新 Status，禁止"批量更新"——这是恢复锚点的实时性要求。
-- 禁止扩范围：ticket 没要求的不要做，做了也不算交付。
-
-详见 [.agents/skills/dev/goal_engineering/SKILL.md](../.agents/skills/dev/goal_engineering/SKILL.md) 和 [.agents/skills/dev/to-spec/SKILL.md](../.agents/skills/dev/to-spec/SKILL.md)。
+**为什么把它算作一条架构决策**：长任务（多 ticket 实现、跨会话开发）总会触发上下文压缩，而压缩后 LLM 有一个不好的倾向——认为压缩的历史是次要的、当前要求是主要的，于是重新拆任务或重写方案，丢掉已审核的 spec 和已完成的工作。这套规则的本质是：承认 LLM 在长任务里会忘，于是把"它应该记得什么"提前固化到文件里（`temp/sdd/<slug>/spec.md` + `tickets.md`），把"它该怎么做"提前写到 Anti-Cheat 节里，让 LLM 在压缩后能自我对齐。这是项目里最像"为 LLM 的局限性做工程"的部分。
 
 ### 4. 三层 MCP 兜底：在 token 成本和能力覆盖之间找平衡
 
@@ -289,7 +216,7 @@ POST /screen/ocr  # 带完整审批流程
 按主题分组的深度文档：
 
 **对话引擎**：
-- [docs/chat-engine.md](chat-engine.md) — v6-lite 对话引擎 8 核心组件（SessionRunner / EventStore / Compactor 等）+ EventStore schema v9 + chat-panel-v2 关键设计 + QThread 桥接
+- [docs/chat-engine.md](chat-engine.md) — v6-lite 对话引擎核心组件（SessionRunner / EventStore / Compactor 等，**清单以该文档的组件表为准**）+ EventStore schema（版本以 `client/core/agent/event_store.py` 的 `_SCHEMA_VERSION` 为准）+ chat-panel-v2 关键设计 + QThread 桥接
 - [docs/agent-guide.md](agent-guide.md) — 任务路由系统（GUIDE_REGISTRY 结构 / 6 scope / consumption_contexts 消费闭环 / first_action 注入 / workspace 动态扩展）
 - [docs/agent-guide-keywords.md](agent-guide-keywords.md) — agent_guide 关键词编写规范（match_task_candidates 五路加权打分）
 

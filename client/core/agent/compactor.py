@@ -7,7 +7,9 @@
 - v6-02 §2.1：`has_attempted_reactive_compact` 标志位 retry 时不重置（防死循环）
 
 职责：
-1. `should_compact(messages, max_tokens)` —— 估算 tokens 是否超 85% 阈值
+1. `should_compact(messages, anchor)` —— 估算 tokens 是否超 85% 阈值。估算走
+   「上一次调用的真实 prompt_tokens + 之后新增消息字符增量」（UsageAnchor），
+   没有锚点才退回 ~4 char/token 粗估
 2. `compact(messages, llm_gateway)` —— 调 cheap tier LLM 生成摘要，重建上下文：
    - 中间消息 → 摘要（source=summary，visible=true，模型看得到，TASK_GOAL 字段覆盖任务目标）
    - 最近 3 轮（last 6 条 assistant+user+tool）原样保留
@@ -89,7 +91,7 @@ class PruningConfig:
 
 @dataclass
 class ContextBudget:
-    """上下文 token 预算 8 字段细分（替代 bytes/4 简化估算）。
+    """上下文 token 预算 8 字段细分（**结构预留，尚未接线**）。
 
     回收 v6-06:25-51，8 字段覆盖上下文所有消耗来源：
     - system_prompt：系统提示词（stable prefix + ephemeral）
@@ -101,9 +103,10 @@ class ContextBudget:
     - output_budget：输出预留（模型生成空间）
     - safety_buffer：安全余量（防边界溢出）
 
-    total_estimated_tokens 求和属性，供 should_compact 使用。
-    estimate_at_last_response 锚点：记录上次响应时的 token 估算，
-    下次只算增量（不从零重算）。None 表示尚未建立锚点。
+    total_estimated_tokens 求和属性（消费方待接线）。
+    estimate_at_last_response：手工维护的锚点字段，消费方待接线。真实的锚点
+    走 UsageAnchor（从 usage 表读上一次调用的真实 prompt_tokens），不用这个字段。
+    None 表示尚未建立锚点。
     """
 
     system_prompt: int = 0
@@ -155,12 +158,57 @@ class CompactionResult:
     summary_message: Message | None = None
 
 
+@dataclass(frozen=True)
+class UsageAnchor:
+    """上一次 LLM 调用的真实 prompt_tokens 锚点（2026-10-07 判据修复）。
+
+    为什么要锚点：`len(text)//4` 只数得到入库的消息，量不到 system prompt 与
+    工具 schema。实测同一会话真实峰值 97090，而全会话字符估算是 27196
+    （差 ~3.6 倍），拿这种数字判压缩会一路低估到 provider 真的 413。
+
+    last_compaction_at 用于自检陈旧：压缩会重写 messages，比它更早的锚点算的是
+    "压缩前那份上下文"，不能当增量基准（那种锚点必须作废，退回纯字符估算）。
+    """
+
+    prompt_tokens: int
+    created_at: float
+    last_compaction_at: float = 0.0
+    model: str = ""
+
+    @property
+    def usable(self) -> bool:
+        return self.prompt_tokens > 0 and self.created_at > 0
+
+    @property
+    def invalidated_by_compaction(self) -> bool:
+        return self.last_compaction_at > self.created_at
+
+
+@dataclass(frozen=True)
+class ContextEstimate:
+    """estimate_context_tokens() 的结果，带"这个数是怎么来的"。
+
+    basis:
+    - "usage_anchor+delta"：锚点真值 + 锚点之后新增消息的字符估算
+    - "chars_only"：没有可用锚点（首轮 / 锚点被压缩作废），只有字符估算
+    """
+
+    tokens: int
+    basis: str
+    anchor_tokens: int = 0
+    delta_tokens: int = 0
+
+    @property
+    def has_anchor(self) -> bool:
+        return self.basis == "usage_anchor+delta"
+
+
 class Compactor:
     """L2 上下文压缩器。
 
     用法：
         compactor = Compactor(max_context_tokens=32000, llm_gateway=gateway)
-        if compactor.should_compact(messages):
+        if compactor.should_compact(messages, anchor=anchor):
             new_messages = await compactor.compact(session_id, messages)
 
     T31c+：需要压缩元数据时用 compact_with_result()，返回 CompactionResult
@@ -170,11 +218,13 @@ class Compactor:
     def __init__(
         self,
         *,
-        max_context_tokens: int = 32000,
+        max_context_tokens: int = 0,
         tail_keep: int = DEFAULT_TAIL_KEEP,
         cheap_tier_model: str = "",
         pruning_config: PruningConfig | None = None,
     ):
+        # max_context_tokens=0 表示"上限未知"：keys.json 没填 context_window 时
+        # 不拿一个编出来的数字去判压缩（实测默认 32000 低于真实跑通过的 97090）。
         self.max_context_tokens = max_context_tokens
         self.tail_keep = max(tail_keep, DEFAULT_TAIL_KEEP)
         self.cheap_tier_model = cheap_tier_model
@@ -185,24 +235,66 @@ class Compactor:
     # 估算
     # ------------------------------------------------------------------
 
-    def should_compact(self, messages: list[Message]) -> bool:
+    def estimate_context_tokens(
+        self,
+        messages: list[Message],
+        anchor: UsageAnchor | None = None,
+    ) -> ContextEstimate:
+        """估算"下一次请求会有多大"：锚点真值 + 锚点之后的新增消息。
+
+        锚点不可用（None / prompt_tokens=0 / 已被一次压缩作废）时退回纯字符估算，
+        并在 basis 里如实写明——不假装它和锚点版本一样准。
+        """
+        if anchor is not None and anchor.usable and not anchor.invalidated_by_compaction:
+            # `>=` 不是笔误：usage 行写在 LLM 响应之后，所以"同一时间戳"的消息只可能是
+            # 请求构建之后落库的（assistant 消息 / 工具结果）。而本机时钟粒度是 ~15.6ms
+            # 一个 tick，连着两次写常拿到同一个 float——用 `>` 会把这种"其实更新"的
+            # 消息静默丢掉，正好是本次要修的"低估"那侧。宁可同 tick 多算一条。
+            delta = sum(
+                len(self._msg_to_text(msg)) // 4
+                for msg in messages
+                if msg.created_at >= anchor.created_at
+            )
+            return ContextEstimate(
+                tokens=anchor.prompt_tokens + delta,
+                basis="usage_anchor+delta",
+                anchor_tokens=anchor.prompt_tokens,
+                delta_tokens=delta,
+            )
+
+        chars_only = sum(len(self._msg_to_text(msg)) // 4 for msg in messages)
+        return ContextEstimate(tokens=chars_only, basis="chars_only", delta_tokens=chars_only)
+
+    def should_compact(
+        self,
+        messages: list[Message],
+        anchor: UsageAnchor | None = None,
+    ) -> bool:
         """判断是否需要压缩：估算 tokens 超 85% 阈值时返回 True。
 
+        估算口径见 estimate_context_tokens()（锚点真值 + 增量）。
         8-12: client 引擎不再 try-import server.llm_pool.compression（ADR-0027
-        依赖方向：client 引擎纯 Python 核心库不依赖 server 包），固定用本地
-        字符数粗估（~4 char/token）。原实现的估算行为随 server 代码漂移，
-        且纯 client 场景隐式要求 server 包可导入。
+        依赖方向：client 引擎纯 Python 核心库不依赖 server 包），字符侧固定用
+        本地粗估（~4 char/token）。
         """
-        total = 0
-        for msg in messages:
-            total += len(self._msg_to_text(msg)) // 4
+        estimate = self.estimate_context_tokens(messages, anchor)
+        if self.max_context_tokens <= 0:
+            # 上限未知 ⇒ 不判压缩。这里不打 warning：keys.json 没填 context_window
+            # 是常态配置，不是故障。
+            logger.info(
+                "should_compact: 上限未知（max_context_tokens=0），estimate=%d basis=%s → 不判压缩",
+                estimate.tokens, estimate.basis,
+            )
+            return False
         threshold = int(self.max_context_tokens * COMPACT_THRESHOLD_RATIO)
         logger.debug(
-            "should_compact: total_tokens=%d, threshold=%d (%d%% of %d), compact=%s",
-            total, threshold, int(COMPACT_THRESHOLD_RATIO * 100),
-            self.max_context_tokens, total > threshold,
+            "should_compact: estimate_tokens=%d (basis=%s anchor=%d delta=%d), "
+            "threshold=%d (%d%% of %d), compact=%s",
+            estimate.tokens, estimate.basis, estimate.anchor_tokens, estimate.delta_tokens,
+            threshold, int(COMPACT_THRESHOLD_RATIO * 100),
+            self.max_context_tokens, estimate.tokens > threshold,
         )
-        return total > threshold
+        return estimate.tokens > threshold
 
     # ------------------------------------------------------------------
     # 压缩

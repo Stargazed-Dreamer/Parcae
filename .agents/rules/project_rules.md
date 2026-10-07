@@ -13,7 +13,7 @@
 - **`daily/` 桶**：`teach`（教学）/ `cangjie_extraction`（蒸馏方法论）
 - 元 skill：`skill-creator`（创建新 skill）/ `anti_hallucination`（小修补防幻觉）/ `neat-freak`（文档同步）/ `task_closure`（任务收尾）
 
-若现有 skill 能覆盖需求 → 直接路由到对应 skill，不重复造轮子。
+若现有 skill 能覆盖需求 → 直接路由到对应 skill，不重复造轮子。若现有 skill 覆盖不了、你觉得该新建 → **先过 `AGENTS.md`「Skill 编写」的准入判据**（默认不建：需同时满足高频 + 有坑），不满足就记日志或写 `docs/` 专题文档。
 
 ### 2. 检查 MCP 工具优先级（必做）
 
@@ -128,6 +128,8 @@
 ## 文档与注释变更（2026-09-16 防过时整改新增，详见 AGENTS.md「文档防过时规范」）
 
 - [ ] 是否新写了易漂移的统计数字（面板/工具/条目/图标/ADR/schema 版本/间隔天数）？→ 改为指向代码常量、运行时清单或定性描述
+- [ ] 是否写了"原 X 已删除/已改掉 vN"式考古句？→ 除非不写会误导读者去找/去用已消失的东西，否则删掉，只留现状
+- [ ] 是否写了事无巨细的细节？→ 细节只在本就该写或非常值得时展开，其余压成"结论 + 代码路径锚点"（默认"能删一半"）
 - [ ] 行为重构（尤其是"改掉旧行为"类）是否 grep 了旧行为关键词并同步全部 docstring / `docs/*.md` / config 注释？
 - [ ] 文档中引用的文件路径是否实际存在？移动/删除文件后是否全仓 grep 清理了引用？
 - [ ] 写"当前是 X"前是否实测（import 常量 / 数文件 / 跑发现逻辑），而非照抄其他文档？
@@ -146,7 +148,7 @@
 
 ## Guide 关键词维护（强制，每次新增/修改 skill 必查）
 
-> **背景**：2026-08-08 测试 guide 功能时发现"我今天都干了啥，帮我捋一下时间线"无法路由到 daily_summary（得分仅 6，未达 strong_match 阈值），且 60+ skill 的 keywords 存在大量跨 skill 重复、泛动词、同 skill 内重复，导致路由串台。本规则防止同类问题复发。
+> **背景**：2026-08-08 测试 guide 功能时发现"我今天都干了啥，帮我捋一下时间线"无法路由到 daily_summary（得分仅 6，未达 strong_match 阈值），且当时全量 skill 的 keywords 存在大量跨 skill 重复、泛动词、同 skill 内重复，导致路由串台。本规则防止同类问题复发。
 
 **核心原则：keywords 是路由的"指纹"，必须唯一、具体、可区分。向量化是安全网，不是脏关键词的借口。**
 
@@ -168,7 +170,7 @@ GUIDE_REGISTRY 的 `match_task_candidates` 五路加权打分：
 - [ ] **同 skill 内去重**：同一 skill 的 keywords 列表内不能有重复词，且不能有语义重叠的变体（如"客户端开发"与"开发客户端"同时存在）
 - [ ] **短英文 keyword（≤4 字符纯 ASCII）**：IRR/NPV/DCF/TDD/ADR/WIP 等已自动跳过 kw_fuzzy（避免 bigram 误匹配），但仍参与 kw_exact。新增短英文 keyword 时确认它的完整子串不会出现在常见英文 query 中
 - [ ] **向量化兜底验证**：对口语化 query（无 keyword 命中），确认向量化能正确路由。测试方法：`uv run python temp/test_match_logic.py`（或直接调 `match_task_candidates(query, top_n=3)`）
-- [ ] **盲测集回测（强制）**：修改 keywords 后必须跑 `uv run python tests/guide_eval/run_eval.py`（tests/guide_eval/cases.jsonl 固化 ~135 条真实/口语 query + 期望 top1 标注），top1 命中率 < 85% 即红。pytest 挂 quick 层（tests/guide_eval/test_guide_eval.py）。known_gap=true 的用例是已知路由缺口 backlog，修复串台后把 known_gap 移除并更新 note
+- [ ] **盲测集回测（强制）**：修改 keywords 后必须跑 `uv run python tests/guide_eval/run_eval.py`（`tests/guide_eval/cases.jsonl` 固化真实/口语 query + 期望 top1 标注，条数以该文件为准，`wc -l` 可实测），top1 命中率 < 85% 即红。pytest 挂 quick 层（tests/guide_eval/test_guide_eval.py）。known_gap=true 的用例是已知路由缺口 backlog，修复串台后把 known_gap 移除并更新 note
 
 ### 已知坑点（历史教训）
 
@@ -205,10 +207,11 @@ GUIDE_REGISTRY 的 `match_task_candidates` 五路加权打分：
 - ✅ 密钥文件路径：用 `lib.secret.get_llm_keys_path()` / `lib.secret.get_secrets_toml_path()` 获取，不硬编码路径
 - ✅ 密钥不存在时的降级：`get_secret(key, default=None)` 返回 None，`get_secret_or_raise(key)` 抛 `SecretNotFoundError`
 
-### 迁移工具
+### 备份与恢复工具
 
-- `tools/migrate_secrets.py`：将 config.toml 中的旧密钥字段迁移到 secrets.toml（幂等，支持 `--dry-run`）
-- 迁移后 config.toml 中的 `tushare_token` / `github_token` 字段应已删除
+- `tools/backup_secrets.py`：备份密钥文件（keys.json / secrets.toml / config.toml）
+- `tools/restore_secrets.py`：列出可用备份并按 `--version` 恢复（恢复前自动留 `<file>.pre_restore.<ts>.bak`；`--dry-run` 只看不动，`--yes` / `--json` 供 agent 用）——参数与退出码以脚本自身 docstring 为准
+- 新机器请按 `config.example.toml` 的 `[tokens]` 模板手工创建 `data/secret/secrets.toml`
 
 ### 检查项（每次代码变更后必查）
 
@@ -238,7 +241,7 @@ GUIDE_REGISTRY 的 `match_task_candidates` 五路加权打分：
 ## 待办模块变更
 
 - [ ] 新增的 todos/wip 端点是否在 `server/main.py` 中注册？
-- [ ] `_mcp_include` 是否更新（高频查询 todos_due/wip_list/wip_get 直连）？
+- [ ] `_mcp_include` 是否更新（高频查询 todos_due/wip_list/wip_get/wip_get_many 直连）？
 - [ ] `_CATEGORY_PREFIXES` 是否添加新前缀（todos_, wip_）？
 - [ ] `/health` 是否返回 todos 状态？
 - [ ] `agent_guide.py` 中相关条目的 first_action / mcp_tools_priority 是否更新？
@@ -255,17 +258,19 @@ GUIDE_REGISTRY 的 `match_task_candidates` 五路加权打分：
 
 ## 文档更新
 
-- [ ] `.agents/skills/_index.md` - Skill列表、API接口表、项目结构是否更新？
+- [ ] `.agents/skills/_index.md` - Skill列表、API接口表、项目结构是否更新？⚠️ 「组件化模块」段是 `uv run python -m tools.generate_index` 生成的，**不要手改**；改完 workspace 组件的 `manifest.toml`/`SKILL.md` 必须跑一次生成器（漏跑会有人补不上：2026-09 三个组件的索引行连着缺了几轮）。`tools/audit/drift_detector.py` J 节专抓这个
 - [ ] `README.md` - 快速开始、Skill使用指南、API列表、项目结构是否更新？
-- [ ] **CHANGELOG.md** - 每次功能变更/Bug修复/安全修复后，在 `[Unreleased]` 段对应分类（Added/Changed/Fixed/Security）下添加条目。格式：`- 简述变更（涉及文件路径，为什么改）`。release 时把 `[Unreleased]` 改为 `[版本号] - YYYY-MM-DD` 并在顶部加新的空 `[Unreleased]`，然后跑 `uv run python tools/migrate_changelog.py` 把旧 release 段移到 `docs/changelog-archive.md`（默认保留最近 1 个，`--keep N` 改保留数）。CHANGELOG.md 仅含 `[Unreleased]` + 最近 1 个 release，避免活跃段过长被 agent 误伤。详见 `.agents/wip/changelog_setup.md`
+- [ ] **CHANGELOG.md** - 每次功能变更/Bug修复/安全修复后，在 `[Unreleased]` 段对应分类（Added/Changed/Fixed/Security）下添加条目。格式：`- 简述变更（涉及文件路径，为什么改）`。release 时把 `[Unreleased]` 改为 `[版本号] - YYYY-MM-DD` 并在顶部加新的空 `[Unreleased]`，然后跑 `uv run python tools/migrate_changelog.py` 把旧 release 段移到 `docs/changelog-archive.md`（默认保留最近 1 个，`--keep N` 改保留数）。CHANGELOG.md 仅含 `[Unreleased]` + 最近 1 个 release，避免活跃段过长被 agent 误伤。详见 `docs/dev-workflow.md`「CHANGELOG 维护」章节
+- [ ] **`docs/project-intro.md`（人类读者入口）** - 本轮改动是否落在该文「章 → 模块映射表」覆盖的章节里？**改了哪个模块就检查对应章**（叙述、比喻、代码路径引用是否还成立）；新增模块时同步补映射表一行。该文档刻意不写易漂移统计数字，需要数量时指向代码常量/运行时清单
 - [ ] 对应Skill的 `.md` 文件 - 工作流程、参数、依赖是否更新？
 - [ ] `config.example.toml` - 新增的配置项是否添加模板？
 - [ ] GUI 监控面板（`client/panels/monitoring.py`）- 新模块/新状态是否在面板中展示？
 - [ ] 记忆 key 是否需要新增或更新？
 - [ ] `tools_manifest.json` - 新增工具是否添加到清单？（GUI 自动读取此文件）
-- [ ] `client/widgets/tool_runner.py` - 仅在 GUI 展示、分类、队列或启动流程变化时更新；新增工具通常只改 `tools_manifest.json`。（旧 `tools_launcher.py`/`tools_manifest.md`/`launcher.bat` 已删除，由 `client/panels/tools.py` + `client/widgets/tool_runner.py` 替代）
+- [ ] `client/widgets/tool_runner.py` - 仅在 GUI 展示、分类、队列或启动流程变化时更新；新增工具通常只改 `tools_manifest.json`。
 - [ ] `AGENTS.md` - 工具脚本表是否更新？（项目结构已程序化，见上方"项目结构变更"段；AGENTS.md 只保留简要大纲）
 - [ ] `server/agent_guide.py` 的 `GUIDE_REGISTRY` - 新增 skill 时是否同步添加条目？（task_type 命名规范：`{scope}.{name}`，内置 scope=recurring/adhoc/system/dev/daily，workspace 扩展可引入新 scope 如 recording）
+- [ ] 组件化 skill 走 `workspace/<comp>/` 的 `manifest.toml` + `loop_actions.py`(`GUIDE_REGISTRY_ENTRIES`) + `SKILL.md` 三件套，注册后四道闸门按序跑：`uv run python -m tools.generate_index` → `uv run python tools/check_skills.py` → `uv run python tools/audit/drift_detector.py` → `uv run python tests/guide_eval/run_eval.py`（改 keywords 必回测，红阈值 85%；与既有 skill 抢词时补反向守卫用例）。keywords 写法见 `docs/agent-guide-keywords.md`，⚠️ 条目在后端进程导入时合并，**注册/改动后需重启后端**才生效
 
 ## 配置变更
 
@@ -360,7 +365,7 @@ ruff check --fix --unsafe-fixes server client tests  # 修了 19 个
 
 # ✅ 正确：--unsafe-fixes 后必须跑全测试套件验证
 ruff check --fix --unsafe-fixes server client tests
-uv run python -m pytest tests/ -v --tb=short  # 验证没破坏功能
+uv run python tools/run_tests_batched.py  # 验证没破坏功能（分批全量，单进程跑整套会吃 11-12 GB）
 ```
 
 **判卷标准**：测试修复若让测试"通过"但不验证真实行为（跳过过时测试 / try-except 吞 crash / 盲目放宽断言），算修复失败，必须重做。

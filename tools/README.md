@@ -13,7 +13,7 @@ tools/
 ├── file_classifier/      # 文件分类器（带 GUI）
 ├── image_organizer/      # 图片整理（Florence-2/Qwen-VL + LLM 分类）
 ├── llm/                  # LLM 工具（API 测试、批量注释、Token 统计、帖子总结）
-├── media_classifier/     # 媒体分类（<data_drive>:\<bilibili_videos>视频、文字篇章、歌词分析）
+├── media_classifier/     # 媒体分类（<data_drive>:/<bilibili_videos>视频、文字篇章、歌词分析）
 ├── mindforge/            # MindForge 文档转换守护进程
 ├── network/              # 本机网络/网卡工具（WiFi 掉线一键修复 bat）
 ├── release/              # 源码分发 profile 只读审计
@@ -36,6 +36,25 @@ tools/
   - CLI：`uv run python tools/audit/drift_detector.py`（需 import `server.main`，故必须在仓库根运行）
   - 输出：控制台摘要 + `temp/audit/drift_report.md`。报告是**可再生产物**，所以写 temp/ 不写 `docs/`；脚本本身是工具，故从 temp/ 迁到本目录
   - ⚠️ 本目录不在 `pyrightconfig.json` 的 `include` 范围内，仓库级 `uv run pyright` **从不检查它**，改动后须显式 `uv run pyright tools/audit/drift_detector.py`
+- `memory_health_report.py` — **记忆库体检报告**（只读，随时可跑）
+  - 回答四件事：写入的记忆有没有人消费、维护器标签与实际使用是否互相打脸、索引在不在烂、上一轮整改有没有留下证据
+  - 指标计算复用 `server/memory/metrics.py`（与后端维护器同一份实现，避免两处算法漂移）
+  - 判色纪律：只有**结构上无争议**的缺陷判红/黄（指标算不出来、明细被 retention 删光而日表不在、superseded 旧全文仍在索引、`fact_type` 越界、投影层 `trace_id` 全空导致无法归因）。行为类指标（消费漏斗、归档率）**只报数不设阈值**——没基线不设线，攒够两周日表后按实测分布定
+  - CLI：`uv run python tools/audit/memory_health_report.py [--days 14] [--json]`；输出控制台摘要 + `temp/audit/memory_audit.md`（可再生产物，故写 temp/）；有 red 时退出码 1
+  - ⚠️ 同 `drift_detector.py`：仓库级 pyright 不覆盖本目录，改动后须显式 `uv run pyright tools/audit/memory_health_report.py`
+- `recall_annotator.py` — 记忆召回判卷标注器（A 通道：task_type → 必读块），产出人工 gold 集
+  - 为什么存在：`surfaced_ratio` 这类行为指标只报数不设线（没基线），而"前 5 条到底该不该"必须由人判——
+    判卷人不能是被评对象自己。出题池取 `context_projections.rank_before` 的**并集**（含 86% 从未上屏的候选），
+    不是只给已上屏的 5 条，否则考的是"能不能挑出系统已经挑好的"
+  - 盲评：不显示分数、不显示 `matched_by`（`server/memory/evidence.py:197` 只看 None 而检索层给缺路填 0，
+    实测 BM25-only 也报 `both`）、不显示当前上屏集；顺序按 `(task_type, key)` 的 sha256 打乱，跨运行稳定可续标
+  - 三档 `1 必须 / 2 有用 / 3 无关`，`U` 撤销、`N` 换池；**未标＝不主张相关**，不进 gold 也不算噪声，
+    所以一趟只挑该读的十来条，不必把 555 条逐个打勾
+  - CLI：`uv run python tools/audit/recall_annotator.py [--stats] [--min-seen 10] [--out 路径]`；
+    gold 落 `tests/memory_eval/gold.jsonl`（**追加写**，同一 `(task_type, key)` 以最后一行为准，撤销写 `unset` 留痕）
+  - ⚠️ 同目录其他工具：仓库级 pyright 不覆盖，改后显式 `uv run pyright tools/audit/recall_annotator.py`；
+    ⚠️ `QT_QPA_PLATFORM=offscreen` 下中文全渲染成豆腐块（字体解析返回空 family），**版式自检要看几何尺寸不看像素**，
+    真平台实测解析为 `Microsoft YaHei UI`、`QFontMetrics.inFont('记')=True`
 
 ### `browser/` — 浏览器通用工具
 - `start_debug_browser.py` — 启动独立调试 Chrome 实例（端口 9222，不影响工作浏览器）
@@ -106,8 +125,8 @@ tools/
 **状态：活跃使用**
 
 多种媒体内容的 LLM 分类工具。以后可能有文段、视频、歌词等需要整理时复用。
-- `bilibili_classifier.py` — <data_drive>:\<bilibili_videos>视频分类 Phase 1（扫描+弹幕提取+LLM 10类分类）
-- `bilibili_mover.py` — <data_drive>:\<bilibili_videos>视频分类移动 Phase 2（按分类+置信度分层 move）
+- `bilibili_classifier.py` — <data_drive>:/<bilibili_videos>视频分类 Phase 1（扫描+弹幕提取+LLM 10类分类）
+- `bilibili_mover.py` — <data_drive>:/<bilibili_videos>视频分类移动 Phase 2（按分类+置信度分层 move）
 - `print_anime.py` — 打印动漫分类结果
 - `wenzhang_classifier.py` — 文字篇章整理（txt/docx 解析+LLM 15类分类+特征提取）
 - `scan_wenzhang.py` — 扫描文字篇章文件夹统计
@@ -160,7 +179,7 @@ Tkinter GUI 窗口，用于向后端发送用户消息。
 顺序前台执行、逐条输出进度、条间限速，自动选最高分辨率并校验 MP4 文件头。
 
 - CLI：`uv run python tools/x_video_dl.py <URL> [URL ...] [--max-res 720] [--out DIR] [--seq-start N] [--prefix TAG]`
-- 输出默认 `~/<data_drive>:/Downloads/x_videos_<当天日期>/`
+- 输出默认 `~/Downloads/x_videos_<当天日期>/`
 - ⚠️ 输出文件名严禁含冒号（Windows 会静默写进 NTFS ADS：主文件 0 字节、播放器打不开），
   脚本已做白名单清洗；解析按钮 label 内嵌 `<i>` 标签的正则坑详见脚本 docstring
 - 2026-09-16 由 chat_digest 的 x 视频下载任务转正，`tools_manifest.json` 注册于 `media_dl` 分类

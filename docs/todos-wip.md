@@ -97,18 +97,20 @@ active ──暂停──> paused
 
 ### 4.3 完整生命周期链路
 
-`wip_create`(active) → `wip_update`(active/paused/blocked 来回) → `wip_update(status=completed)` →（用户触发 wip_archive skill）→ `wip_get` 提炼经验 → `memory_set` 写入 → `wip_delete` 物理删除。
+`wip_create`(active) → `wip_update`(active/paused/blocked 来回) → `wip_update(status=completed)` →（用户触发 wip_archive skill）→ `wip_get_many` 取回全文提炼经验 → `memory_set` 写入 → `wip_delete` 物理删除。
 
 ### 4.4 关键代码位置
 
 | 操作 | 位置 |
 |------|------|
-| `WipTaskCreate` 模型 | models.py 第 87-98 行 |
-| `WipTaskUpdate` 模型（含 progress 0-100、status） | models.py 第 101-113 行 |
-| `create_wip` | store.py 第 427-456 行 |
-| `update_wip` | store.py 第 496-515 行 |
-| `list_wip`（含 summary 轻量模式） | store.py 第 465-494 行 |
-| `delete_wip` | store.py 第 517-521 行 |
+| `WipTaskCreate` 模型 | models.py 第 89-100 行 |
+| `WipTaskUpdate` 模型（含 progress 0-100、status） | models.py 第 103-115 行 |
+| `WipBatchGetRequest` 模型（ids 1-100） | models.py 第 118-120 行 |
+| `create_wip` | store.py 第 445-476 行 |
+| `get_wip` / `get_wip_many`（单条 / 批量取详情） | store.py 第 478-508 行 |
+| `list_wip`（默认 summary 轻量模式 + 已完结条目压缩） | store.py 第 510-566 行 |
+| `update_wip` | store.py 第 568-587 行 |
+| `delete_wip` | store.py 第 589-593 行 |
 
 ## 5. task_closure 整合
 
@@ -120,8 +122,8 @@ task_type：`system.task_closure`（通过 `agent_guide(task_type='system.task_c
 
 1. **step_1 评估任务状态**：完成 / 中断 / 无实质产出，决定后续步骤集。同时强制收回屏幕控制授权（`screen_release_control`）
 2. **step_2 WIP 处理**：
-   - 任务完成 → `wip_list` 按 tags/title 匹配 → `wip_update(id, {status: "completed", progress: 100})` 关闭
-   - 任务中断 → `wip_create` 留档（必填 title/goal/progress/next_steps/current_state/related_skills/related_files）或 `wip_update` 更新现有 WIP
+   - 任务完成 → `wip_list` 按 tags/title 匹配（默认轻量模式已完结条目标题被截断，匹配不到时用 `status` 过滤或 `wip_get_many` 取回全文）→ `wip_update(id, {status: "completed", progress: 100})` 关闭
+   - 任务中断 → `wip_create` 留档（必填 title/goal/next_steps/current_state/related_skills/related_files；⚠ `progress` 只属于 `wip_update`，create 传它会 422 extra_forbidden，字段真源见 `server/todos/models.py`）或 `wip_update` 更新现有 WIP
 3. **step_3 经验提炼 + 可消费性自检**：识别 preference/project/reference 候选，**强制填** `consumption_contexts`（哪些 task_type 读）+ `trigger_keywords`（什么词触发读取），无法明确消费场景的跳过
 4. **step_4 查重 + 写入**：`memory_list` 查重 → `memory_set(key, {data, merge: true})` 写结构化记忆
 5. **step_5 文档自查**：对照 [project_rules.md](file:///<project_root>/.trae/rules/project_rules.md) 检查清单（路由注册/Pydantic/`/health`/硬编码/`_index.md`/`AGENTS.md`/`CHANGELOG.md`/`config.example.toml`/`tools_manifest.json`），不询问用户直接修小改或报告大改。ADR 评估 3/3 通过则写 ADR
@@ -136,7 +138,7 @@ task_type：`system.task_closure`（通过 `agent_guide(task_type='system.task_c
 
 ### 5.3 与 WIP 模块的依赖关系
 
-- task_closure step_2 调用 `wip_list` / `wip_create` / `wip_update`
+- task_closure step_2 调用 `wip_list` / `wip_get_many` / `wip_create` / `wip_update`
 - 与 `wip_archive` skill 的协调：task_closure 做单条收尾（`wip_update(status=completed)`），wip_archive 做周期性批量归档（`wip_delete`），wip_tracker 做日常 CRUD
 
 ## 6. API 端点表
@@ -162,7 +164,8 @@ task_type：`system.task_closure`（通过 `agent_guide(task_type='system.task_c
 
 | HTTP 方法 | 路径 | operation_id | 用途 |
 |-----------|------|--------------|------|
-| GET | `/wip` | `wip_list` | 列出所有 WIP，可按 status 过滤；summary=true 只返回轻量字段（id/title/status/priority/progress/updated_at） |
+| GET | `/wip` | `wip_list` | 列出 WIP，可按 status 过滤。**默认 summary=true 轻量模式**：未完结条目给 id/title/status/priority/progress/updated_at，已完结条目压成 id/title(截断)/status/updated_at + `closed=true`；响应首字段 `guidance` 是用法建议 |
+| POST | `/wip/batch` | `wip_get_many` | 按 ids 批量取完整详情（保序，最多 100 个；缺失 id 列在 `missing`）。配合轻量列表使用 |
 | POST | `/wip` | `wip_create` | 创建 WIP 任务 |
 | GET | `/wip/{task_id}` | `wip_get` | 获取 WIP 详情 |
 | PUT | `/wip/{task_id}` | `wip_update` | 更新 WIP（status/progress/next_steps 等） |
@@ -171,8 +174,8 @@ task_type：`system.task_closure`（通过 `agent_guide(task_type='system.task_c
 ### 6.3 MCP 直连工具
 
 高频查询走 MCP 直连免审批：
-- `todos_due` / `wip_list` / `wip_get` 为直连 MCP 工具
-- `wip_get` / `wip_delete` 走 `localagent_advanced_tool` 网关（见 [wip_archive.md](file:///<project_root>/.agents/skills/wip_archive.md)）
+- `todos_due` / `wip_list` / `wip_get` / `wip_get_many` 为直连 MCP 工具
+- `wip_create` / `wip_update` / `wip_delete` 走 `localagent_advanced_tool` 网关（见 [wip_archive.md](file:///<project_root>/.agents/skills/wip_archive.md)）
 
 ## 7. 数据表 Schema
 
@@ -288,7 +291,7 @@ stateDiagram-v2
 
 - **不要在会话开始时主动调** `todos_due` / `wip_list` 检查到期任务或未完成工作，避免污染上下文
 - 用户问"有什么任务"/"待办"/"上次没做完的" → 调 `agent_guide(task_type='system.task_reminder')`
-- 用户问"上次做到哪了"/"未完成的工作" → 调 `wip_list(summary=true)` 只看摘要，需要详情再 `wip_get(id)`
+- 用户问"上次做到哪了"/"未完成的工作" → 调 `wip_list`（默认即轻量），需要详情再 `wip_get(id)` 单条或 `wip_get_many(ids=[...])` 批量
 - 用户确认要做某到期任务 → 按 task_reminder 指导执行，完成后调 `todos_mark_done`
 
 ### 9.2 模块变更检查清单
@@ -297,7 +300,7 @@ stateDiagram-v2
 
 新增 todos/wip 端点时必查：
 - [ ] 新端点是否在 `server/main.py` 中注册？
-- [ ] `_mcp_include` 是否更新（高频查询 todos_due/wip_list/wip_get 直连）？
+- [ ] `_mcp_include` 是否更新（高频查询 todos_due/wip_list/wip_get/wip_get_many 直连）？
 - [ ] `_CATEGORY_PREFIXES` 是否添加新前缀（todos_, wip_）？
 - [ ] `/health` 是否返回 todos 状态？
 - [ ] `agent_guide.py` 中相关条目的 first_action / mcp_tools_priority 是否更新？
@@ -312,4 +315,4 @@ stateDiagram-v2
 - [.agents/skills/wip_archive.md](file:///<project_root>/.agents/skills/wip_archive.md) — WIP 归档工作流
 - [AGENTS.md "关于到期任务与待办"段](file:///<project_root>/AGENTS.md) — 不主动查询原则
 - `server/todos/store.py` — SQLite 存储层（schema + CRUD + 到期计算 + 触发检查）
-- `server/todos/router.py` — FastAPI 路由层（13 个端点）
+- `server/todos/router.py` — FastAPI 路由层（端点清单见本文「API 端点表」或运行时 `/docs`，数量不在这里写死）

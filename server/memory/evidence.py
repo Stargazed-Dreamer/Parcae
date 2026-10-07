@@ -37,12 +37,15 @@ class Evidence:
     source_id: 对应表（messages/facts/summaries）的主键 id
     content_preview: 前 500 字符（避免存储过大）
     timestamp: 消息时间戳 / fact.updated_at epoch / summary.end_time
-    retrieval_score: 检索打分 0-1（messages 用 BM25/向量分，facts 用 confidence，summaries 用固定中位分）
+    retrieval_score: 检索打分 0-1（messages 用 BM25/向量分，facts 用 confidence）
+        —— 摘要**不再**填一个写死的中位分（T18 HONEST_EMPTY）：它没有被打分，
+        就把 scored 标 False 并排在有分证据之后，别冒充"中等可信"。
     source_tag: 自定义来源标签（如 'manual'、'vl_summary'、'bill_summary'）
     confidence: 来源可信度（默认 1.0，facts 用自身 confidence 字段）
     corroboration_count: 其他证据佐证此条的数量
     conflicting_ids: 与此条冲突的证据 source_id 列表
     matched_by: 'bm25' | 'vector' | 'both' | 'fact_kv' | 'summary'
+    scored: 这条有没有真分数。False 表示来源本身不产生相似度（如摘要窗口命中）
     """
     source_type: str
     source_id: int
@@ -54,6 +57,7 @@ class Evidence:
     corroboration_count: int = 0
     conflicting_ids: list[int] = field(default_factory=list)
     matched_by: str = ""
+    scored: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -151,7 +155,10 @@ class EvidenceLedger:
                     source_id=int(r.get("id", 0)),
                     content_preview=str(r.get("summary", ""))[:500],
                     timestamp=r.get("end_time"),
-                    retrieval_score=0.7,  # 摘要没有打分，给固定中位分
+                    # T18：摘要本身没有被打分，旧代码塞 0.7 冒充"中等可信"，
+                    # 于是任何一次检索的摘要都稳赢一半的排名。现在如实标未打分。
+                    retrieval_score=0.0,
+                    scored=False,
                     source_tag=None,
                     matched_by="summary",
                 ))
@@ -164,9 +171,13 @@ class EvidenceLedger:
 
         # 4. 按 retrieval_score * (1 + corroboration_count * 0.1) 排序
         # 佐证多的证据优先级提升
+        # T18：没有真分数的来源（摘要）排在所有有分证据之后，组内保持原顺序——
+        # 它们出现在候选集里只说明"时间窗口对得上"，不说明"和这个问题相关"。
         evidences.sort(
-            key=lambda e: e.retrieval_score * (1 + e.corroboration_count * 0.1),
-            reverse=True,
+            key=lambda e: (
+                0 if e.scored else 1,
+                -(e.retrieval_score * (1 + e.corroboration_count * 0.1)),
+            ),
         )
 
         # 5. 返回前 top_k 条

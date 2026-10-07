@@ -43,8 +43,10 @@ from workspace.accounting.panel_widgets import (
     _AccountingCalendar,
     _fmt_amount,
     _MappingDelegate,
+    _NoWheelCombo,
     _ReviewDataLoader,
     _set_combo_completion,
+    compute_desc_hints,
 )
 from server.component_config import get_component_config
 from workspace.accounting.exporter import export_month, git_commit
@@ -94,6 +96,8 @@ class AccountingPanel(PanelBase):
         self._review_loader: _ReviewDataLoader | None = None
         # 审核 tab 未暂存修改（tx_id → {sector, category, description, mark}）
         self._pending_edits: dict[str, dict] = {}
+        # 交易名称→(大类,说明) 频次表（后台预取，供说明智能推荐；加载前为空表）
+        self._hints_map: dict = {}
         self._mapping_completion_cache: dict[int, list[str]] = {}
         self._summary_start_date = QDate.currentDate()
         self._summary_end_date = QDate.currentDate()
@@ -334,6 +338,15 @@ class AccountingPanel(PanelBase):
         self._review_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
         )
+        # 关掉全局主题的 item:hover 底色（lib/ui/theme.py）——审核表行多、
+        # 滚动时悬浮高亮看起来像"已选中"，配合"确认选中"极易确认错行。
+        # 仅覆盖 :hover，点击选中的 :selected 高亮不受影响。
+        self._review_table.setStyleSheet(
+            "QTableWidget::item:hover { background-color: transparent; }"
+        )
+        # 双保险：QSS 之外直接掐断 viewport 的 hover 事件源（Qt 某些样式下
+        # item:hover 透明覆盖可能不生效），没有 hover 事件就没有悬浮高亮。
+        self._review_table.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, False)
         self._review_table.setHorizontalHeaderLabels([
             "标记", "日期", "原始名称", "商品", "金额", "方向",
             "板块", "大类", "说明", "tx_id",
@@ -377,6 +390,42 @@ class AccountingPanel(PanelBase):
 
         return w
 
+    def _maybe_guard_pending_before_reload(self) -> bool:
+        """整表刷新前，若有未暂存修改则先询问处理方式。
+
+        背景（2026-09-23 用户事故）：确认部分行后 _load_review_data() 整表重载，
+        其余行的未暂存修改被 DB 值还原显示（黄色"已修改"高亮也没了），看起来全丢了。
+        所有刷新入口（过滤切换/刷新按钮/确认后重载/导入后重载）都经过 _load_review_data，
+        守卫放在该收口处。返回 False = 用户取消，不刷新。
+        """
+        if not self._pending_edits:
+            return True
+        store = self._store
+        if store is None:
+            return True
+        box = QMessageBox(self)
+        box.setWindowTitle("有未暂存的修改")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(
+            f"当前有 {len(self._pending_edits)} 条未暂存的修改。\n\n"
+            "刷新将从数据库重新读取，这些修改将不再显示。\n"
+            "要先暂存它们吗？"
+        )
+        btn_stage = box.addButton("💾 暂存并刷新", QMessageBox.ButtonRole.AcceptRole)
+        btn_discard = box.addButton("放弃修改", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_stage:
+            for tx_id, updates in self._pending_edits.items():
+                store.update_transaction(tx_id, updates)
+            self._pending_edits.clear()
+        elif clicked is btn_discard:
+            self._pending_edits.clear()
+        else:
+            return False
+        return True
+
     def _load_review_data(self) -> None:
         """加载审核数据到表格（异步：DB 查询放后台线程，避免阻塞 UI）
 
@@ -384,9 +433,14 @@ class AccountingPanel(PanelBase):
         - 方案C：DB 查询移到 QThread，主线程不阻塞
         - 方案B：descriptions 一次性预取（在 _ReviewDataLoader 中），不再每行查 DB
         - 加载中标志防止重复触发（用户快速切换过滤时忽略新请求）
+
+        所有整表刷新都经过这里（过滤切换/刷新按钮/确认后重载/导入后重载），
+        因此"有未暂存修改时先询问"的守卫放在这个收口处。
         """
         if self._review_loading:
             return  # 已在加载中，忽略重复请求
+        if not self._maybe_guard_pending_before_reload():
+            return  # 用户取消刷新
         self._review_loading = True
         self._review_table.setRowCount(0)
         self._review_status_label.setText("加载中…")
@@ -421,7 +475,9 @@ class AccountingPanel(PanelBase):
             txs = data["txs"]
             months = data["months"]
             descriptions_map = data["descriptions_map"]
+            hints_map = data.get("hints_map", {})
             config = data["config"]
+            self._hints_map = hints_map
 
             # 更新月份过滤选项
             current_month = self._review_month_filter.currentData()
@@ -457,6 +513,8 @@ class AccountingPanel(PanelBase):
                 name_item = QTableWidgetItem(tx["counterparty"][:30])
                 name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 name_item.setToolTip(tx["counterparty"])
+                # 完整对方名存 UserRole（表格显示截断到 30 字符，推荐匹配要用全文）
+                name_item.setData(Qt.ItemDataRole.UserRole, tx["counterparty"])
                 self._review_table.setItem(i, 2, name_item)
 
                 # 商品
@@ -479,8 +537,8 @@ class AccountingPanel(PanelBase):
                 dir_item.setFlags(dir_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self._review_table.setItem(i, 5, dir_item)
 
-                # 板块（QComboBox）
-                sector_combo = QComboBox()
+                # 板块（QComboBox，防滚轮误触）
+                sector_combo = _NoWheelCombo()
                 sector_combo.addItems(_SECTORS)
                 sector_combo.setMinimumHeight(34)
                 sector_combo.setStyleSheet(
@@ -494,8 +552,8 @@ class AccountingPanel(PanelBase):
                 )
                 self._review_table.setCellWidget(i, 6, sector_combo)
 
-                # 大类（可编辑 QComboBox）
-                cat_combo = QComboBox()
+                # 大类（可编辑 QComboBox，防滚轮误触）
+                cat_combo = _NoWheelCombo()
                 sector_name = tx["sector"] or "出"
                 categories = config["sectors"].get(sector_name, [])
                 cat_combo.addItems(categories)
@@ -506,8 +564,8 @@ class AccountingPanel(PanelBase):
                 )
                 self._review_table.setCellWidget(i, 7, cat_combo)
 
-                # 说明（可编辑 QComboBox）— 用预取的 descriptions_map，不再每行查 DB
-                desc_combo = QComboBox()
+                # 说明（可编辑 QComboBox，防滚轮误触）— 用预取的 descriptions_map，不再每行查 DB
+                desc_combo = _NoWheelCombo()
                 descriptions = descriptions_map.get(tx["category"] or "", [])
                 desc_combo.addItems(descriptions)
                 _set_combo_completion(desc_combo, descriptions)
@@ -548,31 +606,55 @@ class AccountingPanel(PanelBase):
         item = self._review_table.item(row, 9)
         return item.text() if item else None
 
+    def _get_counterparty(self, row: int) -> str:
+        """取该行完整交易名称（原始名称列显示截断到 30 字符，全文存在 UserRole）"""
+        item = self._review_table.item(row, 2)
+        if item is None:
+            return ""
+        data = item.data(Qt.ItemDataRole.UserRole)
+        return data if isinstance(data, str) else item.text()
+
     def _on_sector_changed(self, row: int) -> None:
         """板块改变 → 更新大类可选项 + 暂存修改"""
         if self._review_loading:
             return
         sector_combo = self._review_table.cellWidget(row, 6)
         cat_combo = self._review_table.cellWidget(row, 7)
-        if not sector_combo or not cat_combo:
+        if not isinstance(sector_combo, QComboBox) or not isinstance(cat_combo, QComboBox):
+            return
+        store = self._store
+        if store is None:
             return
         new_sector = sector_combo.currentText()
-        config = self._store.get_config()
+        prev_category = cat_combo.currentText().strip()
+        config = store.get_config()
         categories = config["sectors"].get(new_sector, [])
 
+        # 保留仍属于新板块的旧大类；否则清空。
+        # ⛔ 不能依赖 addItems 的默认选中：QComboBox 会自动落到 index 0，
+        #    界面上像"自动填了第一个大类"，而确认只写暂存 → 显示与库不一致。
         cat_combo.blockSignals(True)
         cat_combo.clear()
         cat_combo.addItems(categories)
         _set_combo_completion(cat_combo, categories)
+        if prev_category and prev_category in categories:
+            cat_combo.setCurrentText(prev_category)
+        else:
+            cat_combo.setCurrentText("")
         cat_combo.blockSignals(False)
 
         # 写入暂存（不立即写 DB）
         tx_id = self._get_tx_id(row)
         if tx_id:
-            self._pending_edits.setdefault(tx_id, {}).update({
+            updates = {
                 "sector": new_sector,
                 "confirm_status": "manual",
-            })
+            }
+            # 大类随之失效时同步清掉暂存里的大类与说明，避免旧值残留
+            if not (prev_category and prev_category in categories):
+                updates["category"] = ""
+                updates["description"] = ""
+            self._pending_edits.setdefault(tx_id, {}).update(updates)
             self._update_review_status()
         self._mark_row_modified(row)
 
@@ -608,37 +690,76 @@ class AccountingPanel(PanelBase):
         self._mark_row_modified(row)
 
     def _on_category_changed(self, row: int) -> None:
-        """大类改变 → 更新说明可选项 + 暂存修改"""
+        """大类改变 → 说明选项按交易名称智能重排 + 暂存修改
+
+        推荐规则（移植自旧 Web 版 accounting.html 的 smartHints）：取该行交易名称
+        在新大类下的历史说明频次 top-N **置顶**进下拉框；有 top-1 则自动填入。
+        没有命中时保留仍属于新大类的旧说明，再不行就留空 —— 绝不退回"下拉框第 0 项"
+        （旧行为：clear()+addItems() 后 Qt 自动选中 index 0，显示成列表里
+        Unicode 排序最靠前的值，如 ASCII 的 KFC，看起来像系统推荐）。
+        """
         if self._review_loading:
             return
         cat_combo = self._review_table.cellWidget(row, 7)
         desc_combo = self._review_table.cellWidget(row, 8)
-        if not cat_combo:
+        if not isinstance(cat_combo, QComboBox):
+            return
+        if desc_combo is not None and not isinstance(desc_combo, QComboBox):
+            return
+        store = self._store
+        if store is None:
             return
         new_category = cat_combo.currentText().strip()
         if not new_category:
             return
 
-        # 更新说明可选项
+        prev_description = desc_combo.currentText().strip() if desc_combo else ""
+        standard = store.get_descriptions_for_category(new_category)
+        hints = compute_desc_hints(
+            getattr(self, "_hints_map", {}) or {},
+            self._get_counterparty(row),
+            new_category,
+        )
+
+        # 重建说明可选项：推荐项置顶，其余按原配置顺序去重追加
+        ordered: list[str] = []
+        for value in [*hints, *standard]:
+            if value and value not in ordered:
+                ordered.append(value)
+
+        # 自动填充优先级：top-1 推荐 → 仍属于新大类的旧说明 → 留空（不猜）
+        if hints:
+            auto_desc = hints[0]
+        elif prev_description and prev_description in ordered:
+            auto_desc = prev_description
+        else:
+            auto_desc = ""
+
         if desc_combo:
-            descriptions = self._store.get_descriptions_for_category(new_category)
             desc_combo.blockSignals(True)
             desc_combo.clear()
-            desc_combo.addItems(descriptions)
-            _set_combo_completion(desc_combo, descriptions)
+            desc_combo.addItems(ordered)
+            _set_combo_completion(desc_combo, ordered)
+            desc_combo.setCurrentText(auto_desc)
             desc_combo.blockSignals(False)
 
-        # 暂存修改（不立即写 DB）
+        # 暂存修改（不立即写 DB）。说明要么是推荐值要么被显式清空，都要进暂存 ——
+        # 确认按钮只写 _pending_edits、不读下拉框当前文本，漏暂存 = 显示与库不一致。
         tx_id = self._get_tx_id(row)
         if tx_id:
-            self._pending_edits.setdefault(tx_id, {}).update({
+            updates: dict = {
                 "category": new_category,
                 "mark": "✓",
                 "confirm_status": "manual",
-            })
-            self._store.ensure_category(
+            }
+            if desc_combo:
+                updates["description"] = auto_desc
+            self._pending_edits.setdefault(tx_id, {}).update(updates)
+            store.ensure_category(
                 self._review_table.cellWidget(row, 6).currentText(), new_category
             )
+            if desc_combo and auto_desc:
+                store.add_description(new_category, auto_desc)
             # 更新标记列
             mark_item = self._review_table.item(row, 0)
             if mark_item:

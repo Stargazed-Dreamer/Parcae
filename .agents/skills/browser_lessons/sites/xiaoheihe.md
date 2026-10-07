@@ -14,7 +14,7 @@ aliases: [小黑盒, xiaoheihe]
 | **登录态要求** | 匿名可读帖子；写操作（点赞/评论）需登录 |
 | **抓取频次** | 周期（web_archive 按需，arknights_gacha 全量历史一次性） |
 | **文件创建日期** | 2026-07-18 |
-| **最后更新** | 2026-07-18 |
+| **最后更新** | 2026-09-29 |
 
 ## 网站概况
 
@@ -111,6 +111,9 @@ const content = document.querySelector('.image-text__content')
 | **untitled 链接正文为 0** | 当 bug 调试 | 正常，无效链接不入 index.json | 2026-07-13 |
 | **图片帖正文只有几个字** | 当 bug 调试 | 正常，主要内容在图片里 | 2026-07-13 |
 | **当年帖发布时间无年份** | 直接用 | 自动补抓取年份；跨年帖才有完整年份 | 2026-07-13 |
+| **登录态判据（agent 侧）** | 问用户"登录了吗" | 顶栏 `nav` 的 accessible name 里带不带 **`登录`** 二字：游客态是"…加入我们\n登录"，登录后换成头像/用户名。2026-09-29 实测：游客态抓该帖，正文 2231 字照拿、评论却只到折叠前——登录前必须核这一项 | 2026-09-29 |
+| **`browser_snapshot` 输出被 SVG sprite 撑爆** | 直接快照整页 | 本站首页/帖子页内联了约 300 个 `<symbol>` 图标（`icon-bbs_*`、`icon-game_*`…），`dom_hash` 字段会把它们**整串吐出来**（实测一次调用上万字符）。要读结构就 `max_nodes` 压小 + `root_selector` 限定容器；只为核登录态，读 `nav` 一条即可 | 2026-09-29 |
+| **`browser_navigate` 报 `TAB_NOT_FOUND`** | 直接 goto | 没有会话/标签页时 navigate 不会自己开页；先 `browser_session_create(url=...)`（它会顺手注入本站 site_lessons）再操作 | 2026-09-29 |
 
 ## 遗留问题
 
@@ -122,3 +125,4 @@ const content = document.querySelector('.image-text__content')
 | 日期 | 变更 |
 |------|------|
 | 2026-07-18 | 初始创建，汇总自 `.agents/skills/web_archive/SKILL.md` 和 `server/agent_guide.py` 的 `adhoc.web_archive` key_pitfalls |
+| 2026-09-29 | web_archive 周更实跑补三条：登录态判据（顶栏 nav 的「登录」字样）、`browser_snapshot` 被内联 SVG sprite 撑爆、`browser_navigate` 无会话时 `TAB_NOT_FOUND` 需先建 session |

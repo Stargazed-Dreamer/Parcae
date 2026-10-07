@@ -12,7 +12,7 @@ No,Category,Icon Name,Keywords,Library,Import Code,Usage,Best For,Style
 11,Action,trash,delete remove discard bin,Phosphor,import { Trash } from '@phosphor-icons/react',<Trash size={20} weight="regular" />,Delete action destructive,Outline
 12,Action,pencil-simple,pencil modify change update,Phosphor,import { PencilSimple } from '@phosphor-icons/react',<PencilSimple size={20} weight="regular" />,Edit button modify content,Outline
 13,Action,floppy-disk,disk store persist save,Phosphor,import { FloppyDisk } from '@phosphor-icons/react',<FloppyDisk size={20} weight="regular" />,Save button persist changes,Outline
-14,Action,download-simple,export save file download,Phosphor,import { <data_drive>:/Downloadsimple } from '@phosphor-icons/react',<<data_drive>:/Downloadsimple size={20} weight="regular" />,Download file export,Outline
+14,Action,download-simple,export save file download,Phosphor,import { DownloadSimple } from '@phosphor-icons/react',<DownloadSimple size={20} weight="regular" />,Download file export,Outline
 15,Action,upload-simple,import file attach upload,Phosphor,import { UploadSimple } from '@phosphor-icons/react',<UploadSimple size={20} weight="regular" />,Upload file import,Outline
 16,Action,copy,duplicate clipboard paste,Phosphor,import { Copy } from '@phosphor-icons/react',<Copy size={20} weight="regular" />,Copy to clipboard,Outline
 17,Action,share,social distribute send,Phosphor,import { Share } from '@phosphor-icons/react',<Share size={20} weight="regular" />,Share button social,Outline

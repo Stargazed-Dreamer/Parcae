@@ -38,13 +38,16 @@ from dataclasses import dataclass, field
 
 from client.core.agent.event_store import EventStore
 from client.core.agent.types import (
+    SERVER_SIDE_SESSION_PREFIXES,
     TOOL_STATUS_INTERRUPTED,
     TOOL_STATUS_PENDING,
     TOOL_STATUS_RUNNING,
+    TOOL_STATUS_UNKNOWN,
     Message,
     ToolCall,
     ToolResult,
 )
+from lib.side_effect_tier import should_suggest_retry
 
 logger = logging.getLogger("localagent.agent.reconciler")
 
@@ -54,11 +57,32 @@ _ACTIVE_SESSION_STATUSES = ("streaming", "awaiting_tools")
 # 悬挂的 tool_call 状态（进程退出时正在执行或待执行）
 _DANGLING_TOOL_CALL_STATUSES = [TOOL_STATUS_PENDING, TOOL_STATUS_RUNNING]
 
-# 补 tool_result 时使用的错误消息（模型看到后可改道）
-_INTERRUPTED_TOOL_RESULT_CONTENT = (
-    "Tool call interrupted: session was active when the process restarted. "
-    "Please retry or choose a different approach."
+
+def _is_server_side_session(session_id: str) -> bool:
+    """该会话是否由后端进程持有（无人值守 / judge 会话）。
+
+    unknown-outcome-evidence T05：reconciler 跑在 GUI 进程里，而 headless 会话写在
+    同一个 agent.db。等审批可以让一个会话静默 200 秒（> 60 秒判活阈值），此时 GUI
+    重启就会把后端**还活着**的会话判死并催重试。前缀由 server 侧与本模块共用
+    types.SERVER_SIDE_SESSION_PREFIXES，回收责任归持有进程自己。
+    """
+    return str(session_id or "").startswith(SERVER_SIDE_SESSION_PREFIXES)
+
+# 补 tool_result 时的两种口径（unknown-outcome-evidence T04）
+# 区分"确定没执行"与"不知道执行没执行"——前者可以重试，后者取决于副作用档。
+_PENDING_NOT_EXECUTED_CONTENT = (
+    "Tool call was pending when the process restarted — it never started, "
+    "so re-running it is safe. Retry or choose a different approach."
 )
+_UNKNOWN_MAY_HAVE_RUNNED_CONTENT = (
+    "Tool call outcome is UNKNOWN: it was running when the process restarted, "
+    "so its side effect may already have landed. Do NOT assume it failed."
+)
+_UNKNOWN_NO_RETRY_SUFFIX = (
+    " This operation is externally irreversible — verify whether it actually "
+    "happened (read back state/logs) before doing it again; retrying it is forbidden."
+)
+_UNKNOWN_RETRY_OK_SUFFIX = " This operation is read-only or locally reversible, so retrying it is safe."
 
 # streaming 事件类型常量（v6-lite-streaming-gui T01 D06）
 _STREAMING_TEXT_DELTA = "streaming_text_delta"
@@ -77,6 +101,9 @@ class ReconcileResult:
 
     sessions_interrupted: list[str] = field(default_factory=list)
     tool_calls_interrupted: list[str] = field(default_factory=list)
+    # unknown-outcome-evidence T04：结局不明（running 时被干掉）单独成列，
+    # 让调用方能区分"没执行"与"不知道执行没执行"
+    tool_calls_unknown: list[str] = field(default_factory=list)
     tool_results_filled: list[str] = field(default_factory=list)  # tool_call_id list
     streaming_messages_merged: int = 0  # v6-lite-streaming-gui T01: 合并的 streaming Message 数
     skipped_sessions_already_interrupted: int = 0
@@ -86,15 +113,37 @@ class ReconcileResult:
     # C2 全程过滤（2026-09-13 code review 8-3）：步骤 2/3 因 session 近期活跃而跳过
     skipped_tool_calls_active_session: int = 0
     skipped_streaming_sessions_active: int = 0
+    # T05：后端进程持有的会话（无人值守 / judge），GUI 不替持有者回收
+    skipped_sessions_server_side: int = 0
+    skipped_tool_calls_server_side: int = 0
+    skipped_streaming_sessions_server_side: int = 0
 
     @property
     def total_actions(self) -> int:
         return (
             len(self.sessions_interrupted)
             + len(self.tool_calls_interrupted)
+            + len(self.tool_calls_unknown)
             + len(self.tool_results_filled)
             + self.streaming_messages_merged
         )
+
+
+def _terminal_for_dangling(tc: ToolCall) -> tuple[str, str]:
+    """悬挂 tool_call 应落的终态 + 回灌给模型的 tool_result 文本。
+
+    unknown-outcome-evidence T04：pending = 还没开始执行 → interrupted，重试安全；
+    running = 副作用可能已经落地 → unknown，能不能重试由 lib.side_effect_tier 的
+    静态分档决定，不交给模型临场判断。
+    """
+    if tc.status == TOOL_STATUS_PENDING:
+        return TOOL_STATUS_INTERRUPTED, _PENDING_NOT_EXECUTED_CONTENT
+    content = _UNKNOWN_MAY_HAVE_RUNNED_CONTENT + (
+        _UNKNOWN_RETRY_OK_SUFFIX
+        if should_suggest_retry(tc.name)
+        else _UNKNOWN_NO_RETRY_SUFFIX
+    )
+    return TOOL_STATUS_UNKNOWN, content
 
 
 async def reconcile(store: EventStore, *, force: bool = False) -> ReconcileResult:
@@ -131,6 +180,17 @@ async def reconcile(store: EventStore, *, force: bool = False) -> ReconcileResul
         active_sessions.extend(s.id for s in sessions)
 
     for session_id in active_sessions:
+        # T05：后端进程持有的会话（headless / judge）不进 GUI 的回收范围。
+        # 它们写在同一个 agent.db 里，但持有者还活着——等审批就能静默 200 秒，
+        # 超过下面 60 秒的判活阈值。放进"别碰"集合，步骤 2/3 一并跳过。
+        if _is_server_side_session(session_id):
+            result.skipped_sessions_server_side += 1
+            skipped_active_sessions.add(session_id)
+            logger.info(
+                "Reconcile skipped server-side session %s (owned by backend process)",
+                session_id,
+            )
+            continue
         # 跳过已经是 interrupted 的（幂等，理论上 list_sessions_by_status 不会返回）
         session = await store.get_session(session_id)
         if session is None:
@@ -181,6 +241,14 @@ async def reconcile(store: EventStore, *, force: bool = False) -> ReconcileResul
     dangling_calls = await store.list_tool_calls_by_status(_DANGLING_TOOL_CALL_STATUSES)
 
     for tc in dangling_calls:
+        # T05：后端进程持有的悬挂调用，由持有者进程自己收尾
+        if _is_server_side_session(tc.session_id):
+            result.skipped_tool_calls_server_side += 1
+            logger.debug(
+                "Reconcile skipped dangling tool_call %s (server-side session %s)",
+                tc.id, tc.session_id,
+            )
+            continue
         # C2 全程过滤：所属 session 近期活跃（runner 可能还在跑）→ 完全跳过，
         # 不补 tool_result、不改 tool_call 状态（真实结果可能稍后由 runner 写入）
         if tc.session_id in skipped_active_sessions:
@@ -194,34 +262,41 @@ async def reconcile(store: EventStore, *, force: bool = False) -> ReconcileResul
         has_result = await store.has_tool_result(tc.id)
         if has_result:
             result.skipped_tool_calls_already_has_result += 1
-            # 但仍需确保 tool_call 状态是 interrupted（可能 pending/running 但有结果，
+            # 但仍需给它落一个终态（可能 pending/running 但有结果，
             # 理论上不应发生，但防御性处理）
             if tc.status in _DANGLING_TOOL_CALL_STATUSES:
-                await store.update_tool_call_status(
-                    tc.id, TOOL_STATUS_INTERRUPTED, ended_at=now,
-                )
-                result.tool_calls_interrupted.append(tc.id)
+                target, _ = _terminal_for_dangling(tc)
+                await store.update_tool_call_status(tc.id, target, ended_at=now)
+                if target == TOOL_STATUS_UNKNOWN:
+                    result.tool_calls_unknown.append(tc.id)
+                else:
+                    result.tool_calls_interrupted.append(tc.id)
             continue
+
+        # 落终态按"没执行 / 不知道执行没执行"分档（T04）
+        target_status, result_content = _terminal_for_dangling(tc)
 
         # 补 is_error=true 的 tool_result（yieldMissingToolResultBlocks，防 provider 400）
         error_result = ToolResult(
             tool_call_id=tc.id,
-            content=_INTERRUPTED_TOOL_RESULT_CONTENT,
+            content=result_content,
             is_error=True,
+            # 只有"没执行"才允许重试；"不知道"由分档决定，已在 content 里说清
+            outcome_unknown=(target_status == TOOL_STATUS_UNKNOWN),
             created_at=now,
         )
         await store.append_tool_result_message(tc.session_id, error_result)
         result.tool_results_filled.append(tc.id)
 
-        # 标记 tool_call 状态为 interrupted
-        await store.update_tool_call_status(
-            tc.id, TOOL_STATUS_INTERRUPTED, ended_at=now,
-        )
-        result.tool_calls_interrupted.append(tc.id)
+        await store.update_tool_call_status(tc.id, target_status, ended_at=now)
+        if target_status == TOOL_STATUS_UNKNOWN:
+            result.tool_calls_unknown.append(tc.id)
+        else:
+            result.tool_calls_interrupted.append(tc.id)
 
         logger.info(
-            "Reconciled tool_call %s (session %s): %s → interrupted, filled error result",
-            tc.id, tc.session_id, tc.status,
+            "Reconciled tool_call %s (session %s): %s → %s, filled error result",
+            tc.id, tc.session_id, tc.status, target_status,
         )
 
     # ------------------------------------------------------------------
@@ -290,6 +365,14 @@ async def _reconcile_streaming_events(
     session_ids = [r["session_id"] for r in rows]
 
     for session_id in session_ids:
+        # T05：后端进程仍在写的流，GUI 不合并
+        if _is_server_side_session(session_id):
+            result.skipped_streaming_sessions_server_side += 1
+            logger.debug(
+                "Reconcile skipped streaming merge for server-side session %s",
+                session_id,
+            )
+            continue
         # C2 全程过滤：所属 session 近期活跃（runner 可能还在跑）→ 不合并
         # （合并会 invalidate 仍在增长的事件流，与 runner 产生竞争）
         if session_id in skipped_active_sessions:

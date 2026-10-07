@@ -106,7 +106,9 @@ def get_secret_or_raise(key: str) -> str:
     if not path.exists():
         raise SecretsFileNotFoundError(
             f"secrets.toml not found at {path}. "
-            "Run `uv run python tools/migrate_secrets.py` to create it."
+            "Recover a backup with `uv run python tools/restore_secrets.py list --file secrets.toml` "
+            "(then `restore --file secrets.toml --version <ts>`), or create the file from the "
+            "[tokens] template in config.example.toml."
         )
     data = _load_secrets()
     tokens = data.get("tokens", {})

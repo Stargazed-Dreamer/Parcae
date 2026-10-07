@@ -8,9 +8,9 @@ from pathlib import Path
 
 # 测试图片（从之前的测试中选取有代表性的）
 TEST_IMAGES = [
-    r"I:\<data_drive>:\<source_images_root>\其它来源\0_(1920×1080)\DM_20260101185824_001.png",  # 生日聚会(二次元)
-    r"I:\<data_drive>:\<source_images_root>\其它来源\0_(1863×1080)\DM_20260115162633_001.jfif",  # BA蔚蓝档案(二次元)
-    r"I:\<data_drive>:\<source_images_root>\其它来源\49a5fea9c674a15496e4064b403386cf_w4599_h2587_s1429.jpeg_(4599×2587)\DM_20260309200034_001.jpg",  # 瀑布森林(二次元)
+    r"<data_drive>:/<source_images_root>\其它来源\0_(1920×1080)\DM_20260101185824_001.png",  # 生日聚会(二次元)
+    r"<data_drive>:/<source_images_root>\其它来源\0_(1863×1080)\DM_20260115162633_001.jfif",  # BA蔚蓝档案(二次元)
+    r"<data_drive>:/<source_images_root>\其它来源\49a5fea9c674a15496e4064b403386cf_w4599_h2587_s1429.jpeg_(4599×2587)\DM_20260309200034_001.jpg",  # 瀑布森林(二次元)
 ]
 
 # 确保图片存在
@@ -18,7 +18,7 @@ test_images = [p for p in TEST_IMAGES if os.path.exists(p)]
 if not test_images:
     # 从DB随机取5张
     import sqlite3
-    conn = sqlite3.connect(r'<project_root>\output\image_organizer\files.db')
+    conn = sqlite3.connect(r'<project_root>\workspace\image_organize\files.db')
     rows = conn.execute(
         "SELECT source_path FROM files WHERE status='llm_done' ORDER BY RANDOM() LIMIT 5"
     ).fetchall()

@@ -137,8 +137,8 @@ def test_interop_files(tmp_path):
     largest = out["largest"]
     assert largest[0]["path"] == "C:/pagefile.sys" and largest[0]["size"] == 5000
     paths = {f["path"] for f in largest}
-    assert "C:/<user_home>/文件.txt" in paths
-    assert "C:/<user_home>/b.log" in paths
+    assert "<user_home>/文件.txt" in paths
+    assert "<user_home>/b.log" in paths
 
 
 def test_interop_find_and_tree(tmp_path):

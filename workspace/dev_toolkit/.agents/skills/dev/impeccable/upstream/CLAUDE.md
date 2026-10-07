@@ -68,7 +68,7 @@ Editorial brief is at `docs/STYLE.md`. Read it before editing the homepage, sub-
 
 The build's `validateProse` step (in `scripts/build.js`) enforces a denylist: em dashes (`—` and HTML entities), the `--` em-dash substitute, `load-bearing`, `highest-leverage`, `biggest unlock`, `seamless`, `robust`, `delve`, `elevate`, `empower`, `underscore`, `pivotal`, `tapestry`, `data-driven`, `reflex defaults`, `collapses into monoculture`, `in today's`, `gone are the days`, `whether you're`, `let's dive in`, `in summary`, `in conclusion`, `moreover`, `furthermore`. Each rule prints a rationale and a suggested replacement when it fires. **Do not silently work around the regex.** If a banned word has earned a real meaning here, raise it as a `docs/STYLE.md` amendment.
 
-`validateProse` scans `site/components/`, `site/content/`, `site/layouts/`, `site/pages/`, `README.md`, `README.npm.md` (extensions `.html`, `.md`, `.js`, `.mjs`, `.css`, `.astro`). It exempts `site/pages/slop/`, because the slop catalog <data_drive>:\Documents every anti-pattern by example and has to contain the specimens.
+`validateProse` scans `site/components/`, `site/content/`, `site/layouts/`, `site/pages/`, `README.md`, `README.npm.md` (extensions `.html`, `.md`, `.js`, `.mjs`, `.css`, `.astro`). It exempts `site/pages/slop/`, because the slop catalog documents every anti-pattern by example and has to contain the specimens.
 
 **`skill/` is checked too, by a second gate.** `validateProse` skips it because the full ruleset does not fit LLM-facing reference instructions. `validateSkillProse` then scans `skill/**/*.md` (markdown only, not `skill/scripts/**` code or comments) and fails the build on em dashes plus the subset of phrases with no technical reading: `load-bearing`, `highest-leverage`, `biggest unlock`, `reflex defaults`, `collapses into monoculture`, `data-driven`, `delve`, `tapestry`, `in today's`, `gone are the days`, `let's dive in`, `in summary`, `in conclusion`. The words it does *not* enforce in `skill/` (`seamless`, `robust`, `elevate`, and friends) are the ones with legitimate technical uses. Net effect: an em dash in `skill/reference/*.md` fails `bun run build`; an em dash in a `skill/scripts/*.mjs` code comment does not.
 
@@ -94,7 +94,7 @@ The dev server runs Astro (`astro dev`). Editing files in `site/content/skills/`
 
 ## Deployment
 
-Hosted on Cloudflare Pages. Static assets served from `build/`, API routes handled via `_redirects` rewrites (JSON) and Pages Functions (<data_drive>:/Downloads).
+Hosted on Cloudflare Pages. Static assets served from `build/`, API routes handled via `_redirects` rewrites (JSON) and Pages Functions (downloads).
 
 ```bash
 bun run deploy     # Build + deploy to Cloudflare Pages

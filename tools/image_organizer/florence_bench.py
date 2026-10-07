@@ -1,6 +1,6 @@
 """Florence-2 测速脚本（独立，不依赖 picture_tagger 包）。
 用 cuda10 conda 环境运行：
-  <data_drive>:\<miniconda_root>\\envs\\cuda10\\python.exe temp\florence_bench.py
+  <data_drive>:/<miniconda_root>\\envs\\cuda10\\python.exe temp\florence_bench.py
 """
 import time
 from pathlib import Path

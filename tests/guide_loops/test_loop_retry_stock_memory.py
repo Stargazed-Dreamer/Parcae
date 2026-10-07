@@ -10,6 +10,7 @@
 
 import asyncio
 import importlib
+from datetime import datetime
 from unittest.mock import MagicMock
 
 stock_loop = importlib.import_module("workspace.stock_advisor.loop_actions")
@@ -236,6 +237,18 @@ class TestMemoryMaintainRetry:
         )
         return call_count
 
+    def _patch_inbox(self, monkeypatch):
+        """拦截 server.inbox.get_store 避免污染真实 data/inbox.db
+
+        本类的 stale_count>0 用例真的会走推告警分支，不 patch 就往真实库落行
+        （2026-09~10 实测被 test_broke_on_429_no_retry 写进 4 条 stale=136 的副本，
+        用户手工点了一次又一次结案）。
+        """
+        store = MagicMock()
+        store.create = MagicMock(return_value={"id": "test_inbox_id"})
+        monkeypatch.setattr("server.inbox.get_store", lambda: store)
+        return store
+
     def test_retry_then_success(self, monkeypatch):
         """首次 Pool 未初始化异常，第二次成功"""
         ctx = self._make_context(max_retries=2, backoff=0)
@@ -287,9 +300,45 @@ class TestMemoryMaintainRetry:
                 "last_run": "2026-07-24T00:00:00",
             },
         ])
+        inbox_store = self._patch_inbox(monkeypatch)
         action = memory_loop.MemoryMaintainAction()
         result = _run(action.execute(ctx))
         assert result["success"] is True
         assert result["broke_on_429"] is True
         assert result["skipped_429"] == 9
         assert call_count[0] == 1  # 不重试
+        # 告警带上周级去重键（去重由 InboxStore 兜，不在调用方扫 pending）
+        payload = inbox_store.create.call_args.args[0]
+        assert payload["category"] == "maintain_result"
+        assert payload["dedupe_key"].startswith("memory:maintain_result:")
+
+    def test_repeat_runs_share_one_dedupe_key(self, monkeypatch):
+        """同周内重复跑（老化数每天漂移）共用一个键 → 由 store 折叠成一条"""
+        ctx = self._make_context(max_retries=0, backoff=0)
+        keys = []
+        for n in (106, 111, 120):
+            self._patch_manager(monkeypatch, [
+                {"aging": {"stale_count": n}, "validate": {"validated": 3}},
+            ])
+            inbox_store = self._patch_inbox(monkeypatch)
+            _run(memory_loop.MemoryMaintainAction().execute(ctx))
+            keys.append(inbox_store.create.call_args.args[0]["dedupe_key"])
+        assert len(keys) == 3
+        assert len(set(keys)) == 1, f"同周键应相同: {keys}"
+
+
+# ==================== 维护告警的去重键粒度 ====================
+
+class TestMaintainDedupeKeyScope:
+    """键按 ISO 周切：周内相同（否则每日重推），跨周不同（否则被旧条目永久占位静默）"""
+
+    def test_same_iso_week_shares_key(self):
+        key_monday = memory_loop._maintain_inbox_dedupe_key(datetime(2026, 10, 5))
+        key_sunday = memory_loop._maintain_inbox_dedupe_key(datetime(2026, 10, 11))
+        assert key_monday == key_sunday
+
+    def test_next_iso_week_gets_new_key(self):
+        this_week = memory_loop._maintain_inbox_dedupe_key(datetime(2026, 10, 5))
+        next_week = memory_loop._maintain_inbox_dedupe_key(datetime(2026, 10, 12))
+        assert this_week != next_week
+

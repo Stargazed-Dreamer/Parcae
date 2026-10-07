@@ -25,6 +25,7 @@ import json
 import logging
 import time
 import uuid as _uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSplitter,
@@ -90,6 +92,13 @@ from client.core.agent.types import (
     TOOL_STATUS_FAILED,
     TOOL_STATUS_PENDING,
     TOOL_STATUS_RUNNING,
+)
+from client.core.ask_user_bridge import (
+    OUTCOME_ANSWERED,
+    OUTCOME_CANCELLED,
+    OUTCOME_NO_HOST,
+    OUTCOME_SKIPPED,
+    AskUserBridge,
 )
 from client.core.constants import SERVER_URL
 from client.core.panel_base import PanelBase, PanelMeta
@@ -212,7 +221,6 @@ def _format_last_updated(ts: float) -> str:
     """
     if not ts or ts <= 0:
         return ""
-    import time as _time
     from datetime import date, datetime
 
     dt = datetime.fromtimestamp(ts)
@@ -1633,6 +1641,227 @@ class _SystemBlock(_TimelineBlock):
             self.toggle()
 
 
+class _AskUserBlock(_TimelineBlock):
+    """ask_user 交互卡片（2026-10-07 点单①：单选 / 多选 / 自由输入三态）。
+
+    三个出口对应 `client.core.ask_user_bridge` 的 outcome：
+    - 提交回答 → answered（每题必须有选项或自由文本，否则原地提示，不静默提交空答案）
+    - 「跳过，你自己定」→ skipped（用户**主动**把决定权交回 agent，不是没回答）
+    - `mark_expired()` → 超时/中断后由桥接层调用：整卡禁用并写明"问题未回答"，
+      不许留一张"还能点但已经没人等"的假入口
+
+    答完即锁：卡片只允许提交一次（`on_resolve` 返回 False 表示已经没人等了，
+    同样转成失效态），避免第二次点击把结果写进一个已经作废的请求。
+    """
+
+    def __init__(
+        self,
+        questions: list[dict],
+        on_resolve,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._questions = questions
+        self._on_resolve = on_resolve       # callable(outcome, answers) -> bool
+        self._groups: list[dict] = []      # 每题的控件与取值方式
+        self._answered = False
+        # 只声明不赋 None：控件由 _build_ui 无条件建好，于是全类不必写 "is not None" 守卫
+        self._hint: QLabel
+        self._submit_btn: QPushButton
+        self._skip_btn: QPushButton
+        self._build_ui()
+
+    # ------------------------------------------------------------------
+    # 构建
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 6, 12, 6)
+        outer.setSpacing(4)
+
+        frame = QFrame()
+        frame.setObjectName("askUserBlock")
+        frame.setStyleSheet(
+            f"QFrame {{ background: {tokens.WARNING_WASH}; border: 1px solid {tokens.ACCENT_BORDER};"
+            f" border-radius: {tokens.RADIUS_SM}px; }}"
+        )
+        outer.addWidget(frame)
+        flayout = QVBoxLayout(frame)
+        flayout.setContentsMargins(10, 8, 10, 8)
+        flayout.setSpacing(8)
+
+        title = QLabel("agent 在等你回答")
+        title.setObjectName("askUserTitle")
+        title.setStyleSheet(f"color: {tokens.WARNING_TEXT}; font-weight: bold;")
+        flayout.addWidget(title)
+
+        for idx, q in enumerate(self._questions):
+            flayout.addLayout(self._build_question(idx, q))
+
+        self._hint = QLabel("")
+        self._hint.setObjectName("askUserHint")
+        self._hint.setStyleSheet(f"color: {tokens.DANGER_TEXT};")
+        self._hint.setWordWrap(True)
+        flayout.addWidget(self._hint)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self._submit_btn = QPushButton("提交回答")
+        self._submit_btn.setObjectName("askUserSubmit")
+        self._submit_btn.clicked.connect(self._on_submit)
+        self._skip_btn = QPushButton("跳过，你自己定")
+        self._skip_btn.setObjectName("askUserSkip")
+        self._skip_btn.setToolTip(
+            "不回答，让 agent 按自己的判断继续（这会被如实写成「用户交回决定权」，不是拒绝）"
+        )
+        self._skip_btn.clicked.connect(self._on_skip)
+        row.addWidget(self._submit_btn)
+        row.addWidget(self._skip_btn)
+        row.addStretch(1)
+        flayout.addLayout(row)
+
+    def _build_question(self, idx: int, q: dict) -> QHBoxLayout | QVBoxLayout:
+        col = QVBoxLayout()
+        col.setSpacing(2)
+
+        header = (q.get("header") or "").strip()
+        text = q.get("question") or ""
+        label_text = f"{header}：{text}" if header else text
+        if len(self._questions) > 1:
+            label_text = f"{idx + 1}/{len(self._questions)} · {label_text}"
+        qlabel = QLabel(label_text)
+        qlabel.setWordWrap(True)
+        qlabel.setStyleSheet(f"color: {tokens.TEXT_PRIMARY}; background: transparent;")
+        col.addWidget(qlabel)
+
+        options = q.get("options") or []
+        multi = bool(q.get("multiSelect"))
+        widgets: list = []
+        if multi:
+            # 多选：不复用 QButtonGroup（exclusive 会把互斥塞回来）
+            for opt in options:
+                cb = QCheckBox(self._option_text(opt))
+                if opt.get("description"):
+                    cb.setToolTip(opt["description"])
+                cb.setStyleSheet("background: transparent;")
+                col.addWidget(cb)
+                widgets.append(cb)
+        else:
+            group = QButtonGroup(self)
+            group.setExclusive(True)
+            for opt in options:
+                rb = QRadioButton(self._option_text(opt))
+                if opt.get("description"):
+                    rb.setToolTip(opt["description"])
+                rb.setStyleSheet("background: transparent;")
+                group.addButton(rb)
+                col.addWidget(rb)
+                widgets.append(rb)
+
+        free: QLineEdit | None = None
+        if q.get("allow_free_text", True):
+            free = QLineEdit()
+            free.setPlaceholderText("其他（自己写，可留空）")
+            col.addWidget(free)
+
+        self._groups.append({"multi": multi, "widgets": widgets, "free": free})
+        return col
+
+    @staticmethod
+    def _option_text(opt: dict) -> str:
+        # 选项描述走 tooltip：挤进按钮文本会让一行变成三行，卡片高度失控
+        return opt.get("label") or ""
+
+    # ------------------------------------------------------------------
+    # 取值与提交
+    # ------------------------------------------------------------------
+
+    def collect_answers(self) -> tuple[list[dict], str]:
+        """按题序收集答案。返回 (answers, 错误提示)——不合格就整体不提交。"""
+        answers: list[dict] = []
+        for idx, q in enumerate(self._questions):
+            g = self._groups[idx]
+            selected = [
+                w.text() for w in g["widgets"]
+                if getattr(w, "isChecked", None) and w.isChecked()
+            ]
+            free = ""
+            if g["free"] is not None:
+                free = g["free"].text().strip()
+            if not selected and not free:
+                header = (q.get("header") or "").strip()
+                if len(self._questions) > 1:
+                    # 多题时 header 可能重复（agent 常给每题都写短标签），只报 header
+                    # 用户不知道是哪一题卡住；题号与卡片标题里的 "2/3" 对齐
+                    which = f"第 {idx + 1} 题" + (f"（{header}）" if header else "")
+                else:
+                    which = header or "这个问题"
+                return [], f"{which} 还没选，也没写字——选一个或用上面的输入框写一条再提交。"
+            answers.append({
+                "question": q.get("question") or "",
+                "selected": selected,
+                "free_text": free,
+            })
+        return answers, ""
+
+    def _on_submit(self) -> None:
+        if self._answered:
+            return
+        answers, error = self.collect_answers()
+        if error:
+            self._hint.setText(error)
+            return
+        self._finish(OUTCOME_ANSWERED, answers)
+
+    def _on_skip(self) -> None:
+        if self._answered:
+            return
+        self._finish(OUTCOME_SKIPPED, None)
+
+    def _finish(self, outcome: str, answers: list[dict] | None) -> None:
+        accepted = False
+        try:
+            accepted = bool(self._on_resolve(outcome, answers))
+        except Exception as e:
+            logger.warning("_AskUserBlock: on_resolve failed: %s", e)
+        if not accepted:
+            # 桥接层已经不认这次回答（超时/中断后用户才点）⇒ 如实转失效态
+            self.mark_expired()
+            return
+        self._answered = True
+        if outcome == OUTCOME_ANSWERED and answers is not None:
+            self._hint.setText(self._summary_text(answers))
+            self._hint.setStyleSheet(f"color: {tokens.SUCCESS_TEXT}; background: transparent;")
+        else:
+            self._hint.setText("已跳过：这条决定权交回给 agent。")
+        self._set_enabled(False)
+
+    @staticmethod
+    def _summary_text(answers: list[dict]) -> str:
+        parts = []
+        for a in answers:
+            chosen = "、".join(a.get("selected") or []) or (a.get("free_text") or "")
+            parts.append(chosen or "(空)")
+        return "已回答：" + " ｜ ".join(parts)
+
+    def mark_expired(self) -> None:
+        """超时/中断：整卡禁用并写明"问题未回答"（不是"用户拒绝"）。"""
+        self._answered = True
+        self._hint.setText("已失效：等待结束（超时或会话中断），问题未回答。")
+        self._hint.setStyleSheet(f"color: {tokens.TEXT_TERTIARY}; background: transparent;")
+        self._set_enabled(False)
+
+    def _set_enabled(self, enabled: bool) -> None:
+        for g in self._groups:
+            for w in g["widgets"]:
+                w.setEnabled(enabled)
+            if g["free"] is not None:
+                g["free"].setEnabled(enabled)
+        self._submit_btn.setEnabled(enabled)
+        self._skip_btn.setEnabled(enabled)
+
+
 class _MessageTimeline(QFrame):
     """消息时间线容器（D38 + D45）。
 
@@ -1899,6 +2128,8 @@ class _ChatWorker(QThread):
         config: dict | None = None,
         model_override: str = "",
         template_skills: list[str] | None = None,
+        context_window: int = 0,
+        ask_callback: Callable[[list[dict]], dict] | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -1911,6 +2142,12 @@ class _ChatWorker(QThread):
         self._model_override = model_override or ""
         # chat-panel-v2 T04: 模板 skills[] 注入（decisions D2）
         self._template_skills: list[str] | None = template_skills
+        # 2026-10-07 压缩判据：该 model 的上下文窗口（keys.json context_window），
+        # 0 = 未知 ⇒ Compactor 不拿编造的默认值判压缩
+        self._context_window = int(context_window or 0)
+        # 2026-10-07 ask_user：面板主线程建的 AskUserBridge.ask（同步阻塞 + Event 唤醒）。
+        # None ⇒ AskUserTool 维持 fail-closed 返回 USER_DENIED（无 GUI 场景，如探针）。
+        self._ask_callback = ask_callback
         self._loop: asyncio.AbstractEventLoop | None = None
         self._interrupt_event: asyncio.Event | None = None
         # T05: facade 引用（worker 线程内创建，主线程通过 steer() 调用）
@@ -1948,15 +2185,21 @@ class _ChatWorker(QThread):
             # - L0: >8KB 工具结果落盘 data/client/artifacts/，模型只看 preview+path
             # - L2: 413 ContextOverflow 时 reactive_compact_retry，无 compactor 则直接失败
             l0_store = L0ArtifactStore()
-            compactor = Compactor()  # 默认 max_context_tokens=32000, cheap_tier_model="" (gateway 默认)
+            # 2026-10-07：上限来自 keys.json 的 context_window（面板按所选 model 查好
+            # 再传进来）。0 = 未知 ⇒ 判据明说"上限未知"，不再用一个编出来的 32000
+            # （实测真实跑到 97090 都没报错，32000 那个默认值本身就是失实的）。
+            compactor = Compactor(max_context_tokens=self._context_window)
             executor = HttpClientToolExecutor(
                 registry=registry, base_url=self._base_url, l0_store=l0_store,
             )
             # T28（spec D8.1）：注入 BuiltinToolExecutor
             # - 10 个内置基本工具（file_read/write/edit/grep/glob/ls/delete + ask_user + web_search/fetch）
             # - 本地执行不经 HTTP，路径安全 4 重校验
-            # - ask_callback 暂不注入（AskUserTool fail-closed，未注入时返回 error_variant）
-            builtin_executor = BuiltinToolExecutor(base_url=self._base_url)
+            # - 2026-10-07：ask_callback 由面板的 AskUserBridge 注入（ask_user 卡片接线）；
+            #   传 None 时 AskUserTool 仍 fail-closed 返回 USER_DENIED
+            builtin_executor = BuiltinToolExecutor(
+                base_url=self._base_url, ask_callback=self._ask_callback,
+            )
             try:
                 registry.register_builtin_tools(builtin_executor)
             except Exception as e:
@@ -2856,8 +3099,14 @@ class ChatPanel(PanelBase):
         # T05: steer 预览去重（steer 可多次调用，用 set 记录已预渲染的文本）
         self._pending_steer_previews: set[str] = set()
         # T06 spec D10：前端模型选择器状态
-        self._available_models: list[dict] = []  # [{model, tier, provider}, ...]
+        self._available_models: list[dict] = []  # [{model, tier, provider, context_window}, ...]
         self._current_model: str = ""  # 当前选中的 model（空=用 config 默认）
+        # 2026-10-07 ask_user 卡片（点单①③④）：桥接对象**必须在主线程创建**
+        # （QObject 亲和创建线程，worker 线程发射 Signal 才会走 QueuedConnection）。
+        # 超时只从 config `[runner] ask_user_timeout_secs` 读，工具入参里没有这一格。
+        self._ask_bridge = AskUserBridge(timeout_secs=self._load_ask_user_timeout_secs())
+        self._ask_bridge.set_handlers(self._on_ask_user_request, self._on_ask_user_expire)
+        self._ask_cards: dict[str, _AskUserBlock] = {}
 
         # chat-panel-v2 T06（D15）：侧边栏搜索框状态
         self._session_filter: str = ""  # 实时按标题过滤（空=不过滤）
@@ -2922,6 +3171,69 @@ class ChatPanel(PanelBase):
         except Exception:
             pass
         return "fast"
+
+    # ------------------------------------------------------------------
+    # ask_user 卡片（2026-10-07 点单①③④）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_ask_user_timeout_secs() -> float:
+        """从 config `[runner] ask_user_timeout_secs` 读等待时长（0 或缺失 = 永不超时）。
+
+        只有这一处能决定时长：工具入参里没有 timeout 格，agent 传不了——否则它可以
+        传 1 秒把"问你"变相成"替你拍板"。
+        """
+        try:
+            from lib.config_reader import load_config
+            cfg = load_config()
+            runner_cfg = cfg.get("runner", {}) if isinstance(cfg, dict) else {}
+            value = float(runner_cfg.get("ask_user_timeout_secs", 0) or 0)
+            return value if value > 0 else 0.0
+        except Exception:
+            return 0.0
+
+    def _on_ask_user_request(self, payload: dict) -> None:
+        """主线程槽：把提问画成当前会话时间线里的一张卡。
+
+        渲染不出来（会话还没建时间线等）就立刻 resolve 成 no_host——绝不许让 worker
+        干等到超时，那会把"GUI 没就绪"伪装成"用户没回答"。
+        """
+        rid = str(payload.get("rid") or "")
+        questions = payload.get("questions") or []
+        if not rid:
+            return
+        card = _AskUserBlock(
+            questions,
+            on_resolve=lambda outcome, answers: self._ask_bridge.resolve(rid, outcome, answers),
+        )
+        try:
+            self._message_timeline.append_block(card)
+        except Exception as e:
+            logger.warning("_on_ask_user_request: 卡片渲染失败: %s", e)
+            self._ask_bridge.resolve(rid, OUTCOME_NO_HOST)
+            return
+        self._ask_cards[rid] = card
+        self._scroll_to_bottom()
+        logger.info("ask_user: 卡片已上屏 rid=%s questions=%d", rid, len(questions))
+
+    def _on_ask_user_expire(self, rid: str) -> None:
+        """超时/中断后作废那张卡（留着就是"还能点但已没人等"的假入口）。"""
+        card = self._ask_cards.pop(rid, None)
+        if card is not None:
+            card.mark_expired()
+
+    def _cancel_pending_asks(self, reason: str = OUTCOME_CANCELLED) -> None:
+        """中断/切会话：唤醒仍在等的提问并作废卡片。
+
+        必须在 `worker.interrupt()` 之外单独做：`AskUserTool.execute` 正占着 worker 的
+        事件循环线程，`call_soon_threadsafe` 那套路此刻排不进去，只有直接 set
+        `threading.Event` 才送得达。
+        """
+        woke = self._ask_bridge.cancel_pending(reason)
+        for rid in list(self._ask_cards):
+            self._on_ask_user_expire(rid)
+        if woke:
+            logger.info("ask_user: 唤醒 %d 个未回答的提问（%s）", woke, reason)
 
     # ------------------------------------------------------------------
     # UI 构建
@@ -3377,6 +3689,9 @@ class ChatPanel(PanelBase):
                                 "model": item["model"],
                                 "tier": item.get("tier", ""),
                                 "provider": item.get("provider", ""),
+                                # keys.json 可选 context_window（0/缺失 = 未知）；
+                                # 消费方是压缩判据，见 _context_window_for_model
+                                "context_window": int(item.get("context_window") or 0),
                             })
                 # 用跨线程 Signal 投递主线程填充（2026-09-13：原 QTimer.singleShot
                 # 在非 Qt 线程永不触发，导致两个模型选择器永远只有"（默认）"）
@@ -3435,6 +3750,29 @@ class ChatPanel(PanelBase):
         if tier:
             label = f"{label}  [tier {tier}]"
         return label
+
+    @staticmethod
+    def pick_context_window(models: list[dict], model: str) -> int:
+        """从模型清单里取该 model 的上下文窗口；同名多 provider 取最小非零值。
+
+        取小不取大：窗口是"别越界"的约束，两家给的数不一致时，大的那个会骗人。
+        返回 0 = 未知（清单里没有 / 没填 context_window / model 为空）。
+        """
+        if not model:
+            return 0
+        windows = [
+            int(m.get("context_window") or 0)
+            for m in models
+            if m.get("model") == model and int(m.get("context_window") or 0) > 0
+        ]
+        return min(windows) if windows else 0
+
+    def _context_window_for_model(self, model: str) -> int:
+        """该 model 的上下文窗口（token），来自 keys.json 的 context_window。
+
+        0 一路传到 Compactor ⇒ 判据明说"上限未知"，而不是拿一个编出来的默认值比。
+        """
+        return self.pick_context_window(self._available_models, model)
 
     def _on_start_page_model_changed(self, _index: int) -> None:
         """开始页选择器切换 → 同样记录到 _current_model（下条消息生效）。"""
@@ -3610,6 +3948,13 @@ class ChatPanel(PanelBase):
         asyncio.Event.set 立即返回，不等待 runner 终止）。
         用 try/except 包裹防 closeEvent 失败。
         """
+        # 0. 先唤醒可能卡在 ask_user 的 worker 线程（execute 正占着那条事件循环，
+        #    只靠下面 call_soon_threadsafe 的 asyncio.Event 送不进去）
+        try:
+            self._cancel_pending_asks()
+        except Exception:
+            logger.warning("interrupt_active_session: cancel pending asks failed", exc_info=True)
+
         # 1. 中断 runner（worker.interrupt 通过 call_soon_threadsafe set asyncio.Event）
         try:
             if self._worker is not None and self._worker.isRunning():
@@ -4098,7 +4443,6 @@ class ChatPanel(PanelBase):
         顶层窗口，标题取应用显示名"LocalAgent 客户端"，划过列表项即弹出、
         点击即消失；tooltip 无信息价值，直接吞掉）。
         """
-        from PySide6.QtCore import QEvent
         if event.type() == QEvent.Type.KeyPress and obj is self._rename_editor:
             if event.key() == Qt.Key.Key_Escape:
                 self._cancel_rename()
@@ -4394,6 +4738,8 @@ class ChatPanel(PanelBase):
             },
             model_override=self._current_model,
             template_skills=template_skills if template_skills else None,
+            context_window=self._context_window_for_model(self._current_model),
+            ask_callback=self._ask_bridge.ask,
             parent=self,
         )
         self._worker.finished_run.connect(self._on_worker_finished)
@@ -4969,6 +5315,8 @@ class ChatPanel(PanelBase):
                 # B2（spec D2/D3）：删 max_budget_usd，本地无法准确算 cost（缓存比例不明）
             },
             model_override=self._current_model,
+            context_window=self._context_window_for_model(self._current_model),
+            ask_callback=self._ask_bridge.ask,
             parent=self,
         )
         self._worker.finished_run.connect(self._on_worker_finished)
@@ -5271,7 +5619,12 @@ class ChatPanel(PanelBase):
         self._message_timeline.update_tool_call_status(tool_call_status)
 
     def _clear_messages(self) -> None:
-        """T07: 清空消息时间线（委托给 _message_timeline）。"""
+        """T07: 清空消息时间线（委托给 _message_timeline）。
+
+        先唤醒还在等的 ask_user 卡片：卡片随时间线一起被销毁，不唤醒就等于把 worker
+        线程挂在一个已经没人能点的请求上（永不超时时是永久卡死）。
+        """
+        self._cancel_pending_asks()
         self._message_timeline.clear()
 
     def _scroll_to_bottom(self) -> None:

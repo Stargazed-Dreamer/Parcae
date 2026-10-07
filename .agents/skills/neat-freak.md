@@ -104,7 +104,7 @@ sync up、tidy up docs、update memory、clean up docs、/sync、/neat、同步�
 
 - [ ] 新增的模块是否有对应测试文件？
 - [ ] 已有测试是否因代码变更而需要更新？
-- [ ] 测试是否能通过？（`uv run python -m pytest tests/ -v --tb=short`）
+- [ ] 测试是否能通过？（`uv run python tools/run_tests_batched.py`）
 
 ### 第 8 步：审查配置
 

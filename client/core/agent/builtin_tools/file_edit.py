@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from client.core.agent.builtin_tools._write_backup import backup_before_overwrite
 from client.core.agent.builtin_tools.base import BuiltinTool, is_path_safe
 from client.core.agent.types import ToolCall, ToolResult
 
 
 class FileEditTool(BuiltinTool):
-    """精确字符串替换编辑文件。"""
+    """精确字符串替换编辑文件。
+
+    T19：改文件同样先留可回滚副本（safety 档写的是"可逆"，就得真能退回去）。
+    """
 
     operation_id = "file_edit"
 
@@ -56,10 +60,15 @@ class FileEditTool(BuiltinTool):
                 new_content = content.replace(old_string, new_string, 1)
                 replaced = 1
 
+            # T19：改前先留一份可回滚副本（文件必然已存在，一定会备到）
+            backup_path = backup_before_overwrite(p)
             p.write_text(new_content, encoding="utf-8")
+            message = f"Replaced {replaced} occurrence(s) in {file_path}"
+            if backup_path:
+                message += f"（改前的原文件副本：{backup_path}）"
             return self._success(
                 tool_call,
-                f"Replaced {replaced} occurrence(s) in {file_path}",
+                message,
             )
         except PermissionError:
             return self._error(

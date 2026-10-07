@@ -23,7 +23,7 @@ from ..site_lessons import build_site_lessons_hint, match_site_for_url
 from .state import TabSession
 
 if TYPE_CHECKING:
-    from playwright.async_api import Browser, BrowserContext, Page, Playwright
+    from patchright.async_api import Browser, BrowserContext, Page, Playwright
 
 logger = logging.getLogger("localagent.browser_session")
 
@@ -47,6 +47,11 @@ class SessionManager:
         self._lock = asyncio.Lock()
         # 2026-09-03 防泄漏：是否已把 Chrome 下载落盘指到项目临时目录（browser 级，幂等）
         self._download_behavior_configured = False
+        # 2026-10-02 归属权/可追溯：已关闭 session 的墓碑（session_id -> {reason, closed_at, owner, url}）。
+        # 上限 200 条 FIFO；对已关 session 的后续操作据此报 SESSION_CLOSED(reason) 而非静默死。
+        self._closed_log: dict[str, dict] = {}
+        # 2026-10-02 归属权常量：单 caller 同时持有的 session 上限（防一个 agent 吃满全局额度）
+        self._per_caller_limit = 10
 
     @property
     def is_connected(self) -> bool:
@@ -59,7 +64,7 @@ class SessionManager:
         async with self._lock:
             if self._browser is not None:
                 return
-            from playwright.async_api import async_playwright
+            from patchright.async_api import async_playwright
             pw = await async_playwright().start()
             browser = await asyncio.wait_for(
                 pw.chromium.connect_over_cdp(cdp_url), timeout=10
@@ -124,16 +129,16 @@ class SessionManager:
 
     @staticmethod
     def _get_download_dir() -> str:
-        """下载沙箱目录：<项目根>/temp/browser_<data_drive>:/Downloads（避免污染用户 <data_drive>:/Downloads）。"""
+        """下载沙箱目录：<项目根>/temp/browser_downloads（避免污染用户 Downloads）。"""
         from pathlib import Path
         repo_root = Path(__file__).resolve().parents[3]  # server/browser/session/ -> 仓库根
-        return str(repo_root / "temp" / "browser_<data_drive>:/Downloads")
+        return str(repo_root / "temp" / "browser_downloads")
 
     async def _configure_download_behavior(self, page: Page | None = None) -> None:
         """把 CDP 浏览器的下载落盘指到项目临时目录（每次 create_session 强制配置）。
 
         2026-09-03 防泄漏根因：connect_over_cdp 连真实 Chrome 后若不设置下载行为，
-        Chrome 一切下载默认落盘浏览器默认下载目录（用户 <data_drive>:/Downloads）——e2e download
+        Chrome 一切下载默认落盘浏览器默认下载目录（用户 Downloads）——e2e download
         测试每轮泄漏 1 个 test_download*.txt 到用户下载夹，save_as 只是另存一份、
         拦不住 Chrome 先落盘。cancel 路径虽能拦住，但 save_as 路径拦不住。
 
@@ -173,21 +178,67 @@ class SessionManager:
         url_pattern: str | None = None,
         url: str | None = None,
         cdp_url: str | None = None,
+        owner: str = "anonymous",
+        force: bool = False,
     ) -> dict:
         """创建或复用一个 TabSession。
 
         优先级：
-        1. url_pattern：找现有 page（url 包含 pattern），命中则复用（显式接管已有 tab）
+        1. url_pattern：找现有 page（url 包含 pattern），命中则复用（显式接管已有 tab）。
+           2026-10-02 归属权：若命中的 page 已被其他 agent 持有（owner 非匿名且 ≠ 本次
+           caller 且非 gui），必须 force=True 才允许接管，否则抛 TAB_OWNED（含 owner 信息）。
         2. url：新建 page 并 goto url
         3. 都不传：新建专用空白 tab（2026-09-03 起不复用 pages[0]，避免
            session 意外绑定用户真实 tab/扩展窗口页）
 
+        2026-10-02 归属权/额度（多 agent 不打架）：
+        - owner 记入 TabSession.owner，后续 close 校验归属
+        - 单 caller 持有数超 _per_caller_limit → 抛 PER_CALLER_LIMIT（gui 豁免）
+        - 全局 session 数达 session_max_count → 先淘汰 anonymous（idle 最久优先）；
+          仍满则抛 SESSION_LIMIT_REACHED（gui 同样受限，错误信息说明现状）
+
         Returns: {session_id, tab_id, url, title, created}
+        Raises: ValueError（TAB_OWNED / PER_CALLER_LIMIT / SESSION_LIMIT_REACHED）
         """
+        # ── 额度检查（在连接 CDP 之前，失败早退）─────────────────────────
+        from ...config import get_browser_config as _get_cfg
+        _cfg = _get_cfg()
+        max_count = int(_cfg.get("session_max_count", 32))
+
+        # per-caller 上限：gui 豁免（人在开 tab 自己有数）
+        if owner != "gui":
+            mine = [s for s in self._sessions.values() if s.owner == owner]
+            if len(mine) >= self._per_caller_limit:
+                raise ValueError(
+                    f"PER_CALLER_LIMIT: 调用方 {owner} 已持有 {len(mine)} 个 session "
+                    f"(上限 {self._per_caller_limit})。请先 browser_session_close 释放不再用的，"
+                    f"或带 force=false 语义自行管理额度。"
+                )
+
+        # 全局上限：先淘汰 anonymous（idle 最久优先），仍满则拒绝
+        if len(self._sessions) >= max_count:
+            anon = sorted(
+                (s for s in self._sessions.values() if s.owner == "anonymous"),
+                key=lambda s: s.last_used_at,
+            )
+            excess = len(self._sessions) - max_count + 1
+            for s in anon[:excess]:
+                logger.info(
+                    "BrowserSession: session %s (owner=anonymous) LRU 淘汰为新建让位", s.session_id
+                )
+                await self.close_session(s.session_id, closed_reason="lru_evicted_anon")
+            if len(self._sessions) >= max_count:
+                owners: dict[str, int] = {}
+                for s in self._sessions.values():
+                    owners[s.owner] = owners.get(s.owner, 0) + 1
+                raise ValueError(
+                    f"SESSION_LIMIT_REACHED: 全局 session 已满 {len(self._sessions)}/{max_count}，"
+                    f"且无 anonymous 可淘汰。归属分布 {owners}。"
+                    f"请协调其他调用方释放，或调大 [browser] session_max_count。"
+                )
+
         if cdp_url is None:
-            from ...config import get_browser_config
-            cfg = get_browser_config()
-            cdp_url = f'http://127.0.0.1:{cfg["debug_port"]}'
+            cdp_url = f'http://127.0.0.1:{_cfg["debug_port"]}'
 
         await self._reconnect_if_needed(cdp_url)
         # _reconnect_if_needed 已确保 _browser 非 None
@@ -205,6 +256,21 @@ class SessionManager:
                 if not p.is_closed() and url_pattern in p.url:
                     page = p
                     break
+            # 2026-10-02 抢绑校验：命中的 page 若已被其他 agent 有主持有，需 force
+            if page is not None and owner != "gui":
+                holder = next(
+                    (s for s in self._sessions.values() if s.page is page), None
+                )
+                if (
+                    holder is not None
+                    and holder.owner not in ("anonymous", owner)
+                    and not force
+                ):
+                    raise ValueError(
+                        f"TAB_OWNED: url_pattern 命中的 tab 正被 owner={holder.owner} 持有 "
+                        f"(session {holder.session_id}, url={holder.url})。"
+                        f"如确要接管请带 force=true（对方不会收到通知，请先协调）。"
+                    )
         # 2) url 新建
         if page is None and url:
             page = await self._new_page_with_retry(context)
@@ -268,6 +334,7 @@ class SessionManager:
             url=page.url,
             title=title,
             site_lessons=site_lessons,
+            owner=owner,
         )
         # 注册控制台日志收集（持久 session 才能跨调用增量返回）
         def _on_console(msg):
@@ -308,6 +375,14 @@ class SessionManager:
             except Exception:
                 pass
         page.on("pageerror", _on_pageerror)
+
+        # 2026-09-30 patchright 迁移说明：
+        # - 主 world 不发 Runtime.enable，page.on("console") 收不到 consoleAPICalled
+        #   （原理性，非 bug）——本监听器保留作为未来版本恢复时的前向兼容。
+        # - CDP Log domain 兜底已被实测证伪（Chrome 140：仅 Log.enable 时
+        #   console-api/network 源 entryAdded 均零事件，见 temp/browser_mgmt_audit_20260930/
+        #   test_cdp_events.py 判定实验）——console 捕获改为**按需** Runtime.enable，
+        #   见 enable_console_capture()，由 console_logs 端点显式触发。
 
         # 监听 page close，自动清理 session
         # pyright stub 将 "close" 事件 handler 标注为 (Page) -> Awaitable[None] | None，
@@ -427,7 +502,7 @@ class SessionManager:
 
         def _on_download(dl):
             try:
-                session._append_pending("pending_<data_drive>:/Downloads", {
+                session._append_pending("pending_downloads", {
                     "url": dl.url,
                     "suggested_filename": dl.suggested_filename,
                     "page_url": page.url,
@@ -457,14 +532,114 @@ class SessionManager:
         """同步获取 session（不 touch，不重连）。"""
         return self._sessions.get(session_id)
 
+    async def enable_console_capture(self, session_id: str) -> bool:
+        """按需开启该 session 的 console 捕获（2026-09-30 patchright 迁移配套）。
+
+        背景：patchright 主 world 不发 Runtime.enable（否则 ownKeys 原型链检测向量
+        触发，见 docs/browser-anti-detection.md 与 temp/browser_mgmt_audit_20260930/
+        红蓝对抗实测），page.on("console") 因此收不到事件；CDP Log domain 兜底在
+        Chrome 140 上被实测证伪（无 Runtime.enable 时 entryAdded 零事件）。
+
+        方案：**按需** Runtime.enable——只在调用方显式读 console_logs 的 session 上
+        开启（粘性，直到 session 关闭），检测暴露面从"每个 tab 永久"缩到
+        "agent 显式要日志的那几个 tab"。幂等：重复调用直接返回 True。
+
+        Returns: True=已开启（或本就开启）；False=session 不存在或挂载失败。
+        """
+        s = self._sessions.get(session_id)
+        if s is None:
+            return False
+        if s.console_capture_enabled:
+            return True
+        try:
+            cdp = await s.page.context.new_cdp_session(s.page)
+
+            def _fmt_args(args) -> str:
+                parts = []
+                for a in args or []:
+                    if not isinstance(a, dict):
+                        continue
+                    if "value" in a:
+                        parts.append(str(a["value"]))
+                    elif a.get("description"):
+                        parts.append(a["description"])
+                return " ".join(parts)
+
+            def _append(level: str, text: str, url: str, line: int, column: int) -> None:
+                try:
+                    s.console_logs.append({
+                        "ts": time.time(),
+                        "level": level,
+                        "text": text,
+                        "url": url,
+                        "line": line,
+                        "column": column,
+                    })
+                    max_len = s.console_logs_max_len
+                    if len(s.console_logs) > max_len:
+                        overflow = len(s.console_logs) - max_len
+                        s.console_logs = s.console_logs[overflow:]
+                        s.console_logs_dropped_count += overflow
+                except Exception:
+                    pass
+
+            def _on_console_api(params) -> None:
+                try:
+                    if not isinstance(params, dict):
+                        return
+                    frames = (params.get("stackTrace") or {}).get("callFrames") or []
+                    top = frames[0] if frames else {}
+                    _append(
+                        params.get("type", "info"),
+                        _fmt_args(params.get("args")),
+                        top.get("url", ""),
+                        top.get("lineNumber", 0) or 0,
+                        top.get("columnNumber", 0) or 0,
+                    )
+                except Exception:
+                    pass
+
+            def _on_exception(params) -> None:
+                try:
+                    if not isinstance(params, dict):
+                        return
+                    d = params.get("exceptionDetails") or {}
+                    exc = d.get("exception") or {}
+                    text = exc.get("description") or d.get("text", "")
+                    frames = (d.get("stackTrace") or {}).get("callFrames") or []
+                    top = frames[0] if frames else {}
+                    _append("error", text, top.get("url", ""),
+                            top.get("lineNumber", 0) or 0, top.get("columnNumber", 0) or 0)
+                except Exception:
+                    pass
+
+            cdp.on("Runtime.consoleAPICalled", _on_console_api)
+            cdp.on("Runtime.exceptionThrown", _on_exception)
+            await cdp.send("Runtime.enable")
+            s.cdp_log_session = cdp  # 强引用防 GC；page 关闭时自动失效
+            s.console_capture_enabled = True
+            logger.info("BrowserSession: session %s 已按需开启 console 捕获（Runtime.enable）",
+                        session_id)
+            return True
+        except Exception as e:
+            logger.warning("BrowserSession: session %s console 捕获开启失败: %s",
+                           session_id, e)
+            return False
+
     async def get_page(self, session_id: str) -> Page | None:
-        """获取 page 句柄并 touch。session 不存在返回 None。"""
+        """获取 page 句柄并 touch。session 不存在返回 None。
+
+        2026-10-02：page 被外部关闭（用户手动/外部脚本）时也写墓碑
+        （reason=page_closed_external），这正是 2026-09-30 探针 tab 事故的形态——
+        事后至少能答"它是什么时候、以什么方式消失的"。
+        """
         s = self._sessions.get(session_id)
         if s is None:
             return None
         # 探活：page 是否已关闭
         if s.page.is_closed():
             self._sessions.pop(session_id, None)
+            self._record_closed(s, "page_closed_external")
             return None
         s.touch()
         return s.page
@@ -476,6 +651,7 @@ class SessionManager:
             {
                 "session_id": s.session_id,
                 "tab_id": s.tab_id,
+                "owner": s.owner,
                 "url": s.url,
                 "title": s.title,
                 "created_at": s.created_at,
@@ -517,23 +693,45 @@ class SessionManager:
             return None
         return contexts[0]
 
-    async def close_session(self, session_id: str, close_page: bool = True) -> bool:
+    def _record_closed(self, s: TabSession, reason: str) -> None:
+        """写关闭墓碑（FIFO 上限 200），供后续操作报 SESSION_CLOSED 明确错误。"""
+        self._closed_log[s.session_id] = {
+            "reason": reason,
+            "closed_at": time.time(),
+            "owner": s.owner,
+            "url": s.url,
+        }
+        if len(self._closed_log) > 200:
+            for k in list(self._closed_log.keys())[: len(self._closed_log) - 200]:
+                self._closed_log.pop(k, None)
+
+    def get_closed_info(self, session_id: str) -> dict | None:
+        """查询已关闭 session 的墓碑信息；未关过或太旧返回 None。"""
+        return self._closed_log.get(session_id)
+
+    async def close_session(
+        self, session_id: str, close_page: bool = True, closed_reason: str = "manual"
+    ) -> bool:
         """关闭 session。close_page=True（默认）时同时关闭浏览器 page。
 
         历史背景：曾因 close_page=True 触发 Chrome CDP "Failed to open a new tab" 异常
         而全链路改为 False，但经 2026-08-05 验证该异常已不存在（Playwright/Chrome 升级修复）。
         现恢复默认 True，确保 session 关闭时 page 也被清理，避免 Chrome tab 无限累积。
+
+        2026-10-02：closed_reason 记入墓碑（manual:<caller> / idle_timeout / lru_evicted_anon），
+        可通过 get_closed_info 追溯"谁/为什么关了我的 session"。
         """
         s = self._sessions.pop(session_id, None)
         if s is None:
             return False
+        self._record_closed(s, closed_reason)
         # 取消未完成的 dialog 超时兜底 task，避免 asyncio task 泄漏
         for task in list(s._dialog_timeout_tasks):
             task.cancel()
         s._dialog_timeout_tasks.clear()
         # 2026-09-03 防泄漏兜底：关 page 前 cancel 未消费的 download 对象
         # （download 事件触发后若既未 save_as 也未 cancel，CDP 连真实 Chrome 会把
-        # 下载落盘到浏览器默认下载目录——实测泄漏 test_download*.txt 到用户 <data_drive>:/Downloads）
+        # 下载落盘到浏览器默认下载目录——实测泄漏 test_download*.txt 到用户 Downloads）
         if s.last_download_obj is not None:
             try:
                 await s.last_download_obj.cancel()
@@ -580,32 +778,57 @@ class SessionManager:
             pass
 
     async def _cleanup_loop(self) -> None:
-        """后台循环：清理 idle 超时的 session。"""
+        """后台循环：清理 idle 超时的 session。
+
+        2026-10-02 租约化：有主 session 用 session_idle_timeout_secs（900s，owner
+        每次操作即续租）；anonymous（老脚本/内部调用，没人会来续租）用更短的
+        session_anon_idle_timeout_secs（300s）。LRU 淘汰只针对 anonymous——
+        有主的满额由 create_session 报 SESSION_LIMIT_REACHED，不静默挤别人。
+        """
         from ...config import get_browser_config
         while True:
             try:
                 await asyncio.sleep(60)
                 cfg = get_browser_config()
-                timeout = cfg.get("session_idle_timeout_secs", 300)
-                max_count = cfg.get("session_max_count", 20)
+                # T7：只有一套取值，anonymous 有独立更短的租约（原 cleanup 内
+                # 兜底默认 300 与 config 实际 900 不一致的问题一并消除）
+                owned_timeout = int(cfg.get("session_idle_timeout_secs", 900))
+                anon_timeout = int(cfg.get("session_anon_idle_timeout_secs", 300))
+                max_count = int(cfg.get("session_max_count", 32))
                 now = time.time()
-                # 1) 清理 idle 超时
+                # 1) 清理 idle 超时（按归属选租约）
                 expired = [
                     sid for sid, s in self._sessions.items()
-                    if now - s.last_used_at > timeout
+                    if now - s.last_used_at > (
+                        anon_timeout if s.owner == "anonymous" else owned_timeout
+                    )
                 ]
                 for sid in expired:
-                    await self.close_session(sid, close_page=True)
+                    await self.close_session(sid, closed_reason="idle_timeout")
                     logger.info("BrowserSession: session %s idle 超时已清理（page 已关闭）", sid)
-                # 2) LRU 淘汰：超过 max_count 时按 last_used_at 最早的关闭
+                # 2) LRU 淘汰：只淘汰 anonymous（无主 session 没人会来续租）。
+                #    有主的超额由 create_session 的 SESSION_LIMIT_REACHED 报错处理，
+                #    这里只记 warning 提示归属分布，不静默挤别人的 session。
                 if len(self._sessions) > max_count:
-                    sorted_sessions = sorted(
-                        self._sessions.items(), key=lambda kv: kv[1].last_used_at
+                    anon = sorted(
+                        (s for s in self._sessions.values() if s.owner == "anonymous"),
+                        key=lambda s: s.last_used_at,
                     )
                     excess = len(self._sessions) - max_count
-                    for sid, _ in sorted_sessions[:excess]:
-                        await self.close_session(sid, close_page=True)
-                        logger.info("BrowserSession: session %s LRU 淘汰（page 已关闭）", sid)
+                    for s in anon[:excess]:
+                        logger.info(
+                            "BrowserSession: session %s (owner=anonymous) LRU 淘汰", s.session_id
+                        )
+                        await self.close_session(s.session_id, closed_reason="lru_evicted_anon")
+                    if len(self._sessions) > max_count:
+                        owners: dict[str, int] = {}
+                        for s in self._sessions.values():
+                            owners[s.owner] = owners.get(s.owner, 0) + 1
+                        logger.warning(
+                            "BrowserSession: 全局 session 超上限 %d/%d 且无 anonymous 可淘汰，"
+                            "归属分布 %s（不淘汰有主 session，新建将被拒绝）",
+                            len(self._sessions), max_count, owners,
+                        )
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -634,3 +857,18 @@ async def reset_session_manager() -> None:
     if _manager is not None:
         await _manager.close_all()
         _manager = None
+
+def get_closed_hint(session_id: str) -> str:
+    """模块级便捷查询：session 为何消失（用单例墓碑；未初始化/无记录返回空串）。
+
+    供各端点 not-found 分支拼接 debug_detail：把"不存在或已失效"变成
+    "已于 12:34:56 被关闭：idle_timeout，owner=xxx"——2026-09-30 探针 tab
+    被关事故的直接教训（当时连"什么时候没的"都答不出来）。
+    """
+    if _manager is None:
+        return ""
+    info = _manager._closed_log.get(session_id)
+    if not info:
+        return ""
+    t = time.strftime("%H:%M:%S", time.localtime(info["closed_at"]))
+    return f"（已于 {t} 被关闭：{info['reason']}，owner={info['owner']}，url={info['url']}）"

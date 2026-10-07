@@ -525,7 +525,11 @@ class TestBrowserScreenshotModel:
         assert req.shot_type == "viewport"
         assert req.max_size == 1024
         assert req.quality == 85
-        assert req.return_base64 is True
+        # 默认 False = 只返回 path。原默认 True 会让一次普通截图往 LLM 上下文塞
+        # 181424 字符 base64（网关当时只认顶层/result 形状，本端点放在 data 下，
+        # ImageContent 转换根本没触发）。2026-09-21 修复，见
+        # tests/server_endpoints/test_mcp_image_block_guard.py
+        assert req.return_base64 is False
 
     def test_screenshot_full_page(self):
         req = BrowserScreenshotRequest(shot_type="full_page", return_base64=False)
@@ -660,7 +664,7 @@ class TestHealthBrowserStatus:
         assert "session_max_count" in browser_status
         # session 配置项有合理默认值
         assert browser_status["session_idle_timeout_secs"] == 900
-        assert browser_status["session_max_count"] == 20
+        assert browser_status["session_max_count"] == 32
 
 
 # ==================== P2 强化独有优势（评估文档 P2 第 1-4 项）====================
@@ -718,6 +722,30 @@ class TestSiteLessonsMatching:
         results = match_site_for_url("https://_template.example.com/")
         assert all(r["domain"] != "_template" for r in results)
 
+    @pytest.mark.parametrize("heading", [
+        "## 已知坑",              # 裸标题
+        "## 已知坑（补充）",       # 中文全角括号后缀
+        "## 已知坑(legacy)",      # 英文半角括号后缀
+        "## 已知坑 （带空格）",    # 括号前有空格
+    ])
+    def test_insert_section_content_tolerates_heading_suffix(self, heading):
+        """标题带后缀时仍能追加上（否则默认 section 在多数已有文件上永远写不进去）"""
+        from server.browser.site_lessons import _insert_section_content
+        body = f"{heading}\n\n- old\n\n## 其他章节\n"
+        new_body, found = _insert_section_content(body, "已知坑", "- new")
+        assert found, f"标题 {heading!r} 应被匹配到"
+        assert "- new" in new_body
+        # 必须插在该 section 末尾（＝下一章节之前），而不是文件末尾
+        assert new_body.index("- new") < new_body.index("## 其他章节")
+
+    def test_insert_section_content_missing_section_returns_not_found(self):
+        """section 不存在时返回 found=False 且不改动 body"""
+        from server.browser.site_lessons import _insert_section_content
+        body = "## 反爬规则\n\n- x\n"
+        new_body, found = _insert_section_content(body, "已知坑", "- new")
+        assert not found
+        assert new_body == body
+
     def test_build_site_lessons_hint_empty_returns_none(self):
         from server.browser.site_lessons import build_site_lessons_hint
         assert build_site_lessons_hint([]) is None
@@ -726,7 +754,7 @@ class TestSiteLessonsMatching:
         from server.browser.site_lessons import build_site_lessons_hint
         lessons = [
             {"domain": "xiaoheihe", "aliases": [], "body": "已知坑：xxx"},
-            {"domain": "bilibili", "aliases": ["<data_drive>:\<bilibili_videos>"], "body": "反爬规则：yyy"},
+            {"domain": "bilibili", "aliases": ["<data_drive>:/<bilibili_videos>"], "body": "反爬规则：yyy"},
         ]
         hint = build_site_lessons_hint(lessons)
         assert isinstance(hint, str)

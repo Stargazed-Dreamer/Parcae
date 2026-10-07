@@ -14,7 +14,6 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 - **视觉AI**: 远程 VL（ModelScope API-Inference；默认模型 = `data/llm/keys.json` 中 `vl` scope 里 tier 最低的启用模型，运行时看 `GET /vision/status` 的 `vl_model`，魔搭会不定期下架模型 ID），负责文档解析、图像描述与无文字元素定位兜底
 - **LLM**: 多提供商配置（DeepSeek/OpenAI/智谱等），v8 tier 系统（model.tier 1-5 由 keys.json 定义，use_case.default_tier 决定调用层级，tier 硬匹配 + model 软偏好）
 - **记忆**: 三层记忆系统 v3（Recent 滑动窗口 + SQLite 时间索引 + 向量语义检索 + BM25 + HMS 风格三源召回/EvidenceLedger/SearchTracer）
-- **多进程**: 已移除（原 ZeroMQ Worker 系统在 2026-07-08 远程 VL 上线后未使用，已删除）
 - **浏览器**: Chromium 内核浏览器 CDP 协议（端口 9222，独立调试实例，支持 Chrome/Edge/Brave/Vivaldi 等）
 - **MCP**: fastapi-mcp，Streamable HTTP 协议，端点 `/mcp`
 - **GUI**: PySide6 子进程（覆盖层/确认窗口）
@@ -27,7 +26,9 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 |------|------|----------|
 | `AGENTS.md`（本文件） | 项目指引、会话规范、核心陷阱、关键约束 | 每次会话必读 |
 | `docs/project-intro.md` | 深度项目导览（比喻主干、由浅入深、章→模块映射表、FAQ；人类读者入口，AI 可选读） | 新维护者上手 / 想系统理解项目时 |
+| `docs/architecture.md` | 架构与设计决策（架构总览、后端模块清单、一次 agent 任务的完整数据流、关键设计决策、ADR 索引） | 理解整体架构 / 查"为什么这样设计"时 |
 | `docs/operations-manual.md` | 后端重启、终端 API、日总结、挂机关机、浏览器经验、记忆系统、工具脚本、PySide6 性能 | 触发特定任务或运维时 |
+| `docs/deployment.md` | 部署与其他机器迁移（依赖安装、模型下载、部署常见故障） | 新机器部署 / 部署故障排查时 |
 | `docs/dev-workflow.md` | 功能变更检查清单、CHANGELOG 维护、发版流程、MCP 工具原则、MCP 接入、用户补充指令 | 工程开发/发版/MCP 配置时 |
 | `docs/changelog-archive.md` | 历史 release 条目归档（按版本倒序，工具自动维护） | 查完整变更历史时 |
 | `docs/release-policy.md` | 源码分发策略（public-full profile、Apache-2.0） | 打包/分发源码时 |
@@ -35,11 +36,12 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 | `docs/api-reference.md` | 后端 API 速查（按功能分桶、浏览器分三层、精简描述） | 查 REST 端点/MCP 工具名时 |
 | `docs/browser-anti-detection.md` | **浏览器反检测（伪装）规范**：为什么本项目不注入任何 JS 伪装补丁（实测证据）、禁止 playwright-stealth、指纹自检工具 | 改动浏览器链路前；想加"反爬/伪装"补丁时**必读** |
 | `docs/computer-use-reference.md` | UIA 语义层、桌面事务、DPI、API 速查、注意事项 | 屏幕操控深入参考时 |
+| `docs/vm-ops.md` | **虚拟机操作方案（全项目）**：通道决策表（vmrun GuestOps vs VNC 后台直连）、无窗口驱动装机、快照回滚纪律、实测坑清单 | 任何要开/装/控制虚拟机的任务**先读通道决策表** |
 | `docs/mcp-reference.md` | MCP 三层架构、工具排除清单、REST→MCP 映射规则、统计 | 需要查 MCP 工具名/网关时 |
 | `docs/tools-guide.md` | 所有工具脚本的详细用法、参数、安全机制 | 运行工具脚本时 |
 | `docs/memory-system.md` | 三层记忆系统架构、API、压缩、自动记录 | 读写记忆时 |
 | `docs/llm-pool.md` | LLM 并发池架构 | 脚本调用 LLM 时 |
-| `docs/environment-constraints.md` | PaddlePaddle 兼容性、Model Lifecycle Manager（含"无 GPU→CPU 降级"缺口）、Playwright、调试浏览器、**网络与环境查询技巧**（HF 访问/查 wheel/验证 GPU/测挂死） | OCR/Vision/浏览器操作时；查环境类通用技巧时 |
+| `docs/environment-constraints.md` | PaddlePaddle 兼容性、**资源采样中枢（常驻 NVML；GPU 侧只支持 NVIDIA，别的卡走扩展点）**、Model Lifecycle Manager（含"无 GPU→CPU 降级"缺口）、Playwright、调试浏览器、**网络与环境查询技巧**（HF 访问/查 wheel/验证 GPU/测挂死） | OCR/Vision/浏览器操作时；改资源采样/压力监控链路时；查环境类通用技巧时 |
 | `docs/model-paths.md` | 模型路径管理（`[models]` 配置、外部目录回退） | 配置模型权重路径时 |
 | `docs/recorder-guide.md` | 操作录制器用户指南（L0-L4 五层架构） | 使用录制器/采集操作时 |
 | `docs/recorder-test-guide.md` | Recorder 模块端到端测试说明 | 测试录制器功能时 |
@@ -47,8 +49,8 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 | `tools/README.md` | 工具目录总览 | 查找工具脚本时 |
 | `docs/adr/` | ADR（架构决策记录）索引 + 决策文档（覆盖 LLM 池/对话引擎/记忆系统/屏幕操控/审批/视觉/发布工具等主题域） | 遇到"为什么这样设计"或做架构决策时 |
 | `docs/agent-guide-keywords.md` | agent_guide 关键词编写规范（match_task_candidates 五路加权打分） | 维护 GUIDE_REGISTRY 时必读 |
-| `docs/chat-engine.md` | v6-lite 对话引擎架构（SessionRunner/EventStore/Compactor 等 8 组件 + EventStore schema v9 + chat-panel-v2 关键设计 + QThread 桥接） | 理解对话引擎工作原理时 |
-| `docs/agent-guide.md` | 任务路由系统（GUIDE_REGISTRY 结构/6 scope/consumption_contexts 消费闭环/first_action 注入/workspace 动态扩展） | 维护 skill 或理解任务路由时 |
+| `docs/chat-engine.md` | v6-lite 对话引擎架构（SessionRunner/EventStore/Compactor 等多组件 + EventStore schema（版本以 `client/core/agent/event_store.py` 的 `_SCHEMA_VERSION` 为准）+ chat-panel-v2 关键设计 + QThread 桥接） | 理解对话引擎工作原理时 |
+| `docs/agent-guide.md` | 任务路由系统（GUIDE_REGISTRY 结构/scope 分类/consumption_contexts 消费闭环/first_action 注入/workspace 动态扩展） | 维护 skill 或理解任务路由时 |
 | `docs/todos-wip.md` | 待办与 WIP 系统（三类型 todo/WIP 生命周期/task_closure 整合/API 端点表） | 使用 todos 或 WIP 功能时 |
 | `docs/periodic-task-inventory.md` | **周期任务与空闲额度跑批台账**（哪些 workspace 本质上要周期性跑、分别由谁提醒、用户说"额度很多"时该核对哪些并提议跑什么、哪些有意不周期化） | 用户问周期任务/"额度多能跑啥"、新增 workspace 判断触发方式、改 todo 到期判据时 |
 | `.agents/rules/project_rules.md` | 功能变更检查清单 | 新增/修改功能后 |
@@ -139,7 +141,7 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 **不要在会话开始时主动调 `todos_due` / `wip_list` 检查到期任务或未完成工作。** 这些查询与用户当前任务可能无关，主动检查会污染上下文。
 
 - 用户问"有什么任务"/"待办"/"上次没做完的" → 调 `agent_guide(task_type='system.task_reminder')` 获取指导
-- 用户问"上次做到哪了"/"未完成的工作" → 调 `wip_list(summary=true)` 只看摘要（id/title/status/progress），需要详情再 `wip_get(id)`
+- 用户问"上次做到哪了"/"未完成的工作" → 调 `wip_list`（**默认已是轻量模式**，未完结条目给 id/title/status/priority/progress，已完结条目压成 id/截断标题/状态 + `closed=true`），需要详情再 `wip_get(id)` 单条或 `wip_get_many(ids=[...])` 批量；**不要为了看详情把 `summary` 关掉整表拉取**
 - 用户确认要做某到期任务 → 按 task_reminder 指导执行，完成后调 `todos_mark_done`
 
 **todo 类型**：`recurring`（周期任务，按 frequency 到期）、`phased_recurring`（阶段性周期，`[start_date, end_date]` 区间内递推，超出后 `archived`）、`triggered`（触发式，loop 轮询 `trigger_condition` 自动触发，不进 `todos_due`）。triggered 任务触发后，消息进入 `server/user_message.py` 的内存队列，在 agent **下次调用非排除端点时**被注入其响应（拉取式注入，**没有主动推送**——agent 不调工具就收不到），处理后 `todos_mark_done` 重置。
@@ -187,9 +189,9 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 ### 收尾 6 步流程（task_closure skill）
 
 1. **评估任务状态**：完成？中断？无实质产出？决定后续步骤集
-2. **WIP 处理**：完成→`wip_update(status=completed)`；中断→`wip_create` 或 `wip_update` 留档（next_steps 必须可执行）
+2. **WIP 处理**：完成→`wip_update(status=completed)`；中断→`wip_create` 或 `wip_update` 留档（next_steps 必须可执行）。⚠️ **写操作不是直接 MCP 工具**：MCP 侧只有 `wip_get` / `wip_list` / `wip_get_many`，`wip_create` / `wip_update` / `wip_delete` 与 `todos_create` / `todos_update` / `todos_mark_done` 要走 `localagent_advanced_tool(tool="wip_create", params={...})`（REST `POST /wip`）。按 `mcp__localagent__wip_create` 调会直接 not found
 3. **经验提炼 + 可消费性自检**：识别值得保留的经验（preference/project/reference），**必须填 `consumption_contexts`（哪些 task_type 应读取）+ `trigger_keywords`（任务描述出现什么词时读取）**，无法明确消费场景的候选跳过——避免"存了没人用"
-4. **查重 + 写入**：`memory_list` 查重 → `memory_set(key, {data, merge: true})` 写入结构化记忆
+4. **查重 + 写入**：`memory_list` 查重 → `memory_set` 写入结构化记忆。参数形状是**平铺**的：`memory_set(key=..., data={...}, merge=true, fact_type=..., consumption_contexts=[...], trigger_keywords=[...])`——`fact_type` / `consumption_contexts` / `trigger_keywords` 是**顶层字段**（写进 facts 表独立列供 SQL 过滤），不是塞在 `data` 里；同名时顶层覆盖 `data` 内的值
 5. **文档自查（不询问用户）**：agent 自行对照 `.agents/rules/project_rules.md` 检查清单，检查本轮变更是否需要文档同步（路由注册/Pydantic模型/`/health`/硬编码/`_index.md`/`AGENTS.md`/`CHANGELOG.md`/`config.example.toml`/`tools_manifest.json`）。**ADR 评估（强制）**：本轮若有架构层变更或 SDD 产出 design-decisions，按 `project_rules.md` "ADR 评估"段三项标准打分，3/3 通过则写 ADR 并更新 `docs/adr/README.md` 索引（详见"关键约束 → ADR 维护"段）。完整 neat-freak 审查由用户主动触发。**若是浏览器操作任务**，额外检查"浏览器经验记录"（见 `docs/operations-manual.md` "浏览器操作经验记录"章节）：本次是否遇到非显然行为？若是，写入 `.agents/skills/browser_lessons/sites/<domain>.md`，无对应文件时按 `sites/_template.md` 创建，并同步更新 `.agents/skills/browser_lessons/references/site_index.md`
 6. **收尾报告**：向用户报告 WIP 处理 + 经验提炼（含消费场景）+ 文档自查结果（含浏览器经验记录变更）
 
@@ -229,7 +231,7 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 - **LLM/VL/AIGC 密钥** → `data/llm/keys.json`，通过 `lib.secret.get_llm_keys_path()` 获取路径，`server/llm_pool/key_store.py` 统一加载
 - **非 LLM 密钥**（tushare_token/github_token/example_token 等）→ `data/secret/secrets.toml` `[tokens]` 段，通过 `lib.secret.get_secret(key)` 读取
 - **禁止**：硬编码密钥到代码、写入 config.toml、直接 `open()` 密钥文件、在日志/错误信息中回显密钥值
-- **迁移工具**：`tools/migrate_secrets.py` 已删除（迁移完成后清理）；恢复用 `tools/restore_secrets.py`（从备份找回密钥文件）
+- **密钥恢复**：`tools/restore_secrets.py`（从备份找回密钥文件）
 - 详见 `.agents/rules/project_rules.md` "密钥统一管理"段
 
 ### ADR 维护（架构决策记录，强制评估）
@@ -280,6 +282,10 @@ ADR 是项目架构决策的真源，位于 `docs/adr/`（索引见 `docs/adr/RE
 3. **行为重构必须同步所有描述处**：改掉某个旧行为时（如"重试改不重试"），同一变更内 grep 旧行为关键词，把 docstring、`docs/*.md`、config 注释全部同步（DoomLoop B1 重构漏改 docstring 教训）。docstring 描述旧行为 = 未来的人被带偏。
 4. **数字冷静期**：写"当前是 X"之前先实测（import 常量 / 数文件 / 跑发现逻辑），不照抄其他文档的数字；发现两份文档冲突时以代码为准，顺手把另一份也修了。
 5. **rules 双镜像纪律**：改 `.agents/rules/project_rules.md` 与 `.trae/rules/project_rules.md` 必须双向同步，改完 `diff` 确认一致（出现过单侧修复、另一侧留旧值的情况）。
+6. **三种必删的废话（写文档/注释时主动警惕）**：
+   - **「原 X 已删除/已改掉 vN」式考古**：东西已从代码里删掉，留一句"原来是什么"只占篇幅。**只有"不写就会让读者去找/去用已消失的东西"时才写**（如旧路径仍被外部广泛引用、旧行为照抄会踩坑）；其余直接删，只描述现状。
+   - **易漂移的统计数字**：见第 1 条。"有 13 个文件""共 6 个面板"每次迭代都变，写了必然过时。改为指向代码常量 / 运行时清单 / 定性描述。
+   - **事无巨细的细节**：只在**本就该写细节**（ADR 的 trade-off、算法判据、表格里的必要阈值）或**细节非常值得**（防复发的一次性教训）时展开；否则压成"结论 + 代码路径锚点"，让读者按需读代码。默认假设"能删一半"。
 
 ### API 常见陷阱
 
@@ -312,6 +318,7 @@ ADR 是项目架构决策的真源，位于 `docs/adr/`（索引见 `docs/adr/RE
   - **典型案例**：AGENTS.md 曾写"CHANGELOG.md 尚未创建"，但实际文件已存在（40KB），agent 没读就下结论导致 CHANGELOG 漏更新
 - **禁止大量返回 Base64 污染上下文（强制规则）**：所有代码、脚本、MCP 工具调用都不得返回大段 base64 数据（截图、文件、音频等）到 LLM 上下文。遇到 base64 立即改代码或调用方式：
   - 截图给多模态 LLM：用 `capture_screen(format="inline")`（返回 ImageContent，由 MCP 协议处理，不进文本上下文）
+  - **浏览器截图**：`browser_screenshot` 默认已改为只返回 `path`（`return_base64=False`）。要看图就把 path 交给 `understand_image` / `ocr_path`；**不要**为了省事传 `return_base64=True`——2026-09-21 曾因网关只认顶层/`result` 两种形状、而本端点把标记放在 `data` 下，一次调用往上下文塞了 181424 字符
   - 截图特征分析：用 `screen_analyze`（返回纯文本的颜色/亮度/异常分析，无 base64）
   - 截图+OCR：优先 `localagent_advanced_tool(tool="screen_ocr", params={...})`，直接返回文字和 bbox，不经过 base64
   - 文件读取：用 `docviewer_read` 或 `exec_python` 提取文本，绝不返回 base64
@@ -328,7 +335,7 @@ ADR 是项目架构决策的真源，位于 `docs/adr/`（索引见 `docs/adr/RE
 
 ### IDE 平台使用注意
 
-本项目同时支持 **CatPaw** 和 **Trae** 两个 IDE，详见 `.agents/<data_drive>:\Documents/platform-migration-guide.md`。
+本项目同时支持 **CatPaw** 和 **Trae** 两个 IDE；各客户端的接入配置、桥接方式与排查顺序见 `docs/dev-workflow.md` 的「MCP 接入」章节。
 
 **CatPaw 注意事项**：
 - **语义搜索优先**：CatPaw 的 `codebase_search` 工具支持语义搜索，优先使用语义搜索探索代码库
@@ -342,7 +349,7 @@ ADR 是项目架构决策的真源，位于 `docs/adr/`（索引见 `docs/adr/RE
 ### 临时文件规则
 - **所有临时脚本必须写到 `temp/` 目录**，不要在项目根目录、`tools/`、`server/` 或其他位置创建临时文件
 - 临时文件命名建议带前缀或时间戳，如 `temp/debug_ocr_test.py`、`temp/20260614_scan.py`
-- `temp/` 已在 `.gitignore` 中排除，不会污染仓库
+- **临时脚本必须写到 `temp/` 目录**这一条不等于"`temp/` 整体被 gitignore"：`.gitignore` 用 `temp/*` + 按名 `!` 豁免，归档目录（如 `temp/planning_archive/`）**是随仓库跟踪的**，豁免清单以 `.gitignore` 为准。判断某产物在不在库里用 `git ls-files temp/<子路径>`（`docs/dev-workflow.md`「与 SDD 流程的衔接」同理）
 - `exec_python` 工具内部会写 `temp/exec_<uuid>.py` 起后台子进程执行（统一 terminal 机制，详见 `docs/mcp-reference.md`），手动写脚本仍应放在 `temp/`
 - 任务完成后应清理不再需要的临时文件
 
@@ -386,22 +393,22 @@ install 绕路**（2026-09-03 教训：为删测试垃圾先装 send2trash 被�
 项目分一二级目录，**完整映射由程序维护**，避免静态文档过时：
 
 - **后端**：`server/`（FastAPI + MCP，模块详见 `_index.md` 后端模块表）
-- **GUI 客户端**：`client/`（PySide6 面板式架构：主窗口 **17 个内置面板**——主面板 7：对话/概览/待办hub/工具/收件箱/到期任务/WIP，监控 6：状态监控/终端/Loop/模型池/记忆(内含 6 子页)/日总结，高级 4：设置/密钥/系统工具/入站管理；PanelRegistry 扫 `client/panels/` 自动发现，另加载 workspace manifest 声明的组件面板（当前：记账/股市助手）；**独立进程审批面板** `client/approval_panel/`（`python -m client.approval_panel`，托盘驻留，不在主窗口侧边栏）；`client/core/agent/` 是 v6-lite 对话引擎纯 Python 核心库——SessionRunner/EventStore/Compactor/ToolRegistry/LLMPoolGateway/Reconciler/SessionFacade/DoomLoopDetector，不依赖 Qt，ChatPanel 经 SessionFacade 通过 QThread 调引擎；真 SSE 流式 + 打字机三档 toggle（close/fast/normal，默认 fast）+ thinking 显示 toggle + steer 引导 UI。**chat-panel-v2 重设计**（T01-T12 全完成；原 SDD 产物目录 `temp/sdd/chat-panel-v2/` 已随 temp 清理，设计沉淀以 `docs/chat-engine.md` 为准）：开始页 + 模板管理（全量 skill 复选框）+ 侧边栏树形（置顶/分组/未分组）+ 消息时间线块结构（6 块类：_UserBubble/_AssistantTextBlock/_ThinkingBlock/_ToolCallBlock/_SystemBlock + sticky 标题栏）+ 对话控制三模式（发送/队列/引导）+ 顶栏重设计（last_updated/title/cost/token/打字机）+ 导出（MD/JSON）+ hover 操作按钮 + closeEvent 防关机 + 启动 reconciler banner。sessions 有 group_name/pinned 列、messages 有 model 列（chat-panel-v2 引入）；EventStore 当前 schema 版本以 `client/core/agent/event_store.py` 的 `_SCHEMA_VERSION` 为准。详见 `docs/chat-engine.md` + `docs/mcp-reference.md` "v6-lite-streaming-gui" 段）
-- **Skill/规则/文档**：`.agents/`（`skills/` skill 定义、`wip/` 任务留档、`rules/` 规则文件；**无 <data_drive>:\Documents/ 子目录**，文档走 `docs/`）
+- **GUI 客户端**：`client/`（PySide6 面板式架构：主窗口内置面板 + workspace manifest 声明的组件面板，**数量与清单由 PanelRegistry 扫描 `client/panels/` 得到，不在这里写死**；另有独立进程审批面板 `client/approval_panel/`（`python -m client.approval_panel`，托盘驻留，不在主窗口侧边栏）；`client/core/agent/` 是 v6-lite 对话引擎的**纯 Python 核心库，不依赖 Qt**，ChatPanel 经 SessionFacade 通过 QThread 调引擎。引擎与 chat-panel-v2 的实现细节见 `docs/chat-engine.md`，UI 规范见 `docs/ui/`）
+- **Skill/规则/文档**：`.agents/`（`skills/` skill 定义、`wip/` 任务留档、`rules/` 规则文件；**无 documents/ 子目录**，文档走 `docs/`）
 - **通用工具脚本**：`tools/`（browser/debug/deploy/llm/file_classifier 等，详见 `tools/README.md`；**任务专属脚本写到 `workspace/<task>/`，不写到 `tools/`**）
-- **任务工作区**：`workspace/`（按任务分目录，约 30 个子目录；新建子目录**按需**——`SKILL.md` + `manifest.toml` + `loop_actions.py` 三件套不是强制要求，临时/一次性脚本可省；常驻/loop 任务建议有 `manifest.toml` + `loop_actions.py` 让 agent_guide 路由）。**特殊子目录**：`dev_toolkit/`（独立 dev toolkit 项目，有自己的 `.agents/` `specs/` `wip/`，写入前看其 `AGENTS.md`）、`maa-patch/`（自写文件 `MAINTENANCE.md`/`LESSONS.md`/`mumu-keepalive.patch`/`sync-maa-patch.ps1`/`UPSTREAM_ISSUE_RECORD.md` 进仓库（白名单见 .gitignore），`maa-upstream/` 是上游 MAA 仓库副本不碰）
+- **任务工作区**：`workspace/`（按任务分目录，**子目录数量随工作增减，实际清单看 `workspace/` 目录本身或 `data/project_structure.json`**；新建子目录**按需**——`SKILL.md` + `manifest.toml` + `loop_actions.py` 三件套不是强制要求，临时/一次性脚本可省；常驻/loop 任务建议有 `manifest.toml` + `loop_actions.py` 让 agent_guide 路由）。**特殊子目录**：`dev_toolkit/`（独立 dev toolkit 项目，有自己的 `.agents/` `specs/` `wip/`，写入前看其 `AGENTS.md`）、`maa-patch/`（自写文件 `MAINTENANCE.md`/`LESSONS.md`/`mumu-keepalive.patch`/`sync-maa-patch.ps1`/`UPSTREAM_ISSUE_RECORD.md` 进仓库（白名单见 .gitignore），`maa-upstream/` 是上游 MAA 仓库副本不碰）
 - **二级文档**：`docs/`（mcp-reference/tools-guide/memory-system/llm-pool/environment-constraints/operations-manual/dev-workflow + `adr/` 架构决策记录 + `ui/` UI 设计系统文档）
 - **运行时数据**：`data/`（LLM池/记忆DB/活动追踪/inbox，整体 gitignore，仅 `project_structure.json` 进仓库）
 - **测试**：`tests/`（`fixtures/` 测试夹具；危险操作测试必须 mock，详见 `project_rules.md` 测试铁律）
-- **临时脚本与 SDD/HTML 产物**：`temp/`（`exec 临时脚本`、`temp/sdd/<slug>/` SDD 流程产物、`temp/html/<name>/` HTML 展示文件、`temp/planning_archive/` 历史归档；整体 gitignore；**所有临时脚本必须写这里，不写根目录/`tools/`/`server/`**）
+- **临时脚本与 SDD/HTML 产物**：`temp/`（`exec 临时脚本`、`temp/sdd/<slug>/` SDD 流程产物、`temp/html/<name>/` HTML 展示文件、`temp/planning_archive/` 历史归档；**所有临时脚本必须写这里，不写根目录/`tools/`/`server/`**）。⚠️ `temp/` **不是"整体 gitignore"**：`.gitignore` 用 `temp/*` + 按名 `!` 豁免（`planning_archive/`、`html/`、`architecture_analysis/` 随仓库跟踪；`temp/sdd/` 被豁免之后又按名重新挡掉，故 SDD 当轮产物不进 git、但归档里的旧副本在）。**豁免清单以 `.gitignore` 为准，别在这里抄条目数**；判断某文件在不在库里用 `git ls-files temp/<子路径>`，不要凭"temp 被忽略"下结论。
 
 ### 其他一级目录（按类别分组）
 
 **配置 / CI**：
 - `.dcg/` + `.dcg.toml` — dcg（destructive command guard）危险命令拦截规则包；加新危险命令模式时改 `.dcg/packs/localagent.yaml`
-- `scripts/hooks/` — **git 钩子（已启用，`core.hooksPath` 指向这里）**：pre-commit 跑 `tools/check_hard_rules.py --staged`，提交前强制检查硬化规则（BOM / 硬编码密钥 / 文档路径越界 / import 边界），违反即拦截提交；配套 `tests/test_hard_rules.py` 全量层。改钩子必须保持 LF 行尾（见 .gitattributes）
-- `.github/workflows/` — GitHub Actions（`release-public.yml` 公开发布 CI）；CI 流程变化时改
-- `.trae/` — Trae IDE 配置。`rules/project_rules.md` 是 `.agents/rules/project_rules.md` 的镜像（前者改了同步后者，反之亦然）；`<data_drive>:\Documents/` 是设计/规划文档（如 `content_aware_file_classification.md`、`mcp-response-truncation-plan.md`），定位类似 `planning_notes/`，新文档由用户决定是否纳入
+- `scripts/hooks/` — **git 钩子（已启用，`core.hooksPath` 指向这里）**：pre-commit 跑 `tools/check_hard_rules.py --staged`，提交前强制检查硬化规则（BOM / 硬编码密钥 / 文档路径越界 / import 边界 / MCP 工具名 / 死链），违反即拦截提交；配套 `tests/test_hard_rules.py` 与 `tests/test_hard_rules_dead_refs.py` 全量层（C5 另有直连/反例用例，C6 另有豁免/基线接缝用例）。改钩子必须保持 LF 行尾（见 .gitattributes）
+- `.github/workflows/` — GitHub Actions。`release-public.yml` 目前**不产生任何 CI 运行**：它是 `workflow_dispatch` 手动触发、文件头注明依赖条件不成立（需 profile + Ubuntu 装不上 win 依赖），且被排除出发布包 → `publish` 推出去的公开仓里没有 `.github/`。所以发布物由本机 `tools/release/cli.py build` 产出；CI 流程变化时改这里
+- `.trae/` — Trae IDE 配置。`rules/project_rules.md` 是 `.agents/rules/project_rules.md` 的镜像（前者改了同步后者，反之亦然）；`documents/` 是设计/规划文档（如 `content_aware_file_classification.md`、`mcp-response-truncation-plan.md`），定位类似 `planning_notes/`，新文档由用户决定是否纳入
 
 **代码共享库**：
 - `lib/` — 共享库。`lib/ui/`（UI 设计系统：tokens/theme/controls/icons，GUI 代码 import 它，**不要在 `client/` 重复造组件**）、`lib/recorder/`（录制器核心：L0 sensors + L1 processor + L2 timeline + L3 editor，**与项目共用的代码**）、`lib/uia.py`（仅录制器键盘传感器用的焦点控件值快照；**UIA 语义层在 `server/screen/uia.py`，不要在这里找**）
@@ -409,7 +416,7 @@ install 绕路**（2026-09-03 教训：为删测试垃圾先装 send2trash 被�
 
 **录制器归属**（模块化分层）：
 - `lib/recorder/` — 与项目共用的核心代码（sensors/processor/timeline/editor/consumer，**与项目共用的代码**）
-- `workspace/recorder/` — 录制器的入口/工具/录制包（入口 `python -m workspace.recorder.tools.main`；`consumer/` agent 公用库；`recordings/` 大体积本地数据 gitignore）。⚠️ 原 `tools/recorder/` 入口已删除，旧文档提到它的地方均已过时
+- `workspace/recorder/` — 录制器的入口/工具/录制包（入口 `python -m workspace.recorder.tools.main`；`consumer/` agent 公用库；`recordings/` 大体积本地数据 gitignore）
 
 **发布 / 分发**：
 - `release/` — 源码分发。`profiles/`（发布配置 toml）、`audience/`（受众定义）、`plans/` `dist/` `staging/`（构建产物，gitignore 仅留 .gitkeep）+ `policy.toml`；通过 `tools/release/cli.py prepare/compute-digest/build` 操作，不手动改 `dist/` `staging/`。依赖映射表/审计报告（`dependency_map.toml` / `dependency_audit.json`）由 `tools/release/generate_dependency_map.py` 生成到 `temp/release_deps/`，**不入库也不进发布包**（产物含未进包的私有模块路径，且引擎无消费方）
@@ -422,13 +429,16 @@ install 绕路**（2026-09-03 教训：为删测试垃圾先装 send2trash 被�
 - `data/*` — 见上方（除 `project_structure.json`）
 
 **规划笔记**：
-- `planning_notes/` — 历史规划笔记 + 用户手动存放的规划/路线图文档。子目录：`v6/`（v6 设计文档系列 v6-00 ~ v6-12）、`github-app-bot/`、`internal-workflow/`、`特定工作的提示词/` 等。**仅用户手动存放**；SDD 流程产物走 `temp/sdd/`，不写这里
+- `planning_notes/` — 用户手动存放的规划/路线图与历史设计文档（含历史设计文档系列、公开发布、外部文章与提示词参考等），按主题分子目录。**仅用户手动存放**；SDD 流程产物走 `temp/sdd/`，不写这里
+
+**展示与归档文档**：
+- `展示文档/` — 架构分析长文与可视化展示（`architecture_analysis/` 下按主题拆分的多篇专题、`architecture_showcase.html`、`walkthroughs.md`、`code-knowledge-graph.md`），随仓库跟踪。定位是给架构读者的展示材料，与 `docs/`（agent/维护者手册）分工不同；新展示产物仍按规则写 `temp/html/`，不往这里加
 
 **用户专用文件**（agent 禁止读写）：
 - `USER_ONLY_PROJECT_OPERATIONS_AGENT_DO_NOT_READ_OR_EDIT.md` — 用户专用操作手册；agent 仅为完成任务时无需读取，禁止修改/删除/绕过其指明的 `.dcg.toml`、`.dcg/`、`config.toml`、`workspace/` 用户数据
 
 **根目录其他文件**：
-- `todo.txt` — 旧待办笔记，遗留
+- `todo.txt` — 根目录的旧待办笔记（非项目内维护的产物）
 - `start.bat` / `start_client.bat` — 后端启动脚本（含 UAC 提权+杀端口）/ GUI 启动脚本
 - `tools_manifest.json` — 工具清单（GUI 自动读取）
 - `LICENSE` / `NOTICE.md` — Apache-2.0 版权 + 版权声明
@@ -451,7 +461,14 @@ install 绕路**（2026-09-03 教训：为删测试垃圾先装 send2trash 被�
 
 ## Skill 编写
 
-Skill 编写规范见 `.agents/skills/skill-creator.md`，创建新功能后的必做清单见 `.agents/rules/project_rules.md`（Trae 镜像副本在 `.trae/rules/project_rules.md`）。
+**先判断该不该建，再谈怎么写。默认不建**——只有**同时**满足下面两条，才值得沉淀成 skill：
+
+1. **高频**：这类任务会反复发生，不是一次性的。
+2. **有坑**：是没有指导就会反复踩坑、试错多次才走通的经验。一次就成功、照着通用知识就能做的，不记。
+
+只满足一条、或两条都不满足 → 记到 `docs/` 专题文档或 `.workbuddy/memory/YYYY-MM-DD.md` 日志，或干脆留在对话里，**不要建 skill**。已有 skill 能覆盖 → 先路由到它，不重复造轮子（`agent_guide(task='...')` 或 `.agents/skills/_index.md`）。
+
+Skill 编写规范（目录结构、frontmatter、同步清单）见 `.agents/skills/skill-creator.md`，创建新功能后的必做清单见 `.agents/rules/project_rules.md`（Trae 镜像副本在 `.trae/rules/project_rules.md`）。
 
 ## 测试
 
@@ -459,13 +476,18 @@ Skill 编写规范见 `.agents/skills/skill-creator.md`，创建新功能后的�
 
 - **一次性收集全部失败**（推荐）：`uv run python tools/run_tests_collect.py`
 - **分层跑**（quick 排除外部资源 / full 全跑）：`uv run python tests/run_all.py --quick`
+- **发版全量**（按目录分批、慢目录 2 路并行、真动桌面的批走独占段、批间内存护栏）：`uv run python tools/run_tests_batched.py`
 - **单文件调试**：`uv run python -m pytest tests/test_xxx.py -v --tb=short`
 
-三个入口参数已统一（pyproject.toml `addopts` + `tools/test_runner.py` 共享逻辑），
-产出 `temp/test_full_log.txt` + `temp/test_results.xml` + `temp/test_failure_report.md`。
+前三个入口参数已统一（pyproject.toml `addopts` + `tools/test_runner.py` 共享逻辑），
+产出 `temp/test_full_log.txt` + `temp/test_results.xml` + `temp/test_failure_report.md`；
+分批器每批一个独立 pytest 进程，产出在 `temp/batch_tests/`（`SUMMARY.md` + `mem_min.log`
+内存采样；每批 `.log`/`.xml` **只在该批非零时保留**，全绿跑完不堆中间产物），实测口径见
+`docs/dev-workflow.md` "发版全量为什么用分批器"。
 
 **禁止**：
 - ❌ `pytest tests/ -v`（全量刷屏，看不到失败摘要）
+- ❌ 单进程跑整套发版全量（本机 RSS 会到 11-12 GB，被系统保护打断）——用分批器
 - ❌ 不加 `-m` 排除外部资源跑全量（会跑 E2E，需 CDP:9222 + 后端:8766）
 - ❌ 手动拼 `--tb`/`--maxfail` 等参数（addopts 已配，脚本层按需覆盖）
 

@@ -12,6 +12,13 @@ CHANGELOG 迁移脚本：把旧 release 段从 CHANGELOG.md 移到 docs/changelo
   uv run python tools/migrate_changelog.py             # 默认保留 1 个 release
   uv run python tools/migrate_changelog.py --keep 2     # 保留最近 2 个 release
   uv run python tools/migrate_changelog.py --dry-run    # 只打印，不写入
+
+写完之后会自动跑一次"发布口径复检"（wip_fe6da6fa 遗留 C）：用发布 profile 的
+豁免口径重扫 CHANGELOG.md 与 docs/changelog-archive.md，比对归档前后的命中数。
+豁免是按路径登记的，条目从主文件搬进归档后原豁免就不再覆盖它 —— HIGH 上涨即
+以退码 3 失败，并列出新增命中的 路径:行号:规则（不打印行内容）。
+  --profile NAME          指定 profile（默认取 release/policy.toml 的 default_profile）
+  --skip-release-check    跳过复检（只在动的是非仓库 changelog 路径时用）
 """
 
 import argparse
@@ -33,6 +40,117 @@ ARCHIVE_HEADER = """# Changelog Archive
 """
 
 SECTION_HEADER_RE = re.compile(r"^## \[([^\]]+)\]", re.MULTILINE)
+
+_PROFILES_DIR = PROJECT_ROOT / "release" / "profiles"
+_POLICY_FILE = PROJECT_ROOT / "release" / "policy.toml"
+# 归档动的是这两个文件，复检就只按发布口径扫它们（同一个 collect_sensitive_hits，
+# 所以这里数的就是 prepare 的 static gate 会数的）
+_SCANNED_FILES = ("CHANGELOG.md", "docs/changelog-archive.md")
+_EXIT_RELEASE_SCAN_REGRESSION = 3
+
+
+def _profile_name(policy_profile: str | None) -> str:
+    """未显式指定时读 release/policy.toml 的 default_profile（与 cli 同一来源）。"""
+    if policy_profile:
+        return policy_profile
+    import toml
+
+    return str(toml.load(_POLICY_FILE).get("default_profile") or "public-full")
+
+
+def scan_release_counts(profile: str) -> dict:
+    """按发布 profile 的豁免口径统计两个 changelog 文件的敏感命中。
+
+    Returns: {"counts": {"HIGH": n, ...}, "hits": [...]}；行内容绝不返回（不脱敏不回显）。
+    """
+    import toml
+
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from tools.release.engine.models import FileEntry
+    from tools.release.engine.prepare import collect_sensitive_hits
+
+    profile_data = toml.load(_PROFILES_DIR / f"{profile}.toml")
+    entries = []
+    for rel in _SCANNED_FILES:
+        path = PROJECT_ROOT / rel
+        entries.append(
+            FileEntry(
+                rel_path=rel,
+                sha256="",
+                size=path.stat().st_size if path.exists() else 0,
+                source="tracked",
+            )
+        )
+    hits, scanned, _skipped = collect_sensitive_hits(
+        tuple(entries),
+        profile_data.get("sensitive_line_skips", {}),
+        profile_data.get("post_process_remove_lines", {}),
+        list(profile_data.get("scan", {}).get("personal_identifiers", []) or []),
+    )
+    counts: dict[str, int] = {}
+    for h in hits:
+        counts[h["severity"]] = counts.get(h["severity"], 0) + 1
+    return {"counts": counts, "hits": hits, "scanned": scanned}
+
+
+def compare_scan(before: dict, after: dict) -> tuple[int, list[str]]:
+    """纯判断：HIGH 上升即回归。返回 (退出码, 给人看的行)。
+
+    拆成纯函数是为了能被合成账本测到 —— 真实仓库里此刻没有复活案例，
+    只测真值的那道判据等于没测（恒绿）。
+    """
+    b, a = before["counts"], after["counts"]
+    keys = sorted(set(b) | set(a))
+    summary = "、".join(
+        f"{k} {b.get(k, 0)}→{a.get(k, 0)}"
+        + ("（+）" if a.get(k, 0) > b.get(k, 0) else "")
+        for k in keys
+    )
+    if a.get("HIGH", 0) <= b.get("HIGH", 0):
+        return 0, [f"[发布口径复检] OK 归档没有让豁免失效（{summary}）"]
+    before_keys = {(h["path"], h["line"], h["rule"]) for h in before["hits"]}
+    lines = [
+        f"[发布口径复检] ⛔ HIGH 从 {b.get('HIGH', 0)} 涨到 {a.get('HIGH', 0)}"
+        f"（{summary}）—— 搬进归档的条目里，有原本靠 CHANGELOG.md 豁免的行现在无人豁免。",
+    ]
+    for h in after["hits"]:
+        if h["severity"] != "HIGH" or (h["path"], h["line"], h["rule"]) in before_keys:
+            continue
+        lines.append(f"  新增 HIGH：{h['path']}:{h['line']} rule={h['rule']}")
+    return _EXIT_RELEASE_SCAN_REGRESSION, lines
+
+
+def verify_after_archive(before: dict, profile: str) -> int:
+    """归档后复跑一次发布口径扫描，比对命中数。
+
+    为什么要这一道：豁免是按**路径**登记的（[sensitive_line_skips] 的 key 是文件名），
+    归档把已豁免的历史条目从 CHANGELOG.md 搬进 docs/changelog-archive.md 后，
+    那条豁免就不再覆盖它 —— 下个发版周期 prepare 的 HIGH 会复活，而现场没人提示。
+    """
+    try:
+        after = scan_release_counts(profile)
+    except Exception as e:
+        # 复检跑不起来 = 没验证过，不能当通过
+        print(
+            f"[发布口径复检] ⛔ 无法执行（{type(e).__name__}: {e}）。"
+            "文件已归档，但豁免是否失效未知 —— 请手工重跑 prepare 看命中数。",
+            file=sys.stderr,
+        )
+        return _EXIT_RELEASE_SCAN_REGRESSION
+    code, out_lines = compare_scan(before, after)
+    stream = sys.stderr if code else sys.stdout
+    for line in out_lines:
+        print(line, file=stream)
+    if code:
+        print(
+            "  处置：把这些行的正则补进 "
+            f"release/profiles/{profile}.toml 的 [sensitive_line_skips]/"
+            "[post_process_remove_lines]（按 docs/changelog-archive.md 登记），"
+            "然后重跑 `tools/release/cli.py prepare` 并重新审批。",
+            file=sys.stderr,
+        )
+    return code
+
 
 
 def parse_sections(content: str):
@@ -76,11 +194,41 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只打印将要做的操作，不写入文件")
     parser.add_argument("--changelog", type=Path, default=DEFAULT_CHANGELOG, help="CHANGELOG.md 路径")
     parser.add_argument("--archive", type=Path, default=DEFAULT_ARCHIVE, help="归档文件路径")
+    parser.add_argument(
+        "--profile", default=None,
+        help="发布复检用的 profile 名（默认读 release/policy.toml 的 default_profile）",
+    )
+    parser.add_argument(
+        "--skip-release-check", action="store_true",
+        help="跳过归档后的发布口径复检（只在改的是非仓库 changelog 路径时用）",
+    )
     args = parser.parse_args()
 
     if not args.changelog.exists():
         print(f"ERROR: CHANGELOG.md 不存在：{args.changelog}", file=sys.stderr)
         return 1
+
+    # 复检只对仓库里的真 changelog 有意义（profile 豁免按仓库相对路径登记）
+    repo_targets = (
+        args.changelog.resolve() == (PROJECT_ROOT / "CHANGELOG.md").resolve()
+        and args.archive.resolve() == (PROJECT_ROOT / "docs" / "changelog-archive.md").resolve()
+    )
+    release_check: tuple[str, dict] | None = None  # (profile, 归档前基线)
+    if args.skip_release_check or not repo_targets:
+        why = "传了 --skip-release-check" if args.skip_release_check else "changelog 路径不是仓库默认位置"
+        print(f"[发布口径复检] 跳过（{why}）")
+    else:
+        try:
+            chosen = _profile_name(args.profile)
+            release_check = (chosen, scan_release_counts(chosen))
+        except Exception as e:
+            # 探测跑不起来不等于没问题——假正常比崩更不可接受
+            print(
+                f"ERROR: 发布口径复检无法建立基线（{type(e).__name__}: {e}）。"
+                "修好探测，或显式 --skip-release-check 承担后果。",
+                file=sys.stderr,
+            )
+            return _EXIT_RELEASE_SCAN_REGRESSION
 
     content = args.changelog.read_text(encoding="utf-8")
     preamble, sections = parse_sections(content)
@@ -172,7 +320,10 @@ def main():
         f"OK {args.archive}: 新增 {len(fresh_to_archive)} 个，"
         f"总计 {len(fresh_to_archive) + len(already_archived_versions)} 个归档版本"
     )
-    return 0
+    if release_check is None:
+        return 0
+    chosen_profile, before_scan = release_check
+    return verify_after_archive(before_scan, chosen_profile)
 
 
 if __name__ == "__main__":

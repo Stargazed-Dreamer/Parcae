@@ -24,7 +24,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import Field
 
 from lib.schema import BaseSchema
-from server.approval_review import log_approval_detailed
+from server.approval_review import log_approval, log_approval_detailed
 from server.config import get_command_guard_config
 
 AGENT_BLOCK_MESSAGE = (
@@ -359,6 +359,22 @@ async def command_guard_request_approval(req: ApprovalRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     decision = result.get("decision", "deny")
     feedback = result.get("feedback", "")
+
+    # unknown-outcome-evidence T14：人的决定也要进 approvals.jsonl。
+    # 此前只有详细审计日志记了 user_decision，汇总日志里全是机器放行
+    # （llm_approved / low_risk_degraded_approve / approval_cache_hit），
+    # 事后翻日志分不清"这一步到底有没有人点过"。
+    log_approval({
+        "operation_id": f"gui_approval:{req.approval_id}",
+        "method": "GUI",
+        "path": "/command-guard/request-approval",
+        "layer1_static": "human_review",
+        "layer2_llm": "skipped",
+        "final": f"human_{decision}",
+        "origin": "human",
+        "auto_approved": False,
+        "reason": (feedback or "")[:200],
+    })
 
     # 面板路径超时：返 408，不消费 _pending（agent 不应重试，面板卡片留存待用户 ack）
     if decision == "timeout":

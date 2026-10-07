@@ -824,9 +824,34 @@ class AccountingStore:
             self.conn.execute(
                 """INSERT OR REPLACE INTO config_descriptions (category, descriptions_json)
                    VALUES (?, ?)""",
-                (category, json.dumps(existing, ensure_ascii=False)),
+                   (category, json.dumps(existing, ensure_ascii=False)),
             )
             self.conn.commit()
+
+    def get_counterparty_hints(self) -> dict:
+        """统计 交易名称(counterparty) → {(大类, 说明): 出现次数}，供审核界面智能推荐。
+
+        只从交易历史统计：同一对方在同一大类下用过的说明及次数。
+        不从 mapping_fixed 补充 —— map_key 带 trade_type 前缀（如「商户消费-华南师范大学」，
+        群收款/转账还夹方向），无法可靠反解出 counterparty；且 fixed 映射的历史交易
+        本身已带对应说明，效果已隐含在统计里。
+        counterparty 统一转小写做 key；空值与「/」（跳过项占位）不参与。
+        """
+        hints: dict[str, dict[tuple[str, str], int]] = {}
+        cur = self.conn.execute(
+            """SELECT counterparty, category, description, COUNT(*) AS n
+               FROM transactions
+               WHERE counterparty IS NOT NULL AND TRIM(counterparty) NOT IN ('', '/')
+                 AND category IS NOT NULL AND TRIM(category) != ''
+                 AND description IS NOT NULL AND TRIM(description) != ''
+               GROUP BY counterparty, category, description"""
+        )
+        for row in cur:
+            key = row["counterparty"].lower().strip()
+            pair = (row["category"], row["description"])
+            bucket = hints.setdefault(key, {})
+            bucket[pair] = bucket.get(pair, 0) + int(row["n"])
+        return hints
 
     # ─── 导入批次 ───────────────────────────────────────────────
 
