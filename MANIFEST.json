@@ -1,6 +1,6 @@
 {
   "audience": "public",
-  "built_at": "2026-11-03T17:38:43.568410+00:00",
+  "built_at": "2026-11-03T17:41:30.951968+00:00",
   "components": [
     "disk_manager",
     "recorder",
@@ -2656,8 +2656,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "28eb4bfba2f2379322ea0bd960a6b7719c2a96975ff16588c14e62ac70ace33c",
-      "size": 29360,
+      "sha256": "3f321670ef2f893d5e889d61c4d5d9e730861678a7e6fe472b488192959aad88",
+      "size": 29356,
       "source": "tracked"
     },
     {
@@ -3370,8 +3370,8 @@
     },
     {
       "path": "docs/deployment.md",
-      "sha256": "217d8ba9afdb1173bc60afbb47ebe336f41ce1ae28c81b883ee12d9fbbdc2ff8",
-      "size": 32640,
+      "sha256": "d71643936d44cbf91894a5ccd83ba5e18a81de09856ecd2c4fd7388d59a05f87",
+      "size": 32636,
       "source": "tracked"
     },
     {
@@ -10954,24 +10954,24 @@
     },
     {
       "path": "DEPLOYMENT.md",
-      "sha256": "67138d112bde586753aaedf6d736ed824a96dccd019985bdc706be9a5376fe18",
-      "size": 17422,
+      "sha256": "999431304e85c94a4e928f78bee66fd543adc0c653ddcd372dc90d813e078ee2",
+      "size": 17418,
       "source": "generated"
     },
     {
       "path": "RELEASE_NOTES.md",
-      "sha256": "f12bccda443f0be286a25f9c5cdca42246fc148d401ee43b7165b0bc58b50d0e",
+      "sha256": "f5f698bfa8e78075d89f1dda2fd59f073a2258278505e3bd5e0cfd6b6bb75534",
       "size": 8461,
       "source": "generated"
     },
     {
       "path": "sbom.spdx.json",
-      "sha256": "54a9520220804068333d0ae1b4756bb0d6af63dbc767f9663ecf58517bc9e4f8",
+      "sha256": "9be74a8dfd2dcbc2dd05e7ad559606010f9015545b571066d80695d54b88b32f",
       "size": 898736,
       "source": "generated"
     }
   ],
-  "plan_digest": "e3eb375bc0b7b166eacf5ed4dbc1b1929be79f249a9fea4c96c63a56ed726a86",
+  "plan_digest": "279a21181003f04f66cf2e0aec4ff30a4d08deeaec29bdb432dd04fd83932db7",
   "profile_id": "public-full",
-  "source_commit": "91c21bf4967588d8c5b9c84e22a3078d5093c0b4"
+  "source_commit": "51b201e2e72f9bdbf56467b229dd7811d2ec058f"
 }

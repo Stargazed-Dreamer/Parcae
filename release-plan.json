@@ -13,7 +13,7 @@
     "yihuan_gacha"
   ],
   "components_digest": "5761438753d9fabb4981f12fedd9fe54ef2b9552b584704f9a12a28b660d1460",
-  "created_at": "2026-11-03T17:38:06.185377+00:00",
+  "created_at": "2026-11-03T17:40:54.940364+00:00",
   "exemptions": [
     {
       "expires_at": "2099-12-31",
@@ -3217,8 +3217,8 @@
     },
     {
       "rel_path": "README_public.md",
-      "sha256": "28eb4bfba2f2379322ea0bd960a6b7719c2a96975ff16588c14e62ac70ace33c",
-      "size": 29360,
+      "sha256": "3f321670ef2f893d5e889d61c4d5d9e730861678a7e6fe472b488192959aad88",
+      "size": 29356,
       "source": "tracked"
     },
     {
@@ -3931,8 +3931,8 @@
     },
     {
       "rel_path": "docs/deployment.md",
-      "sha256": "217d8ba9afdb1173bc60afbb47ebe336f41ce1ae28c81b883ee12d9fbbdc2ff8",
-      "size": 32640,
+      "sha256": "d71643936d44cbf91894a5ccd83ba5e18a81de09856ecd2c4fd7388d59a05f87",
+      "size": 32636,
       "source": "tracked"
     },
     {
@@ -11549,9 +11549,9 @@
       "passed": true
     }
   ],
-  "plan_digest": "e3eb375bc0b7b166eacf5ed4dbc1b1929be79f249a9fea4c96c63a56ed726a86",
-  "profile_digest": "7c35877c4f55a9c5027c1462fa7066d278c1edb333f5688e39e2572d295cc690",
+  "plan_digest": "279a21181003f04f66cf2e0aec4ff30a4d08deeaec29bdb432dd04fd83932db7",
+  "profile_digest": "4d60732e8be361ad11e8d528fba98b86f865dcaa37c363cfcd33f58a3419dcbb",
   "profile_id": "public-full",
   "scan_digest": "f878221fe5f55796602a9247ebc5cf5b11b4a9d269664d2f5ef7e4d36cef4724",
-  "source_commit": "91c21bf4967588d8c5b9c84e22a3078d5093c0b4"
+  "source_commit": "51b201e2e72f9bdbf56467b229dd7811d2ec058f"
 }

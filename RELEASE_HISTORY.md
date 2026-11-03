@@ -7,6 +7,7 @@
 <!-- 由 tools/release/engine/history.py 维护,请勿手工编辑 -->
 
 ## 0.56.0
+- 自上次发布以来:私有仓库 **2 个 commit**(起点 2026-11-04)
 - 主要更改:
   - 清掉发版全量拦下的 17 处 lint 违规（改 `server/{main,video}.py`、`server/butler/{router,store,bundles}.py`）
   - 两处测试的假设过期，由「红」改回「准」（同一批发版全量暴露）

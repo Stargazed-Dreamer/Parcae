@@ -1,9 +1,9 @@
 # Parcae 部署指南
 
-> Profile: `public-full` | Audience: `public` | 构建时间: 2026-11-03T17:38:06.185377+00:00
+> Profile: `public-full` | Audience: `public` | 构建时间: 2026-11-03T17:40:54.940364+00:00
 
 Parcae 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工具和日常可自动化工作流。
-本源码分发版基于 git commit `91c21bf4967588d8c5b9c84e22a3078d5093c0b4` 构建。
+本源码分发版基于 git commit `51b201e2e72f9bdbf56467b229dd7811d2ec058f` 构建。
 
 **最低部署目标是"先让后端跑起来，再按需增强"**——下面的阶段 0～2 不会下载任何本地推理模型。
 完整细节（配置文件逐段说明、可选增强的安装命令、全部已知卡点）见 `docs/deployment.md`。
@@ -28,7 +28,7 @@ Parcae 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工具和
 
 ```bat
 REM 1. clone（任意目录；路径别带中文和空格）
-git clone https://github.com/Stargazed-Dreamer/localagent-public.git Parcae
+git clone https://github.com/Stargazed-Dreamer/Parcae-public.git Parcae
 cd Parcae
 
 REM 2. 把分发包里的路径占位符换成你本机的真实路径
@@ -199,15 +199,15 @@ set MODELSCOPE_CACHE=D:\ai_models\modelscope
 ## 文件统计
 
 - 文件总数：1823
-- 总大小：28795837 字节（约 27.5 MB）
-- 源 git commit：`91c21bf4967588d8c5b9c84e22a3078d5093c0b4`
+- 总大小：28795829 字节（约 27.5 MB）
+- 源 git commit：`51b201e2e72f9bdbf56467b229dd7811d2ec058f`
 
 ## 审计追溯
 
-- **plan_digest**: `e3eb375bc0b7b166eacf5ed4dbc1b1929be79f249a9fea4c96c63a56ed726a86`
+- **plan_digest**: `279a21181003f04f66cf2e0aec4ff30a4d08deeaec29bdb432dd04fd83932db7`
 - **profile_id**: `public-full`
 - **audience**: `public`
-- **built_at**: 2026-11-03T17:38:06.185377+00:00
+- **built_at**: 2026-11-03T17:40:54.940364+00:00
 
 plan_digest 是本构建计划的 SHA-256 摘要，绑定所有输入（profile / components / scan / exemptions / source_commit / file_entries）。任何输入变化都会让 plan_digest 变化，使旧审批失效。
 

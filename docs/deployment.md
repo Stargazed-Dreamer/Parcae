@@ -71,7 +71,7 @@ uv run python -c "import ctypes; ctypes.CDLL('nvml.dll'); print('NVML ok')"   # 
 ### 2.1 克隆仓库
 
 ```bash
-git clone https://github.com/Stargazed-Dreamer/localagent-public.git Parcae
+git clone https://github.com/Stargazed-Dreamer/Parcae-public.git Parcae
 cd Parcae
 ```
 

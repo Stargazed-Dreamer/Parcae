@@ -1,9 +1,9 @@
 # Release Notes — public-full
 
 **Audience**: public
-**Source commit**: `91c21bf4967588d8c5b9c84e22a3078d5093c0b4`
-**Plan digest**: `e3eb375bc0b7b166eacf5ed4dbc1b1929be79f249a9fea4c96c63a56ed726a86`
-**Built at**: 2026-11-03T17:38:06.185377+00:00
+**Source commit**: `51b201e2e72f9bdbf56467b229dd7811d2ec058f`
+**Plan digest**: `279a21181003f04f66cf2e0aec4ff30a4d08deeaec29bdb432dd04fd83932db7`
+**Built at**: 2026-11-03T17:40:54.940364+00:00
 
 ## 组件清单
 
@@ -41,7 +41,7 @@
 ## 文件统计
 
 - 文件总数：1823
-- 总大小：28795837 字节
+- 总大小：28795829 字节
 
 ## ZIP 校验
 
@@ -156,11 +156,11 @@ certutil -hashfile parcae-public-full.zip SHA256
 
 本构建计划由 `prepare_release()` 产出不可变 `PreparedRelease`，经用户审批后由 `build_release()` 构建产物。plan_digest 绑定所有输入字段，任何输入变化都会让 plan_digest 变化，使旧审批失效。
 
-- **plan_digest**: `e3eb375bc0b7b166eacf5ed4dbc1b1929be79f249a9fea4c96c63a56ed726a86`
+- **plan_digest**: `279a21181003f04f66cf2e0aec4ff30a4d08deeaec29bdb432dd04fd83932db7`
 - **profile_id**: `public-full`
 - **audience**: `public`
-- **source_commit**: `91c21bf4967588d8c5b9c84e22a3078d5093c0b4`
-- **built_at**: 2026-11-03T17:38:06.185377+00:00
+- **source_commit**: `51b201e2e72f9bdbf56467b229dd7811d2ec058f`
+- **built_at**: 2026-11-03T17:40:54.940364+00:00
 
 ## 许可证
 
