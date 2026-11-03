@@ -66,7 +66,7 @@ Parcae 是一个跑在 Windows 上的本地 Agent 系统，由 FastAPI 后端、
 
 ```bat
 REM 1. clone（任意目录；路径别带中文和空格）
-git clone https://github.com/Stargazed-Dreamer/Parcae-public.git Parcae
+git clone https://github.com/Stargazed-Dreamer/Parcae.git Parcae
 cd Parcae
 
 REM 2. 把发布包里的路径占位符换成你本机的（--data-drive 传盘符字母，不要带冒号）

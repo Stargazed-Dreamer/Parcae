@@ -1,7 +1,7 @@
 {
   "SPDXID": "SPDXRef-DOCUMENT",
   "creationInfo": {
-    "created": "2026-11-03T17:40:54Z",
+    "created": "2026-11-03T17:48:06Z",
     "creators": [
       "Tool: parcae-release-engine-3.0"
     ]
@@ -9,14 +9,14 @@
   "dataLicense": "CC0-1.0",
   "name": "parcae-public-full",
   "spdxVersion": "SPDX-2.3",
-  "documentNamespace": "https://parcae.example.com/spdx/parcae-public-full-279a21181003",
+  "documentNamespace": "https://parcae.example.com/spdx/parcae-public-full-978d8321fe1b",
   "packages": [
     {
       "SPDXID": "SPDXRef-Package",
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "279a21181003f04f66cf2e0aec4ff30a4d08deeaec29bdb432dd04fd83932db7"
+          "checksumValue": "978d8321fe1bba1d066ad7981186360eef23bf12eb1a8eea1d608caffa3b48f2"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -25,7 +25,7 @@
       "licenseConcluded": "Apache-2.0",
       "licenseDeclared": "Apache-2.0",
       "name": "parcae",
-      "versionInfo": "51b201e2e72f"
+      "versionInfo": "245ccdcc71ab"
     }
   ],
   "files": [
@@ -4874,7 +4874,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "3f321670ef2f893d5e889d61c4d5d9e730861678a7e6fe472b488192959aad88"
+          "checksumValue": "639fcbc8c15d54b52e1ca2e5a6934b24e5a6ce1c8e90f5cd41bce950e344e869"
         }
       ],
       "fileName": "README.md",
@@ -6183,7 +6183,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "d71643936d44cbf91894a5ccd83ba5e18a81de09856ecd2c4fd7388d59a05f87"
+          "checksumValue": "cf6d74c9498b36d115699692ca1ccd0b3a7f7ad6476bf6ff2e3f10e196539ec8"
         }
       ],
       "fileName": "docs/deployment.md",
@@ -20087,7 +20087,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "999431304e85c94a4e928f78bee66fd543adc0c653ddcd372dc90d813e078ee2"
+          "checksumValue": "209ee58292a4286a4b71dbc556bf6a69d5f2d2fc611f2ea08e6d9f713b6a3494"
         }
       ],
       "fileName": "DEPLOYMENT.md",
@@ -20098,7 +20098,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "f5f698bfa8e78075d89f1dda2fd59f073a2258278505e3bd5e0cfd6b6bb75534"
+          "checksumValue": "f080cd3d1ddd02de62972e3d1998e85b2510f98345a63621a65ba10c27a24e47"
         }
       ],
       "fileName": "RELEASE_NOTES.md",
