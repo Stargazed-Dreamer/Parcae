@@ -26,7 +26,7 @@ from pydantic import Field
 from lib.schema import BaseSchema
 from server.config import get_inbox_config
 
-logger = logging.getLogger("localagent.inbox")
+logger = logging.getLogger("parcae.inbox")
 
 router = APIRouter(prefix="/inbox", tags=["inbox"])
 

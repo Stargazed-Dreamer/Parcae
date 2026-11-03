@@ -74,7 +74,10 @@ class TestTaskReminderUpdated:
     def test_mcp_tools_include_todos_due(self):
         # mcp_tools_priority 改为 include_workflow=true 才返（默认不返避免匹配错误时白返）
         result = _build_task_guide("system.task_reminder", include_workflow=True)
-        assert "todos_due" in result["mcp_tools_priority"]
+        tools = result["mcp_tools_priority"]
+        # 2026-10-27 起 todos_due 不再常驻直连面，改为经 parcae_advanced_tool 调用，
+        # 故断言从「存在 todos_due 字面量」放宽为「存在点名 todos_due 的条目」。
+        assert any("todos_due" in t for t in tools)
         # 默认调用不应返 mcp_tools_priority
         result_default = _build_task_guide("system.task_reminder")
         assert "mcp_tools_priority" not in result_default

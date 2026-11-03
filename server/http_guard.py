@@ -25,7 +25,7 @@ import uuid
 
 from server.config import get_command_guard_config
 
-logger = logging.getLogger("localagent.http_guard")
+logger = logging.getLogger("parcae.http_guard")
 
 # HTTP 审批的 pending 和 token 存储（与 command_guard 的 _pending/_tokens 独立）
 _pending_http: dict[str, dict] = {}

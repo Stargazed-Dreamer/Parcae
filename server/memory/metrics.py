@@ -20,8 +20,13 @@ from datetime import datetime
 from typing import Any
 
 # 一次 guide 调用里被判 archive 却仍然高频上屏的"冲突"门槛（次）。
-# 含义：维护器说这条已经死了，但它在观测窗口内上屏了这么多次——标签和使用互相打脸。
+# 含义：这条记忆被归档（v15 前靠 LLM 标签，v15 后靠 facts.archived_at），
+# 但它在观测窗口内上屏了这么多次——归档记录和使用互相打脸。
 ARCHIVE_CONFLICT_MIN_SURFACES = 20
+# 超长条目的展示窗口（字符）。历史上叫「验证窗口」（validator_window_chars），
+# 2026-10-31 验证器删除后不再有验证动作，只剩「这条长到一屏塞不下」这个事实，
+# 故改名，口径不变（仍取 2400）。
+OVERSIZE_CHARS = 2400
 # extra 里最多带多少个样本 key（避免日表被长 JSON 撑大）
 _MAX_SAMPLE_KEYS = 20
 
@@ -92,7 +97,6 @@ def compute_metrics(
     conn: sqlite3.Connection,
     *,
     db_path: str | None = None,
-    validator_window_chars: int = 2400,
 ) -> dict[str, tuple[float | None, dict[str, Any]]]:
     """计算全部指标，返回 {metric_name: (value, extra)}。
 
@@ -173,7 +177,7 @@ def compute_metrics(
     # ── 标签与使用的矛盾 ────────────────────────────────────────────────
     def _archive_conflicts() -> tuple[float | None, dict[str, Any]]:
         if not _table_exists(conn, "context_projections") or not _table_exists(
-            conn, "memory_meta"
+            conn, "facts"
         ):
             return 0.0, {"absent": True}
         surfaced: dict[str, int] = {}
@@ -182,9 +186,7 @@ def compute_metrics(
                 surfaced[k] = surfaced.get(k, 0) + 1
         archived = {
             r[0]
-            for r in conn.execute(
-                "SELECT key FROM memory_meta WHERE validation_status='archive'"
-            )
+            for r in conn.execute("SELECT key FROM facts WHERE archived_at IS NOT NULL")
         }
         hits = {k: n for k, n in surfaced.items() if k in archived and n >= ARCHIVE_CONFLICT_MIN_SURFACES}
         return float(len(hits)), {
@@ -195,28 +197,32 @@ def compute_metrics(
 
     _safe("archive_high_freq_conflicts", _archive_conflicts)
 
-    # ── 维护器标签分布 ─────────────────────────────────────────────────
-    def _validation_counts() -> tuple[float | None, dict[str, Any]]:
-        if not _table_exists(conn, "memory_meta"):
+    # ── 归档分布（2026-10-31：口径从 memory_meta.validation_status 改到
+    #    facts.archived_at。原因：LLM 验证器删除后 validation_status 不再有生产者，
+    #    继续读它会永远冻结在 v15 的历史值上，看不出任何变化）──────────────
+    def _archive_counts() -> tuple[float | None, dict[str, Any]]:
+        if not _table_exists(conn, "facts"):
             return 0.0, {"absent": True}
-        counts = dict(
-            conn.execute(
-                "SELECT validation_status, COUNT(*) FROM memory_meta GROUP BY 1"
-            ).fetchall()
+        archived_total = _count(
+            conn, "SELECT COUNT(*) FROM facts WHERE archived_at IS NOT NULL"
         )
-        stale = _count(
-            conn, "SELECT COUNT(*) FROM memory_meta WHERE stale_score > ?",
-            _stale_days_of(conn),
+        has_meta = _table_exists(conn, "memory_meta")
+        stale = (
+            _count(
+                conn, "SELECT COUNT(*) FROM memory_meta WHERE stale_score > ?",
+                _stale_days_of(conn),
+            )
+            if has_meta
+            else 0.0
         )
-        return float(counts.get("archive", 0)), {
-            "status_counts": counts,
+        return archived_total, {
+            "archived_total": archived_total,
             "stale_total": stale,
-            "archive_ratio": round(counts.get("archive", 0) / facts_total, 4)
-            if facts_total
-            else 0.0,
+            "archive_ratio": round(archived_total / facts_total, 4) if facts_total else 0.0,
+            "note": "口径=facts.archived_at；memory_meta.validation_status 自 2026-10-31 起是冻结的历史字段",
         }
 
-    _safe("facts_archived", _validation_counts)
+    _safe("facts_archived", _archive_counts)
 
     def _taxonomy_violations() -> tuple[float | None, dict[str, Any]]:
         rows = conn.execute(
@@ -229,14 +235,17 @@ def compute_metrics(
 
     _safe("taxonomy_violations", _taxonomy_violations)
 
-    def _oversize_for_validator() -> tuple[float | None, dict[str, Any]]:
+    def _oversize_facts() -> tuple[float | None, dict[str, Any]]:
         n = _count(
             conn, "SELECT COUNT(*) FROM facts WHERE LENGTH(value) > ?",
-            validator_window_chars,
+            OVERSIZE_CHARS,
         )
-        return n, {"window_chars": validator_window_chars}
+        return n, {"window_chars": OVERSIZE_CHARS}
 
-    _safe("facts_oversize_for_validator", _oversize_for_validator)
+    # 2026-10-31 从 facts_oversize_for_validator 改名：验证器没了，"for validator"
+    # 会让人以为还有验证动作。历史序列在 memory_metrics_daily 里按旧名存着，
+    # 新序列自改名日重新起算。
+    _safe("facts_oversize", _oversize_facts)
 
     # ── 索引卫生 ────────────────────────────────────────────────────────
     def _superseded() -> tuple[float | None, dict[str, Any]]:
@@ -422,16 +431,13 @@ def record_daily(
     conn: sqlite3.Connection,
     *,
     db_path: str | None = None,
-    validator_window_chars: int = 2400,
     write_lock: Any | None = None,
 ) -> dict[str, Any]:
     """计算并 upsert 当天全部指标。返回 {date, written, errors}。
 
     调用点必须在维护器的 retention 清理**之前**，否则每天先删后算，指标只剩空表。
     """
-    metrics = compute_metrics(
-        conn, db_path=db_path, validator_window_chars=validator_window_chars
-    )
+    metrics = compute_metrics(conn, db_path=db_path)
     date = datetime.now().strftime("%Y-%m-%d")
 
     def _write() -> None:

@@ -14,7 +14,7 @@ aliases: [魔搭, 魔搭社区, ModelScope]
 | **登录态要求** | 匿名可浏览模型列表/详情页；调 API 需 ModelScope token（写到 keys.json） |
 | **抓取频次** | 周期（按需，新模型发布时） |
 | **文件创建日期** | 2026-07-24 |
-| **最后更新** | 2026-09-21 |
+| **最后更新** | 2026-10-11 |
 
 ## 网站概况
 
@@ -145,6 +145,11 @@ const hasModelscope = text.includes('魔搭社区');
 | **想拿 token 做程序化全局搜索** | 用 `keys.json` 里的 ModelScope token 打 `POST /api/v1/models` 当关键词搜索端点 | 该端点是**按 owner 列模型**，不传 `Path` 时报 `400 Code=10010202003`。`Authorization: Bearer <token>` 鉴权可过（对比未鉴权的 `401 user not logged in`），`Cookie: m_session=<token>` 仍 401。**没有匿名的全局关键词搜索 API** | 2026-09-21 |
 | **`/search?search=` 页是 SPA 壳** | 对该 URL 做 HTTP GET 后解析 HTML 找模型 ID | 只返回 4311 字节空壳、0 个 ID。要走 `/models` 列表页（SSR 出卡片）+ `a[href*="/models/"]` DOM 提取 | 2026-09-21 |
 | **判"魔搭可不可达"只看 DNS** | `gethostbyname` 解出 IP 就认为能下模型权重 | 数据面真路径 `https://www.modelscope.cn/models/<ns>/<name>/resolve/master/<file>` 实测 200 / 10036 B 可达。**这条比 hf-mirror 可靠**：hf-mirror 元数据面（`HfApi.list_repo_files`）通，但 `/resolve/main/` 数据面 ConnectTimeout | 2026-09-21 |
+| **图片异步任务不带 async 头** | 裸 `POST /v1/images/generations` 拿到 200+task_id 就以为提交成功 | 部分模型（GLM-Image）400 报错原文给出文档：必须带 **`X-ModelScope-Async-Mode: true` 头**。Qwen/FLUX 系不带头也能拿 task_id，但任务会坏死——最终以任务轮询结果为准 | 2026-10-11 |
+| **"提交 200+task_id 但任务秒 FAILED"当可用** | submit 200 就判"魔搭托管可用"写入 keys.json | 轮询 `GET /v1/tasks/{task_id}` 见 `task_status: FAILED` + `{"code":500,"message":"task not found"}` = 免费层接受提交但**无推理绑定**，实际不可用（2026-10-11 实测 Qwen-Image-2512/2.1、Edit-2511、FLUX.2-dev/klein-9B 五个模型全如此，带不带 async 头/size 都一样）。可用性判据必须是任务 SUCCEEDED | 2026-10-11 |
+| **视频生成端点瞎猜** | 试 `/video/generations` 或统一 `POST /v1/tasks` | 视频真端点是 `POST /v1/videos/generations`（其余 404 page not found）。该端点报 `500 {"code":400,"message":"Invalid model provider"}` = 视频版"无免费 provider 绑定"（等价 chat 的 `has no provider supported`）；`:DashScope` 后缀救不回（报 has no provider supported），async 头无效 | 2026-10-11 |
+| **把 `submit failed with code: 40212` 当网络/鉴权问题** | 反复重试或换 token | 40212 = 图片任务提交被拒（GLM-Image、Qwen-Image-2.1-PE 系实测），具体语义待考，但结论就是免费层不可用，别浪费重试 | 2026-10-11 |
+| **把 `Invalid model id` 当模型下架照旧重试** | 认为和 `has no provider supported` 同义 | 400 `Invalid model id: X` = 该 id 本身已不存在（改名/删除，2026-10-11 实测 MiMo-V2.6-Pro），应回扫描清单核对新 id 而不是重试 | 2026-10-11 |
 
 ## 遗留问题
 
@@ -160,3 +165,4 @@ const hasModelscope = text.includes('魔搭社区');
 | 2026-09-13 | 二次扫描（LLM+VL）新增 3 坑：面板魔搭标签漏判须 API 实测兜底、模型转付费 404 特征、Ring 系 ling 独立授权 401 |
 | 2026-09-19 | 排查 VL 连续 400 新增 3 坑：面板 OpenAI/Anthropic 是协议 tab 不是提供方、`has no provider supported` = 模型下架（非机制变更）、`:Provider` 后缀救不回下架模型；同步核查官方文档（端点/鉴权未变，新增 Responses API 与 Anthropic 兼容） |
 | 2026-09-21 | 查钢琴转录权重时新增 4 坑：`?search=` 被静默忽略、`POST /api/v1/models` 是按 owner 列而非全局搜索（Bearer 可鉴权但需 `Path`）、`/search` 页是 SPA 壳、判可达性要看数据面 `/resolve/master/`（实测通，优于 hf-mirror 数据面超时）。⚠️ 本次 `browser_write_lesson` 写不进来：该端点 section 白名单只收 `已知坑`，而本文件实际标题是 `已知坑（与正常行为区分）`，两条报错互相打转，故改为手工编辑 |
+| 2026-10-11 | 月更全 4 方向零可用，新增 5 坑：图片异步需 `X-ModelScope-Async-Mode: true` 头、"提交 200 但任务秒 FAILED task not found"=免费层无推理绑定（不可用新判据）、视频端点 `/v1/videos/generations` + `Invalid model provider` 语义、`submit failed 40212`=提交被拒、`Invalid model id`=id 已不存在（区别于下架） |

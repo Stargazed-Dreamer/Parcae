@@ -1,21 +1,13 @@
 """ChatPanel — v6-lite 对话面板（T07）
 
-PanelBase 子类，自动发现。会话列表 + 消息时间线 + 工具调用折叠卡 + 审批入口 + 中断按钮。
-QThread worker 跑 SessionRunner.run()，主线程 QTimer 轮询 EventStore 渲染中间状态。
-首版非流式（v6-lite §3 W4）。
-
-设计依据：
-- v6-lite §3 W4：ChatPanel 最小可用 + 防死循环
-- v6-lite §4.6：synthetic 消息 visible=false（面板不渲染）
-- v6-02 §2.1：has_attempted_* retry 不重置（T07 预留字段，T08 触发逻辑）
-- v6-02 §3.1：QThread worker + Signal，禁止 worker 直触 widget
-- v6-lite §5：引擎是 GUI 进程内库（不起第三个进程）
+PanelBase 子类，自动发现。会话列表 + 消息时间线 + 工具调用折叠卡 + ask_user 卡片 + 中断按钮。
+所有循环在 butler runtime 里跑；面板只是客户端（T7）。
 
 架构：
-- 主线程：_read_store（EventStore 只读，QTimer 200ms 轮询渲染）
-- worker 线程：_ChatWorker 持有自己的 EventStore（写）+ SessionRunner
-- 两个 EventStore 实例共享同一 DB 文件（SQLite WAL 支持并发读不阻塞写）
-- 中断：主线程调 worker.interrupt() → worker loop 内 call_soon_threadsafe set interrupt_event
+- 主线程：RuntimeStore（HTTP 适配层，方法形如账本读接口）+ WS 增量（_RuntimeEventStream）
+- 轮询只在 WS 断开时按打字机档位跑，作为回放降级路径
+- 运行：_RuntimeRunWorker 提交 submit → 等终态；steer/interrupt 直接打到 runtime
+- 关前端不中断会话：runtime 继续跑到终态（spec §3）
 """
 
 from __future__ import annotations
@@ -23,9 +15,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid as _uuid
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -68,44 +60,33 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from client.core.agent import (
-    BuiltinToolExecutor,
-    Compactor,
-    EventStore,
-    HttpClientToolExecutor,
-    L0ArtifactStore,
-    LLMPoolGateway,
+from client.core.constants import get_server_url
+from client.core.panel_base import PanelBase, PanelMeta
+from client.core.runtime_store import RuntimeStore
+from lib.agent_runtime import (
     Message,
-    RunnerConfig,
-    RunnerDeps,
-    SessionFacade,
-    ToolRegistry,
     list_all_task_types,
     template_create,
     template_delete,
     template_load_all,
     template_update,
 )
-from client.core.agent.event_store import DEFAULT_DB_PATH
-from client.core.agent.types import (
+from lib.agent_runtime.ask_user_outcomes import (
+    OUTCOME_ANSWERED,
+    OUTCOME_NO_HOST,
+    OUTCOME_SKIPPED,
+)
+from lib.agent_runtime.runtime_client import RuntimeClient
+from lib.agent_runtime.types import (
     TOOL_STATUS_COMPLETED,
     TOOL_STATUS_FAILED,
     TOOL_STATUS_PENDING,
     TOOL_STATUS_RUNNING,
 )
-from client.core.ask_user_bridge import (
-    OUTCOME_ANSWERED,
-    OUTCOME_CANCELLED,
-    OUTCOME_NO_HOST,
-    OUTCOME_SKIPPED,
-    AskUserBridge,
-)
-from client.core.constants import SERVER_URL
-from client.core.panel_base import PanelBase, PanelMeta
 from lib.ui import EmptyState, icon_button, tokens
 from lib.ui.theme import set_kind, set_text_role
 
-logger = logging.getLogger("localagent.panel.chat")
+logger = logging.getLogger("parcae.panel.chat")
 
 
 # ============================================================================
@@ -181,6 +162,14 @@ _EMPTY_ASSISTANT_PLACEHOLDER = "思考中..."
 # ③工具调用块偶发停留在透明度≈0，直到鼠标 hover 强制重绘才显示。块改为即时呈现。
 
 _TOOL_CARD_EXPAND_DURATION_MS = 200
+
+_ACTIVE_SESSION_STATUSES = {"streaming", "awaiting_tools", "running"}
+
+
+def _make_read_store() -> RuntimeStore:
+    """面板默认 store 工厂（测试可替换为本地账本读接口注入）。"""
+    return RuntimeStore()
+
 
 # chat-panel-v2 T10（D47）：token 单位换算（B/K/M/B/T，整数 ≤3 位 + 1 位小数）
 # < 1000 用原值；1000-999999 用 K；1M-999M 用 M；1B-999B 用 B；≥ 1T 用 T
@@ -818,7 +807,7 @@ class _UserBubble(_TimelineBlock):
             button_container.setLayout(button_row)
             # 常态显示（2026-09-13）：hover 显隐会造成布局跳动。
             # ⚠ 无 parent 的 QWidget 在 addWidget 之前 setVisible(True) 会作为
-            # 独立顶层窗口闪现（标题=应用显示名"LocalAgent 客户端"，即用户看到的
+            # 独立顶层窗口闪现（标题=应用显示名"Parcae 客户端"，即用户看到的
             # "Loc... 小窗口"）；必须先 addWidget 并入可见树，由父链带出显示
             outer.addWidget(button_container)
             self._hover_button_row = button_container
@@ -1644,10 +1633,10 @@ class _SystemBlock(_TimelineBlock):
 class _AskUserBlock(_TimelineBlock):
     """ask_user 交互卡片（2026-10-07 点单①：单选 / 多选 / 自由输入三态）。
 
-    三个出口对应 `client.core.ask_user_bridge` 的 outcome：
+    三个出口对应 runtime 的 outcome：
     - 提交回答 → answered（每题必须有选项或自由文本，否则原地提示，不静默提交空答案）
     - 「跳过，你自己定」→ skipped（用户**主动**把决定权交回 agent，不是没回答）
-    - `mark_expired()` → 超时/中断后由桥接层调用：整卡禁用并写明"问题未回答"，
+    - `mark_expired()` → 超时/中断后由事件层调用：整卡禁用并写明"问题未回答"，
       不许留一张"还能点但已经没人等"的假入口
 
     答完即锁：卡片只允许提交一次（`on_resolve` 返回 False 表示已经没人等了，
@@ -2105,17 +2094,14 @@ class _MessageTimeline(QFrame):
 # ============================================================================
 
 
-class _ChatWorker(QThread):
-    """后台线程跑 SessionRunner.run()（经 SessionFacade 封装，spec D13）。
+class _RuntimeRunWorker(QThread):
+    """后台线程把一轮对话提交给 butler runtime，并等它到终态（T7）。
 
-    线程内创建 EventStore（写）+ LLMPoolGateway + ToolRegistry + HttpClientToolExecutor
-    + SessionFacade。通过 Signal 通知主线程，禁止 worker 直接触发 widget（v6-02 §3.1）。
-
-    中断：主线程调 interrupt()，通过 call_soon_threadsafe 在 worker loop 内 set interrupt_event。
-    steer：主线程调 steer(text)，通过 call_soon_threadsafe 在 worker loop 内调 facade.steer。
+    线程内只做三件事：submit、按需 steer/interrupt、等终态。
+    不打开账本、不跑 SessionRunner——循环属于 runtime。
     """
 
-    finished_run = Signal(object)  # RunOutcome
+    finished_run = Signal(object)  # RuntimeOutcome
     error = Signal(str)
     session_started = Signal(str)  # session_id
 
@@ -2123,184 +2109,201 @@ class _ChatWorker(QThread):
         self,
         session_id: str,
         user_message: str,
-        db_path: str,
-        base_url: str,
+        runtime_url: str | None = None,
         config: dict | None = None,
         model_override: str = "",
         template_skills: list[str] | None = None,
         context_window: int = 0,
-        ask_callback: Callable[[list[dict]], dict] | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self._session_id = session_id
         self._user_message = user_message
-        self._db_path = db_path
-        self._base_url = base_url
+        self._runtime_url = runtime_url
         self._config = config or {}
-        # T06 spec D10：前端模型选择器切换后下条消息生效
         self._model_override = model_override or ""
-        # chat-panel-v2 T04: 模板 skills[] 注入（decisions D2）
-        self._template_skills: list[str] | None = template_skills
-        # 2026-10-07 压缩判据：该 model 的上下文窗口（keys.json context_window），
-        # 0 = 未知 ⇒ Compactor 不拿编造的默认值判压缩
+        self._template_skills = template_skills
         self._context_window = int(context_window or 0)
-        # 2026-10-07 ask_user：面板主线程建的 AskUserBridge.ask（同步阻塞 + Event 唤醒）。
-        # None ⇒ AskUserTool 维持 fail-closed 返回 USER_DENIED（无 GUI 场景，如探针）。
-        self._ask_callback = ask_callback
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._interrupt_event: asyncio.Event | None = None
-        # T05: facade 引用（worker 线程内创建，主线程通过 steer() 调用）
-        self._facade: SessionFacade | None = None
+        self._client: RuntimeClient | None = None
+        self._task: asyncio.Task | None = None
+        self._submitted = False
+        self._stop_event = threading.Event()
+        self._interrupt_requested = threading.Event()
+        self._pending_steers: list[str] = []
 
     def run(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._interrupt_event = asyncio.Event()
         try:
             outcome = self._loop.run_until_complete(self._run_async())
-            self.finished_run.emit(outcome)
+            if outcome is not None:
+                self.finished_run.emit(outcome)
+        except asyncio.CancelledError:
+            logger.info("RuntimeRunWorker cancelled (panel detached) session=%s", self._session_id)
         except Exception as e:
-            logger.exception("ChatWorker failed")
+            logger.exception("RuntimeRunWorker failed")
             self.error.emit(f"{type(e).__name__}: {e}")
         finally:
+            self._client = None
             try:
                 self._loop.close()
             except Exception:
                 pass
 
     async def _run_async(self):
-        # 在 worker 线程内创建所有资源（SQLite connection thread-local）
-        store = EventStore(db_path=self._db_path)
-        store.init()
-        try:
-            # 构建 deps（facade 内部负责 create_session + append user message + runner.run）
-            gateway = LLMPoolGateway(base_url=self._base_url)
-            registry = ToolRegistry(base_url=self._base_url)
-            try:
-                registry.refresh()
-            except Exception as e:
-                logger.warning("ToolRegistry refresh failed (will run without tools): %s", e)
-            # T02 修复（spec D13）：注入 L0ArtifactStore + Compactor
-            # - L0: >8KB 工具结果落盘 data/client/artifacts/，模型只看 preview+path
-            # - L2: 413 ContextOverflow 时 reactive_compact_retry，无 compactor 则直接失败
-            l0_store = L0ArtifactStore()
-            # 2026-10-07：上限来自 keys.json 的 context_window（面板按所选 model 查好
-            # 再传进来）。0 = 未知 ⇒ 判据明说"上限未知"，不再用一个编出来的 32000
-            # （实测真实跑到 97090 都没报错，32000 那个默认值本身就是失实的）。
-            compactor = Compactor(max_context_tokens=self._context_window)
-            executor = HttpClientToolExecutor(
-                registry=registry, base_url=self._base_url, l0_store=l0_store,
-            )
-            # T28（spec D8.1）：注入 BuiltinToolExecutor
-            # - 10 个内置基本工具（file_read/write/edit/grep/glob/ls/delete + ask_user + web_search/fetch）
-            # - 本地执行不经 HTTP，路径安全 4 重校验
-            # - 2026-10-07：ask_callback 由面板的 AskUserBridge 注入（ask_user 卡片接线）；
-            #   传 None 时 AskUserTool 仍 fail-closed 返回 USER_DENIED
-            builtin_executor = BuiltinToolExecutor(
-                base_url=self._base_url, ask_callback=self._ask_callback,
-            )
-            try:
-                registry.register_builtin_tools(builtin_executor)
-            except Exception as e:
-                logger.warning("register_builtin_tools failed (fail-open): %s", e)
-            # 8-13（2026-09-13 code review）：terminal_inspector / terminal_killer 有意延后
-            # 注入（client/core/agent 内无现成实现类，仅 runner 消费 + 测试 mock；注入需
-            # 自写 HTTP 回调，本次不实现）。影响范围声明——以下两层保障当前未生效：
-            # - spec D6"3 分钟唤醒"：runner._execute_with_wakeup 见
-            #   terminal_inspector=None 直接返回原结果，exec_python 长任务依赖模型自觉
-            #   exec_inspect 轮询 + server 端兜底
-            # - spec D11"session 结束 kill 残留 terminal"：runner._cleanup_terminals 见
-            #   terminal_killer=None 直接跳过，残留 terminal 由 server 端 idle 兜底
-            # 若要启用：注入 async (tid, timeout) -> dict（POST /exec/inspect）与
-            # async (tid) -> bool（POST /exec/kill）两个回调；建议用 asyncio.to_thread
-            # 包同步 requests，避免长阻塞等待（inspect 可达 180s）冻结 worker 事件循环。
-            deps = RunnerDeps(
-                llm_gateway=gateway,
-                event_store=store,
-                tool_executor=executor,
-                tool_registry=registry,
-                interrupt_event=self._interrupt_event,
-                compactor=compactor,
-                builtin_executor=builtin_executor,
-            )
-            config = RunnerConfig(
-                session_id=self._session_id,
-                model=self._config.get("model", ""),
-                max_iterations=self._config.get("max_iterations", 50),
-            )
-            # T05: 用 SessionFacade 替代直接调 SessionRunner（spec D13）
-            self._facade = SessionFacade(deps=deps, config=config)
-            self.session_started.emit(self._session_id)
-            # T06 spec D10：传 model_override 让前端模型选择器切换后下条消息生效
-            # chat-panel-v2 T04: 传 template_skills 让模板 skills 注入 system prompt
-            return await self._facade.start(
-                self._session_id,
-                self._user_message,
-                model_override=self._model_override,
-                template_skills=self._template_skills,
-            )
-        finally:
-            store.close()
-            self._facade = None  # 清理引用
+        self._task = asyncio.current_task()
+        self._client = RuntimeClient(self._runtime_url)
+        max_iterations = int(self._config.get("max_iterations", 50) or 50)
+        await self._client.submit(
+            self._session_id,
+            self._user_message,
+            mode="dialogue",
+            model_override=self._model_override,
+            template_skills=self._template_skills,
+            max_iterations=max_iterations,
+            context_window=self._context_window or None,
+        )
+        self._submitted = True
+        self.session_started.emit(self._session_id)
+        # submit 期间的 steer/interrupt 补发（面板可能在提交完成前就点了）
+        for text in list(self._pending_steers):
+            await self._client.steer(self._session_id, text)
+        self._pending_steers.clear()
+        if self._interrupt_requested.is_set():
+            await self._client.interrupt(self._session_id)
+        if self._stop_event.is_set():
+            return None
+        return await self._client.outcome(self._session_id, timeout=24 * 3600)
 
-    def interrupt(self) -> None:
-        """主线程调用，触发中断。
-
-        双层保障（2026-09-13 code review 8-1：A2 此前全 client 零调用）：
-        - A1：set interrupt_event——runner 在工具循环/主循环顶部检查；但阻塞的
-          await 点（审批等待最长 200s / LLM 调用）不返回时，排队的事件永远不会
-          被检查到。
-        - A2：调度 facade.interrupt() → runner_task.cancel() 强制中止挂起的
-          await；runner._run_loop 捕获 CancelledError 返回 interrupted。
-        """
-        # 8-15: run() finally 已 close loop 但线程尚未退出的窗口期 isRunning() 仍为
-        # True，此时 call_soon_threadsafe 对已关闭 loop 抛 RuntimeError 到主线程槽；
-        # is_closed() 守卫直接忽略（loop 已关 = 会话已结束，无需中断）
-        if self._loop is None or self._loop.is_closed():
+    def _schedule(self, coro_factory) -> None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
             return
-        if self._loop and self._interrupt_event:
-            self._loop.call_soon_threadsafe(self._interrupt_event.set)
-        # 守卫后立即捕获局部变量（与 _do_steer 同理：调度执行前 run() 的
-        # finally 可能已置 self._facade = None）
-        facade = self._facade
-        session_id = self._session_id
-        if self._loop and facade is not None:
-
-            async def _do_interrupt_a2():
-                try:
-                    await facade.interrupt(session_id)
-                except Exception as e:
-                    logger.warning("ChatWorker.interrupt A2 failed: %s", e)
-
-            self._loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(_do_interrupt_a2(), loop=self._loop)
-            )
-
-    def steer(self, text: str) -> None:
-        """主线程调用，注入引导消息（spec D13 steer UI）。
-
-        通过 call_soon_threadsafe 在 worker loop 内调 facade.steer，
-        runner 当前工具批次结束后下一轮读到。
-        """
-        if not text or not self._loop or not self._facade:
-            return
-        # 守卫通过后立即捕获局部变量——闭包从 _do_steer 调度到 worker loop 执行之间，
-        # run() 的 finally 可能已置 self._facade = None（会话切换/结束），
-        # 若闭包仍读 self._facade 会 AttributeError 导致用户引导消息无声丢失
-        facade = self._facade
-        session_id = self._session_id
-
-        async def _do_steer():
-            try:
-                await facade.steer(session_id, text)
-            except Exception as e:
-                logger.warning("ChatWorker.steer failed: %s", e)
-
-        self._loop.call_soon_threadsafe(
-            lambda: asyncio.ensure_future(_do_steer(), loop=self._loop)
+        loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(coro_factory(), loop=loop)
         )
 
+    async def _send_interrupt(self) -> None:
+        try:
+            if self._client is not None:
+                await self._client.interrupt(self._session_id)
+        except Exception as e:
+            logger.warning("RuntimeRunWorker.interrupt failed: %s", e)
+
+    async def _send_steer(self, text: str) -> None:
+        try:
+            if self._client is not None:
+                await self._client.steer(self._session_id, text)
+        except Exception as e:
+            logger.warning("RuntimeRunWorker.steer failed: %s", e)
+
+    def interrupt(self) -> None:
+        """主线程调用：中断 runtime 里的这一轮（不是关前端用的）。"""
+        self._interrupt_requested.set()
+        if not self._submitted:
+            return  # submit 完成后在 _run_async 里补发
+        self._schedule(self._send_interrupt)
+
+    def steer(self, text: str) -> None:
+        """主线程调用：把引导消息打进 runtime 会话。"""
+        if not text:
+            return
+        if not self._submitted:
+            self._pending_steers.append(text)
+            return
+        self._schedule(lambda: self._send_steer(text))
+
+    def stop(self) -> None:
+        """关前端专用：断开本地等待，不向 runtime 发中断。"""
+        self._stop_event.set()
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        task = self._task
+        if task is not None and not task.done():
+            loop.call_soon_threadsafe(task.cancel)
+
+
+class _RuntimeEventStream(QThread):
+    """跟随当前会话的 runtime WS 下行（T7：读走 WS + 回放）。
+
+    断线后用 after_seq 续传；事件按到达顺序发信号，由主线程落到时间线。
+    只是读通道：不提交、不中断。
+    """
+
+    event_received = Signal(object)
+    connection_changed = Signal(bool)
+
+    def __init__(self, session_id: str, runtime_url: str | None = None, parent=None):
+        super().__init__(parent)
+        self._session_id = session_id
+        self._runtime_url = runtime_url
+        self._stop_event = threading.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._cursor = 0
+        self._task: asyncio.Task | None = None
+
+    def run(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._consume())
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning("RuntimeEventStream stopped: %s", e)
+        finally:
+            try:
+                self._loop.close()
+            except Exception:
+                pass
+
+    async def _consume(self) -> None:
+        import websockets
+
+        self._task = asyncio.current_task()
+        client = RuntimeClient(self._runtime_url)
+        backoff = 0.5
+        while not self._stop_event.is_set():
+            try:
+                async with websockets.connect(
+                    client.ws_url(self._session_id, self._cursor),
+                    open_timeout=2,
+                    close_timeout=1,
+                ) as ws:
+                    self.connection_changed.emit(True)
+                    backoff = 0.5
+                    while not self._stop_event.is_set():
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=0.5)
+                        except TimeoutError:
+                            continue
+                        frame = json.loads(raw)
+                        if frame.get("kind") != "event":
+                            continue
+                        event = frame.get("event") or {}
+                        self._cursor = max(self._cursor, int(event.get("seq") or 0))
+                        self.event_received.emit(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug("runtime event stream disconnected: %s", e)
+            finally:
+                self.connection_changed.emit(False)
+            if self._stop_event.is_set():
+                break
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 5.0)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        task = self._task
+        if task is not None and not task.done():
+            loop.call_soon_threadsafe(task.cancel)
 
 # ============================================================================
 # _StartPage — chat-panel-v2 T04 开始页（decisions D1, D11, D12, D20）
@@ -2879,7 +2882,7 @@ class _TemplateManagerPanel(QFrame):
         # 防止 loading 期间 focusOut 触发保存
         self._loading = True
         try:
-            from client.core.agent import template_get
+            from lib.agent_runtime import template_get
             tpl = template_get(template_id)
             if tpl is None:
                 # 模板已被删除，清空编辑区
@@ -3032,7 +3035,7 @@ class _TemplateManagerPanel(QFrame):
     def _duplicate_template(self, template_id: str) -> None:
         """复制模板（新建一个同名 + 副本后缀）。"""
         try:
-            from client.core.agent import template_get
+            from lib.agent_runtime import template_get
             src = template_get(template_id)
             if src is None:
                 return
@@ -3067,7 +3070,7 @@ class ChatPanel(PanelBase):
     - 右侧消息时间线（user/assistant/tool 气泡 + 工具调用折叠卡）
     - 底部输入框 + 发送/中断按钮
     - 顶栏显示会话状态/cost/iterations
-    - QTimer 200ms 轮询 EventStore 渲染中间状态
+    - WS 增量渲染；QTimer 轮询只在 WS 断开时按打字机档位回放
     - 中断即停（worker.interrupt → interrupt_event.set → runner 下一轮终止）
     """
 
@@ -3087,12 +3090,15 @@ class ChatPanel(PanelBase):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._base_url = SERVER_URL
-        self._db_path = DEFAULT_DB_PATH
-        self._read_store: EventStore | None = None  # 主线程只读 store
-        self._reconcile_done = False  # 8-3：reconcile 只在首次 _init_read_store 跑一次
-        self._worker: _ChatWorker | None = None
+        self._base_url = get_server_url()  # 8766：模型清单等后端能力
+        self._read_store: RuntimeStore | None = None  # 主线程 runtime 适配层
+        self._reconcile_done = False  # 启动恢复报告只取一次
+        self._worker: _RuntimeRunWorker | None = None
+        self._event_stream: _RuntimeEventStream | None = None
+        self._stream_connected = False
+        self._refresh_scheduled = False
         self._current_session_id: str | None = None
+        self._session_status: str = ""  # 当前会话状态（WS 回放时判断 ask_user 是否还有入口）
         self._last_rendered_seq: int = 0  # 增量渲染锚点
         self._last_tool_call_ids: set[str] = set()  # 已渲染的 tool_call id
         self._pending_user_preview: str | None = None
@@ -3101,11 +3107,7 @@ class ChatPanel(PanelBase):
         # T06 spec D10：前端模型选择器状态
         self._available_models: list[dict] = []  # [{model, tier, provider, context_window}, ...]
         self._current_model: str = ""  # 当前选中的 model（空=用 config 默认）
-        # 2026-10-07 ask_user 卡片（点单①③④）：桥接对象**必须在主线程创建**
-        # （QObject 亲和创建线程，worker 线程发射 Signal 才会走 QueuedConnection）。
-        # 超时只从 config `[runner] ask_user_timeout_secs` 读，工具入参里没有这一格。
-        self._ask_bridge = AskUserBridge(timeout_secs=self._load_ask_user_timeout_secs())
-        self._ask_bridge.set_handlers(self._on_ask_user_request, self._on_ask_user_expire)
+        # ask_user 卡片：runtime 通过 WS 发 ask_user_request，卡片答完 POST /ask_user/{rid}
         self._ask_cards: dict[str, _AskUserBlock] = {}
 
         # chat-panel-v2 T06（D15）：侧边栏搜索框状态
@@ -3152,7 +3154,7 @@ class ChatPanel(PanelBase):
         self._queue_label: QLabel | None = None            # 排队消息文本
         self._queue_edit_btn: QPushButton | None = None    # 编辑/取消排队按钮
         self._queued_text: str = ""                        # 排队消息内容（in-memory）
-        self._queued_msg_id: str | None = None            # T09 持久化排队消息的 EventStore id
+        self._queued_msg_id: str | None = None            # T09 持久化排队消息的账本 id
         self._is_running_state: bool = False              # worker 是否运行中
 
         self._build_ui()
@@ -3173,67 +3175,65 @@ class ChatPanel(PanelBase):
         return "fast"
 
     # ------------------------------------------------------------------
-    # ask_user 卡片（2026-10-07 点单①③④）
+    # ask_user 卡片（T7：runtime WS 事件驱动）
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _load_ask_user_timeout_secs() -> float:
-        """从 config `[runner] ask_user_timeout_secs` 读等待时长（0 或缺失 = 永不超时）。
-
-        只有这一处能决定时长：工具入参里没有 timeout 格，agent 传不了——否则它可以
-        传 1 秒把"问你"变相成"替你拍板"。
-        """
-        try:
-            from lib.config_reader import load_config
-            cfg = load_config()
-            runner_cfg = cfg.get("runner", {}) if isinstance(cfg, dict) else {}
-            value = float(runner_cfg.get("ask_user_timeout_secs", 0) or 0)
-            return value if value > 0 else 0.0
-        except Exception:
-            return 0.0
-
     def _on_ask_user_request(self, payload: dict) -> None:
-        """主线程槽：把提问画成当前会话时间线里的一张卡。
-
-        渲染不出来（会话还没建时间线等）就立刻 resolve 成 no_host——绝不许让 worker
-        干等到超时，那会把"GUI 没就绪"伪装成"用户没回答"。
-        """
+        """主线程槽：把 runtime 的提问画成当前会话时间线里的一张卡。"""
         rid = str(payload.get("rid") or "")
         questions = payload.get("questions") or []
-        if not rid:
+        if not rid or rid in self._ask_cards:
             return
         card = _AskUserBlock(
             questions,
-            on_resolve=lambda outcome, answers: self._ask_bridge.resolve(rid, outcome, answers),
+            on_resolve=lambda outcome, answers: self._answer_ask_user(rid, outcome, answers),
         )
         try:
             self._message_timeline.append_block(card)
         except Exception as e:
             logger.warning("_on_ask_user_request: 卡片渲染失败: %s", e)
-            self._ask_bridge.resolve(rid, OUTCOME_NO_HOST)
+            self._answer_ask_user(rid, OUTCOME_NO_HOST, None)
             return
         self._ask_cards[rid] = card
         self._scroll_to_bottom()
         logger.info("ask_user: 卡片已上屏 rid=%s questions=%d", rid, len(questions))
 
+    def _answer_ask_user(self, rid: str, outcome: str, answers: list[dict] | None) -> bool:
+        """卡片出口：POST 到 runtime（后台线程，不阻塞主线程）。"""
+        if rid not in self._ask_cards:
+            return False
+        self._ask_cards.pop(rid, None)
+        threading.Thread(
+            target=self._post_ask_user_answer,
+            args=(rid, outcome, answers),
+            daemon=True,
+            name=f"ask-user-{rid}",
+        ).start()
+        return True
+
+    def _post_ask_user_answer(self, rid: str, outcome: str, answers: list[dict] | None) -> None:
+        async def _send():
+            client = RuntimeClient()
+            await client.answer_ask_user(rid, outcome, answers)
+
+        try:
+            asyncio.run(_send())
+        except Exception:
+            logger.warning("ask_user: answer %s failed", rid, exc_info=True)
+
     def _on_ask_user_expire(self, rid: str) -> None:
-        """超时/中断后作废那张卡（留着就是"还能点但已没人等"的假入口）。"""
+        """超时/中断/已答后作废那张卡（留着就是"还能点但已没人等"的假入口）。"""
         card = self._ask_cards.pop(rid, None)
         if card is not None:
             card.mark_expired()
 
-    def _cancel_pending_asks(self, reason: str = OUTCOME_CANCELLED) -> None:
-        """中断/切会话：唤醒仍在等的提问并作废卡片。
+    def _cancel_pending_asks(self) -> None:
+        """切会话/关前端：本地作废所有等待中的卡片。
 
-        必须在 `worker.interrupt()` 之外单独做：`AskUserTool.execute` 正占着 worker 的
-        事件循环线程，`call_soon_threadsafe` 那套路此刻排不进去，只有直接 set
-        `threading.Event` 才送得达。
+        runtime 侧会因 WS 断开把未答提问按 no_host 结束；这里只负责 UI 不留假入口。
         """
-        woke = self._ask_bridge.cancel_pending(reason)
         for rid in list(self._ask_cards):
             self._on_ask_user_expire(rid)
-        if woke:
-            logger.info("ask_user: 唤醒 %d 个未回答的提问（%s）", woke, reason)
 
     # ------------------------------------------------------------------
     # UI 构建
@@ -3316,7 +3316,7 @@ class ChatPanel(PanelBase):
         self._session_tree.itemDoubleClicked.connect(self._on_session_double_clicked)
         # 2026-09-13 用户反馈"切换对话时弹出一个 Loc... 小窗口又消失"：会话标题都被
         # 截断显示，Qt item 视图会为截断文本自动弹完整标题 tooltip——tooltip 是真实
-        # 顶层窗口（标题取应用显示名"LocalAgent 客户端"，~214x72px），划过树项即弹出、
+        # 顶层窗口（标题取应用显示名"Parcae 客户端"，~214x72px），划过树项即弹出、
         # 点击即消失。吞掉 tooltip 事件（eventFilter 在 ChatPanel 上，见 eventFilter）。
         self._session_tree.viewport().installEventFilter(self)
         left_layout.addWidget(self._session_tree, 1)
@@ -3612,7 +3612,7 @@ class ChatPanel(PanelBase):
         outer.addWidget(splitter)
 
     def _reload_current_history(self) -> None:
-        """重新从 EventStore 加载当前会话，避免刷新后仍停留在旧的增量锚点。"""
+        """重新从 runtime 加载当前会话，避免刷新后仍停留在旧的增量锚点。"""
         if not self._current_session_id:
             self._refresh_session_list()
             return
@@ -3804,63 +3804,50 @@ class ChatPanel(PanelBase):
             self._session_list_timer.stop()
 
     # ------------------------------------------------------------------
-    # EventStore（主线程只读）
+    # Runtime 读取适配层（T7）
     # ------------------------------------------------------------------
 
     def _init_read_store(self) -> None:
-        """初始化主线程只读 EventStore，并运行启动恢复（D27）。
+        """初始化 runtime 适配层，并读取 runtime 的启动恢复报告（banner）。
 
-        D27: store.init() 后立即调 reconcile(store)，GUI 加载会话列表前先恢复，
-        看到的是已恢复状态。banner 提示恢复会话数（D26）。
+        T7 起启动恢复归 runtime（它启动时进程内还没有活跃 run）；
+        GUI 只展示结果，不再自己 reconcile（8-3：客户端侧重跑会误伤活跃会话）。
         """
         try:
             if self._read_store is not None:
                 self._read_store.close()
-            self._read_store = EventStore(db_path=self._db_path)
+            self._read_store = _make_read_store()
             self._read_store.init()
-            logger.info("ChatPanel read store initialized: %s", self._db_path)
+            logger.info("ChatPanel runtime store initialized")
         except Exception as e:
             logger.warning("Failed to init read store: %s", e)
             self._read_store = None
             return
 
-        # D27: store.init() 后调 reconcile()（启动恢复）
-        # 8-3（2026-09-13 code review）修复：reconcile 只在首次 _init_read_store 做。
-        # on_backend_status_change(online) 每次后端恢复在线都会重建 read store 并
-        # 调到这里——重跑 reconcile 会把"runner 只是卡在长阻塞工具上"的活跃会话
-        # 补出第二份 tool_result + 强制 interrupted，后端闪断即可触发。
-        # 启动恢复属于进程启动语义，不属于后端连接恢复语义。
         if not self._reconcile_done:
             self._reconcile_done = True
-            self._run_reconcile()
-
-    def _run_reconcile(self) -> None:
-        """D27: 运行 reconciler，恢复崩溃残留会话，banner 提示恢复数（D26）。
-
-        reconcile 是 async 但内部是 sqlite 本地 I/O（极快），用 new_event_loop
-        同步执行。失败不阻塞 GUI 启动。
-        """
-        if self._read_store is None:
-            return
-        try:
-            from client.core.agent.reconciler import reconcile
-            loop = asyncio.new_event_loop()
-            try:
-                result = loop.run_until_complete(reconcile(self._read_store))
-            finally:
-                loop.close()
-            recovered_count = len(result.sessions_interrupted)
-            if recovered_count > 0:
-                self._show_recovery_banner(recovered_count)
-                logger.info(
-                    "Reconcile recovered %d sessions: %s",
-                    recovered_count, result.sessions_interrupted,
-                )
-        except Exception as e:
-            logger.warning("Reconcile failed: %s", e)
+            self._show_runtime_recovery_banner()
 
         # T09: 恢复持久化的排队消息（重启后 banner 提示"有 N 条排队消息未发送"）
         self._recover_pending_queue()
+
+    def _show_runtime_recovery_banner(self) -> None:
+        """runtime 启动时恢复过多少会话 → banner（runtime 未跑时不显示）。"""
+        if self._read_store is None:
+            return
+        report_fn = getattr(self._read_store, "recovery_report", None)
+        if report_fn is None:
+            return
+        try:
+            report = self._safe_read(report_fn()) or {}
+        except Exception:
+            report = {}
+        interrupted = report.get("sessions_interrupted") or []
+        if interrupted:
+            self._show_recovery_banner(len(interrupted))
+            logger.info(
+                "Runtime recovered %d sessions: %s", len(interrupted), interrupted,
+            )
 
     def _recover_pending_queue(self) -> None:
         """T09: 启动时检查持久化的排队消息，恢复到 UI + banner 提示。
@@ -3941,59 +3928,42 @@ class ChatPanel(PanelBase):
         """D26: 隐藏恢复提示 banner（用户点 × 关闭）。"""
         self._recovery_banner.setVisible(False)
 
-    def interrupt_active_session(self) -> None:
-        """D24: closeEvent 调用 — 中断活跃 runner + 更新 session.status=interrupted。
+    def detach_active_session(self) -> None:
+        """closeEvent 调用：断开本地监听，**不中断 runtime 里的会话**（T7）。
 
-        非阻塞，毫秒级完成（sqlite 本地 I/O 极快，interrupt 通过
-        asyncio.Event.set 立即返回，不等待 runner 终止）。
-        用 try/except 包裹防 closeEvent 失败。
+        关前端后循环继续跑到终态（spec §3）；用户要中断时走中断按钮
+        （`_on_interrupt` → runtime `/interrupt`）。本地只做 UI 收尾。
         """
-        # 0. 先唤醒可能卡在 ask_user 的 worker 线程（execute 正占着那条事件循环，
-        #    只靠下面 call_soon_threadsafe 的 asyncio.Event 送不进去）
+        try:
+            self._stop_event_stream()
+        except Exception:
+            logger.warning("detach_active_session: stop event stream failed", exc_info=True)
+
+        try:
+            if self._worker is not None and self._worker.isRunning():
+                self._worker.stop()
+                self._worker.wait(1500)  # 只等本地线程退场（不发 runtime 中断）
+        except Exception:
+            logger.warning("detach_active_session: worker.stop() failed", exc_info=True)
+
         try:
             self._cancel_pending_asks()
         except Exception:
-            logger.warning("interrupt_active_session: cancel pending asks failed", exc_info=True)
+            logger.warning("detach_active_session: cancel pending asks failed", exc_info=True)
 
-        # 1. 中断 runner（worker.interrupt 通过 call_soon_threadsafe set asyncio.Event）
-        try:
-            if self._worker is not None and self._worker.isRunning():
-                self._worker.interrupt()
-        except Exception:
-            logger.warning(
-                "interrupt_active_session: worker.interrupt() failed", exc_info=True,
-            )
-
-        # 2. 更新 session.status = interrupted（同步执行 sqlite 写）
-        try:
-            if self._current_session_id and self._read_store is not None:
-                loop = asyncio.new_event_loop()
-                try:
-                    loop.run_until_complete(
-                        self._read_store.update_session_status(
-                            self._current_session_id, "interrupted",
-                        )
-                    )
-                finally:
-                    loop.close()
-        except Exception:
-            logger.warning(
-                "interrupt_active_session: update_session_status failed", exc_info=True,
-            )
-
-        # 3. T07 D43: 流式中断 → streaming bubble 直接转正 + thinking 独立块 + "已中断"小字
+        # T07 D43: 流式中断 → streaming bubble 直接转正 + thinking 独立块 + "已中断"小字
         try:
             if self._message_timeline is not None:
                 self._message_timeline.finalize_streaming_on_interrupt()
                 self._last_streaming_seq = 0
         except Exception:
             logger.warning(
-                "interrupt_active_session: finalize_streaming_on_interrupt failed",
+                "detach_active_session: finalize_streaming_on_interrupt failed",
                 exc_info=True,
             )
 
     def _safe_read(self, coro):
-        """在主线程同步执行 async read 方法（sqlite 本地 I/O 极快，阻塞可忽略）。"""
+        """在主线程同步执行 async read 方法（loopback HTTP，毫秒级）。"""
         if self._read_store is None:
             return None
         try:
@@ -4349,8 +4319,12 @@ class ChatPanel(PanelBase):
             it += 1
         return None
 
-    def _begin_rename(self, item: QTreeWidgetItem, sid: str) -> None:
-        """进入行内重命名模式：挂载 QLineEdit 到 item。"""
+    def _begin_rename(self, _item: QTreeWidgetItem, sid: str) -> None:
+        """进入行内重命名模式：按 sid 重新取当前 item 再挂载。
+
+        菜单弹出期间 2s 刷新/事件刷新可能已经 clear() 重建整棵树，调用方手里的
+        QTreeWidgetItem 会变成已删除的 C++ 对象；必须按 sid 重新查找。
+        """
         # 若已在重命名其他会话，先提交
         if self._renaming_sid and self._renaming_sid != sid:
             self._commit_rename()
@@ -4362,6 +4336,10 @@ class ChatPanel(PanelBase):
             current_title = (
                 sess.get("title", "") if isinstance(sess, dict) else getattr(sess, "title", "")
             ) or ""
+        item = self._find_session_item(sid)
+        if item is None:
+            self._cancel_rename()
+            return
         self._attach_rename_editor(item, sid, current_title)
 
     def _attach_rename_editor(
@@ -4440,7 +4418,7 @@ class ChatPanel(PanelBase):
         """事件过滤器：① Esc 取消重命名（QLineEdit 默认 Esc 不关闭）；
         ② 吞掉会话树/最近对话列表的 tooltip（2026-09-13 用户反馈"切换时弹出
         Loc... 小窗口又消失"——Qt 为截断文本自动弹完整标题 tooltip，它是真实
-        顶层窗口，标题取应用显示名"LocalAgent 客户端"，划过列表项即弹出、
+        顶层窗口，标题取应用显示名"Parcae 客户端"，划过列表项即弹出、
         点击即消失；tooltip 无信息价值，直接吞掉）。
         """
         if event.type() == QEvent.Type.KeyPress and obj is self._rename_editor:
@@ -4514,7 +4492,7 @@ class ChatPanel(PanelBase):
         self._refresh_session_list()
 
     def _delete_session_with_confirm(self, sid: str) -> None:
-        """D18：删除会话（弹确认对话框，硬删 EventStore）。"""
+        """D18：删除会话（弹确认对话框，硬删账本）。"""
         if self._read_store is None:
             return
         # 取标题用于确认文案
@@ -4642,15 +4620,18 @@ class ChatPanel(PanelBase):
     def _switch_session(self, session_id: str) -> None:
         """切换到指定会话，重新渲染消息时间线。"""
         self._current_session_id = session_id
+        self._session_status = ""
         self._last_rendered_seq = 0
         self._last_tool_call_ids = set()
         # optimistic preview 只属于发送它的会话，切换会话时必须丢弃，
         # 否则新会话中恰好出现同文案时会被错误去重。
         self._pending_user_preview = None
         self._pending_steer_previews.clear()  # T05: 清理 steer 预览去重集合
+        self._last_streaming_seq = 0
         self._clear_messages()
         # chat-panel-v2 T04: 切到消息时间线视图（D21）
         self._show_messages_view()
+        self._start_event_stream(session_id)
         self._poll_session_state()
         # T10: 刷新 last_updated（title 在 _poll_session_state 内刷新）
         self._refresh_last_updated()
@@ -4662,10 +4643,13 @@ class ChatPanel(PanelBase):
         session_id 在开始页发送时由 _on_start_page_send 创建。
         """
         self._current_session_id = None
+        self._session_status = ""
         self._last_rendered_seq = 0
         self._last_tool_call_ids = set()
         self._pending_user_preview = None
         self._pending_steer_previews.clear()
+        self._last_streaming_seq = 0
+        self._stop_event_stream()
         self._clear_messages()
         self._update_status("idle", 0)
         # T10: 清空 title + last_updated（开始页无活跃会话）
@@ -4727,11 +4711,9 @@ class ChatPanel(PanelBase):
         self._last_streaming_seq = 0
 
         # 启动 worker（带 template_skills）
-        self._worker = _ChatWorker(
+        self._worker = _RuntimeRunWorker(
             session_id=new_id,
             user_message=text,
-            db_path=self._db_path,
-            base_url=self._base_url,
             config={
                 "max_iterations": 50,
                 # B2（spec D2/D3）：删 max_budget_usd，本地无法准确算 cost（缓存比例不明）
@@ -4739,7 +4721,6 @@ class ChatPanel(PanelBase):
             model_override=self._current_model,
             template_skills=template_skills if template_skills else None,
             context_window=self._context_window_for_model(self._current_model),
-            ask_callback=self._ask_bridge.ask,
             parent=self,
         )
         self._worker.finished_run.connect(self._on_worker_finished)
@@ -4748,7 +4729,11 @@ class ChatPanel(PanelBase):
 
         self._send_btn.setEnabled(False)
         self._interrupt_btn.setEnabled(True)
+        # 与 _start_new_run 对齐：开始页首轮也要进入运行态，否则三 tab 永不出现
+        self._set_running_state(True)
+        self._session_status = "streaming"
         self._update_status("streaming", 0)
+        self._start_event_stream(new_id, force=True)
 
         self._worker.start()
         self._poll_timer.start()
@@ -4791,13 +4776,14 @@ class ChatPanel(PanelBase):
         if self._worker is not None and self._worker.isRunning():
             self._interrupt_btn.setEnabled(False)
             self._worker.interrupt()
+            self._cancel_pending_asks()
             self._update_status("interrupted", 0)
 
     def _on_steer(self) -> None:
         """T05/T09: 引导当前会话（legacy popup 路径）。
 
         新 UX 走 _send_in_steer_mode（直接用输入框文本，不弹 dialog）。
-        本方法保留 popup 逻辑以兼容外部调用（如 _ChatWorker 信号连接）。
+        本方法保留 popup 逻辑以兼容外部调用。
         """
         if self._worker is None or not self._worker.isRunning():
             return
@@ -4811,7 +4797,7 @@ class ChatPanel(PanelBase):
         )
         if not ok or not text.strip():
             return
-        # 调 worker.steer → worker loop 内 facade.steer 写入 EventStore
+        # 调 worker.steer → runtime /steer 写入账本
         self._worker.steer(text.strip())
         # 立即在 UI 显示引导消息预览（不等 worker 写库，避免延迟）
         self._append_steer_preview(text.strip())
@@ -5129,7 +5115,7 @@ class ChatPanel(PanelBase):
 
         Args:
             text: 排队消息内容
-            persist: True=写入 EventStore 持久化（默认，用户主动排队时）；
+            persist: True=写入 runtime 账本（默认，用户主动排队时）；
                      False=不写库（启动恢复时从库读到，避免重复写入）
         """
         self._queued_text = text
@@ -5148,12 +5134,12 @@ class ChatPanel(PanelBase):
             if self._mode_steer_btn is not None and self._is_running_state:
                 self._mode_steer_btn.setChecked(True)
                 self._on_mode_tab_clicked(MODE_STEER)
-        # T09 持久化：写入 EventStore source="queue" visible=0（不丢，重启可恢复）
+        # T09 持久化：写入 runtime 账本 source="queue" visible=0（不丢，重启可恢复）
         if persist and self._read_store is not None and self._current_session_id:
             self._persist_queue_message(text)
 
     def _persist_queue_message(self, text: str) -> None:
-        """T09: 把排队消息写入 EventStore（source='queue', visible=False）。"""
+        """T09: 把排队消息写入 runtime 账本（source='queue', visible=False）。"""
         if self._read_store is None or not self._current_session_id:
             return
         # 先清掉旧的持久化行（避免重复）
@@ -5272,9 +5258,9 @@ class ChatPanel(PanelBase):
         """引导模式：facade.steer + 显示预览（D34 + D37）。"""
         if self._worker is None or not self._worker.isRunning():
             return  # 无运行中的 worker，引导无意义
-        # 调 worker.steer → worker loop 内 facade.steer 写入 EventStore
+        # 调 worker.steer → runtime /steer 写入账本
         self._worker.steer(text)
-        # 立即在 UI 显示引导消息预览（不等 worker 写库）
+        # 立即在 UI 显示引导消息预览（不等 runtime 落库）
         self._append_steer_preview(text)
         self._scroll_to_bottom()
         self._input_edit.clear()
@@ -5305,18 +5291,15 @@ class ChatPanel(PanelBase):
         self._last_streaming_seq = 0
 
         # 启动 worker
-        self._worker = _ChatWorker(
+        self._worker = _RuntimeRunWorker(
             session_id=session_id,
             user_message=text,
-            db_path=self._db_path,
-            base_url=self._base_url,
             config={
                 "max_iterations": 50,
                 # B2（spec D2/D3）：删 max_budget_usd，本地无法准确算 cost（缓存比例不明）
             },
             model_override=self._current_model,
             context_window=self._context_window_for_model(self._current_model),
-            ask_callback=self._ask_bridge.ask,
             parent=self,
         )
         self._worker.finished_run.connect(self._on_worker_finished)
@@ -5327,7 +5310,9 @@ class ChatPanel(PanelBase):
         self._interrupt_btn.setEnabled(True)
         # T09: 切到运行态（3 tab 显示 + 默认「引导」）
         self._set_running_state(True)
+        self._session_status = "streaming"
         self._update_status("streaming", 0)
+        self._start_event_stream(session_id, force=True)
 
         self._worker.start()
         self._poll_timer.start()
@@ -5344,8 +5329,8 @@ class ChatPanel(PanelBase):
 
         sid = self._current_session_id
 
-        # T03: streaming 事件增量渲染（close 档跳过）
-        if self._typewriter_mode != "close":
+        # T03: streaming 事件增量渲染（close 档跳过；WS 在线时由事件流负责）
+        if self._typewriter_mode != "close" and not self._stream_connected:
             self._poll_streaming_events(sid)
 
         # 加载所有消息（visible=true，已过滤 synthetic）
@@ -5371,6 +5356,7 @@ class ChatPanel(PanelBase):
         session = self._safe_read(self._read_store.get_session(sid))
         if session is not None:
             status = session.status if hasattr(session, "status") else session.get("status", "")
+            self._session_status = status
             # chat-panel-v2 T10（D47）：刷新 title_label
             sess_title = (
                 getattr(session, "title", "")
@@ -5446,7 +5432,7 @@ class ChatPanel(PanelBase):
     # ------------------------------------------------------------------
 
     def _poll_streaming_events(self, sid: str) -> None:
-        """T07: 读 streaming 事件并增量渲染到 _message_timeline。"""
+        """T07: 读 streaming 事件并增量渲染到 _message_timeline（WS 断开时的回放路径）。"""
         if self._read_store is None:
             return
         streaming_events = self._safe_read(self._read_store.load_streaming_events(sid))
@@ -5459,27 +5445,112 @@ class ChatPanel(PanelBase):
             return
         new_events.sort(key=lambda e: e.seq)
 
-        # 处理每个新事件（timeline 自动创建/复用 streaming 块）
         for ev in new_events:
-            if ev.type == "streaming_text_delta":
-                delta = ev.payload.get("delta", "")
-                # 首个 delta 时创建 streaming assistant 块
-                if not self._message_timeline.has_streaming_assistant():
-                    streaming_block = self._message_timeline.start_streaming_assistant()
-                    # T11: 连接 Copy 信号（+2026-09-13 复制文本）
-                    if isinstance(streaming_block, _AssistantTextBlock):
-                        streaming_block.copy_requested.connect(self._on_block_copy_requested)
-                        streaming_block.copy_plain_requested.connect(
-                            self._on_block_copy_plain_requested
-                        )
-                self._message_timeline.append_text_delta(delta)
-            elif ev.type == "streaming_thinking_delta":
-                delta = ev.payload.get("delta", "")
-                # D38：thinking 始终作为独立块（不再依赖 _show_thinking 开关）
-                self._message_timeline.append_thinking_delta(delta)
-            self._last_streaming_seq = ev.seq
+            self._apply_streaming_event(ev.type, ev.payload, ev.seq)
 
         self._scroll_to_bottom()
+
+    def _apply_streaming_event(self, event_type: str, payload: dict, seq: int) -> None:
+        """把一条 streaming 增量落到时间线（WS 与轮询共用）。"""
+        if seq <= self._last_streaming_seq:
+            return
+        if event_type == "streaming_text_delta":
+            delta = payload.get("delta", "")
+            # 首个 delta 时创建 streaming assistant 块
+            if not self._message_timeline.has_streaming_assistant():
+                streaming_block = self._message_timeline.start_streaming_assistant()
+                # T11: 连接 Copy 信号（+2026-09-13 复制文本）
+                if isinstance(streaming_block, _AssistantTextBlock):
+                    streaming_block.copy_requested.connect(self._on_block_copy_requested)
+                    streaming_block.copy_plain_requested.connect(
+                        self._on_block_copy_plain_requested
+                    )
+            self._message_timeline.append_text_delta(delta)
+        elif event_type == "streaming_thinking_delta":
+            delta = payload.get("delta", "")
+            # D38：thinking 始终作为独立块（不再依赖 _show_thinking 开关）
+            self._message_timeline.append_thinking_delta(delta)
+        self._last_streaming_seq = seq
+
+    # ------------------------------------------------------------------
+    # runtime WS 下行（T7）
+    # ------------------------------------------------------------------
+
+    def _typewriter_interval(self) -> int:
+        return _TYPEWRITER_POLL_INTERVAL.get(self._typewriter_mode, 200)
+
+    def _start_event_stream(self, session_id: str | None, *, force: bool = False) -> None:
+        """跟随当前会话开一条 WS（切会话时重连，after_seq 从 0 回放）。
+
+        force=False 时先确认会话存在；测试/无 runtime 环境不会白起线程。
+        """
+        self._stop_event_stream()
+        if not session_id:
+            return
+        if not force:
+            if self._read_store is None:
+                return
+            if self._safe_read(self._read_store.get_session(session_id)) is None:
+                return
+        stream = _RuntimeEventStream(session_id, parent=self)
+        stream.event_received.connect(self._on_runtime_event)
+        stream.connection_changed.connect(self._on_stream_connection_changed)
+        self._event_stream = stream
+        stream.start()
+
+    def _stop_event_stream(self) -> None:
+        stream = self._event_stream
+        self._event_stream = None
+        self._stream_connected = False
+        if stream is None:
+            return
+        try:
+            stream.event_received.disconnect(self._on_runtime_event)
+            stream.connection_changed.disconnect(self._on_stream_connection_changed)
+        except (TypeError, RuntimeError):
+            pass
+        stream.stop()
+        stream.wait(2000)
+
+    def _on_stream_connection_changed(self, connected: bool) -> None:
+        """WS 在线时轮询降级到 1s；断开时回到打字机档位。"""
+        self._stream_connected = bool(connected)
+        if self._poll_timer.isActive():
+            self._poll_timer.setInterval(1000 if connected else self._typewriter_interval())
+
+    def _on_runtime_event(self, event: dict) -> None:
+        """主线程槽：WS 事件分发（streaming / ask_user / 其余触发一次状态刷新）。"""
+        if not isinstance(event, dict):
+            return
+        if event.get("invalidated_seq") is not None:
+            return
+        session_id = str(event.get("session_id") or "")
+        if self._current_session_id and session_id and session_id != self._current_session_id:
+            return
+        event_type = str(event.get("type") or "")
+        payload = event.get("payload") or {}
+        if event_type in ("streaming_text_delta", "streaming_thinking_delta"):
+            self._apply_streaming_event(event_type, payload, int(event.get("seq") or 0))
+        elif event_type == "ask_user_request":
+            # WS 回放会重放历史提问；只在会话仍在跑时给入口，避免出现已无人等的假卡片
+            if self._session_status in _ACTIVE_SESSION_STATUSES:
+                self._on_ask_user_request(payload)
+        elif event_type == "ask_user_resolved":
+            self._on_ask_user_expire(str(payload.get("rid") or ""))
+        else:
+            self._schedule_state_refresh()
+
+    def _schedule_state_refresh(self) -> None:
+        """合并短时间内的多条持久事件，只拉一次消息/状态。"""
+        if self._refresh_scheduled:
+            return
+        self._refresh_scheduled = True
+
+        def _run() -> None:
+            self._refresh_scheduled = False
+            self._poll_session_state()
+
+        QTimer.singleShot(60, _run)
 
     def _append_user_message_preview(self, text: str) -> None:
         """发送时立即在 UI 显示用户消息预览（不等 worker 写库）。"""
@@ -5588,7 +5659,7 @@ class ChatPanel(PanelBase):
         """T11 D32/D33：hover Delete 按钮 → 弹确认对话框 + 删除消息。
 
         D32：删除 user 消息时连带后续 tool_calls 和 tool_result 一起删。
-        实现简化：只删单条消息（用户确认后调 EventStore.delete_message_by_id）。
+        实现简化：只删单条消息（用户确认后调 runtime 删除消息接口）。
         整段删除（D32 完整范围）留待后续增强。
         """
         if not message_id or self._read_store is None:
@@ -5621,8 +5692,7 @@ class ChatPanel(PanelBase):
     def _clear_messages(self) -> None:
         """T07: 清空消息时间线（委托给 _message_timeline）。
 
-        先唤醒还在等的 ask_user 卡片：卡片随时间线一起被销毁，不唤醒就等于把 worker
-        线程挂在一个已经没人能点的请求上（永不超时时是永久卡死）。
+        先作废还在等的 ask_user 卡片：卡片随时间线一起被销毁，留着就是假入口。
         """
         self._cancel_pending_asks()
         self._message_timeline.clear()

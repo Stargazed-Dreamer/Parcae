@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import EventStore  # noqa: E402
+from lib.agent_runtime import EventStore  # noqa: E402
 
 # ============================================================================
 # Fixtures（沿用 test_v6_lite_t01.py 模式）
@@ -329,7 +329,7 @@ def test_create_session_without_mode_arg_still_works(store):
         assert session.title == "normal chat"
 
         # 验证可以正常 append_message（现有 chat 流程不破坏）
-        from client.core.agent import Message
+        from lib.agent_runtime import Message
         msg = await store.append_message(
             "chat-1", Message(role="user", content="hello", source="user")
         )

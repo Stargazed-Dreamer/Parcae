@@ -1,7 +1,9 @@
 # 上下文压缩判据以「上一次调用的真实 prompt_tokens」为锚点；模型上限未知时不判压缩
 
 状态：accepted（2026-10-07，代码在 `client/core/agent/compactor.py`、
-`client/core/agent/event_store.py`、`client/core/agent/runner.py`、`server/llm_pool/`）
+`client/core/agent/event_store.py`、`client/core/agent/runner.py`、`server/llm_pool/`）。
+2026-10-22 迁移注记：循环代码已迁至 `lib/agent_runtime/`（[ADR 0048](0048-butler-runtime-single-writer-projection-ledger.md)），
+决策内容不变。
 
 ## Context
 

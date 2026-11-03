@@ -57,7 +57,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "skill_file": ".agents/skills/daily/life_design/SKILL.md",
         "keywords": [
             "人生设计", "斯坦福人生设计课", "人生蓝图", "奥德赛计划", "重启人生",
-            "人生规划", "life design", "设计我的人生", "人生设计师", "重力问题",
+            "人生规划", "人生方向", "life design", "设计我的人生", "人生设计师", "重力问题",
         ],
         "description": "斯坦福人生设计课方法论：agent 读 prompt 与用户多轮深度对话，产出《个人人生设计蓝图》（8000-12000字）",
         "memory_key": "life_design",
@@ -374,11 +374,11 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "skill": "ocr",
         "name": "OCR识别",
         "skill_file": ".agents/skills/ocr.md",
-        "keywords": ["识别图片", "OCR", "读取图片", "识别文字"],
+        "keywords": ["识别图片", "OCR", "读取图片", "识别文字", "图片里的文字"],
         "description": "本地 PaddleOCR 文字识别/可靠 bbox 定位 + 远程 VL 文档描述",
         "memory_key": None,
         "first_action": "已有图片用 ocr_file/ocr_path；屏幕文字定位用 screen_ocr(window, engine=ocr)，VL 默认只做描述",
-        "mcp_tools_priority": ["ocr_file", "ocr_path", "localagent_advanced_tool(screen_ocr)"],
+        "mcp_tools_priority": ["ocr_file", "ocr_path", "parcae_advanced_tool(screen_ocr)"],
         "key_pitfalls": [
             "截图 OCR 已关闭 UVDoc，bbox 可定位；禁止恢复旧 kx/ky 仿射参数",
             "浏览器优先 DOM locator；桌面文字用 OCR bbox；纯图标才用 vision_locate",
@@ -392,17 +392,18 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "skill": "task_reminder",
         "name": "任务提醒",
         "skill_file": ".agents/skills/task_reminder.md",
-        "keywords": ["有什么任务", "该做什么", "提醒我", "任务清单", "待办清单", "今天做啥", "这周做啥", "有什么没做", "任务提醒",
+        "keywords": ["有什么任务", "该做什么", "该做的事", "提醒我", "任务清单", "待办清单", "今天做啥", "这周做啥", "有什么没做", "任务提醒",
                      # 机会型跑批（用户 2026-09-20 明确的口径：没有推送，只能被问时现场核对）
                      "额度很多", "额度有余", "额度多余", "额外额度", "空闲额度", "长期自动化", "顺便跑", "能跑什么"],
         "description": "检查周期任务到期+WIP待办汇总；用户表示额度有余/想跑长期自动化时按周期台账自查可跑项",
         "memory_key": None,
-        "first_action": "调用 todos_due 获取到期任务；调用 wip_list 获取 WIP 摘要（默认已轻量，无需传参；已完结条目只给 id/截断标题/状态+closed=true）。需要详情时单条用 wip_get(task_id='wip_xxx')、多条用 wip_get_many(ids=[...])（均为直连 MCP 工具，免审批），禁止用 exec_python 发 HTTP 调本地 API\n\n用户说\"额度很多/想跑长期自动化/有什么可以顺便跑的\"时：读 docs/periodic-task-inventory.md 的「空闲额度自查流程」台账，逐项实测每项的上次活动信号（文件 mtime / GET /loop/tasks 的 last_run_at / GET /inbox）与阈值比较，一次性报告超期项并等用户点单，禁止不核对就断言都新鲜、禁止未点单就开跑",
+        "first_action": "调用 todos_due 获取到期任务；调用 wip_list 获取 WIP 摘要（默认已轻量，无需传参；已完结条目只给 id/截断标题/状态+closed=true）。需要详情时单条用 wip_get(task_id='wip_xxx')、多条用 wip_get_many(ids=[...])（均经 parcae_advanced_tool 调用，免审批；2026-10-27 起不再常驻直连），禁止用 exec_python 发 HTTP 调本地 API\n\n用户说\"额度很多/想跑长期自动化/有什么可以顺便跑的\"时：读 docs/periodic-task-inventory.md 的「空闲额度自查流程」台账，逐项实测每项的上次活动信号（文件 mtime / GET /loop/tasks 的 last_run_at / GET /inbox）与阈值比较，一次性报告超期项并等用户点单，禁止不核对就断言都新鲜、禁止未点单就开跑",
         "workflow_summary": "1.todos_due 取到期任务 2.wip_list 取WIP（默认轻量） 3.汇总报告 4.完成后 todos_mark_done",
         "mcp_tools_priority": [
-            "todos_due",
-            "wip_list",
-            "wip_get / wip_get_many (直连，单条/批量查详情)",
+            "parcae_advanced_tool(tool='todos_due', params={})",
+            "parcae_advanced_tool(tool='wip_list', params={})",
+            "parcae_advanced_tool(tool='wip_get'/'wip_get_many', params={'task_id': ...} / {'ids': [...]}) (单条/批量查详情)",
+            "parcae_advanced_tool(tool='tasks_action', params={'scope': 'todos', 'task_id': ..., 'action': 'pause|resume|archive|unarchive|complete'}) (统一任务动作；T14)",
             "todos_mark_done",
             "todos_check_trigger (triggered 类型手动检查触发条件)",
             "exec_python (from datetime import date; print(date.today()))",
@@ -423,17 +424,18 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "keywords": ["留档", "存档", "标记未完成", "WIP", "断头工作", "继续之前的工作", "有哪些未完成", "工作进度"],
         "description": "中断任务留档+恢复",
         "memory_key": None,
-        "first_action": "调用 wip_list 获取所有 WIP 任务（默认即轻量模式：已完结条目压成 id/截断标题/状态+closed=true）。需要详情用 wip_get(task_id='wip_xxx') 单条或 wip_get_many(ids=[...]) 批量（直连 MCP 工具，免审批），禁止用 exec_python 发 HTTP；也不要为看详情把 summary 关掉整表拉取（体积约为轻量模式一个数量级以上）",
+        "first_action": "调用 wip_list 获取所有 WIP 任务（默认即轻量模式：已完结条目压成 id/截断标题/状态+closed=true）。需要详情用 wip_get(task_id='wip_xxx') 单条或 wip_get_many(ids=[...]) 批量（经 parcae_advanced_tool 调用，免审批；2026-10-27 起不再常驻直连），禁止用 exec_python 发 HTTP；也不要为看详情把 summary 关掉整表拉取（体积约为轻量模式一个数量级以上）",
         "workflow_summary": "留档：wip_create 创建 | 查询：wip_list（默认轻量） | 恢复：wip_get 单条 / wip_get_many 批量读详情 | 更新：wip_update",
         "mcp_tools_priority": [
-            "wip_list",
-            "wip_get / wip_get_many (直连，单条/批量查详情)",
-            "localagent_advanced_tool(wip_create/wip_update/wip_delete)",
+            "parcae_advanced_tool(tool='wip_list', params={})",
+            "parcae_advanced_tool(tool='wip_get'/'wip_get_many', params={'task_id': ...} / {'ids': [...]}) (单条/批量查详情)",
+            "parcae_advanced_tool(tool='tasks_action', params={'scope': 'wip', 'task_id': ..., 'action': 'pause|resume|archive|unarchive|complete'}) (统一任务动作；T14)",
+            "parcae_advanced_tool(wip_create/wip_update/wip_delete)",
         ],
         "key_pitfalls": [
             "留档：JSON 字段用结构化格式（next_steps 数组、current_state 对象）",
             "去重：用户重复提需求时先 wip_list 搜索识别已有探索；默认轻量模式下已完结条目标题被截断（closed=true），按完整标题匹配前先用 wip_get_many 取回全文",
-            "状态：active/blocked/paused/completed",
+            "状态：active/blocked/paused/completed；暂停/归档统一走 tasks_action（scope='wip'），不要再用 wip_update 改 status",
         ],
         "level": "standard",
     },
@@ -458,7 +460,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "skill": "task_closure",
         "name": "任务收尾",
         "skill_file": ".agents/skills/task_closure.md",
-        "keywords": ["收尾", "任务结束", "做完了", "总结一下", "这个任务完成了", "收尾guide", "task closure", "结束了"],
+        "keywords": ["收尾", "任务结束", "结束任务", "做完了", "总结一下", "这个任务完成了", "收尾guide", "task closure", "结束了"],
         "description": "任务结束时的统一收尾入口（WIP+经验+文档自查+报告）",
         "memory_key": None,
         "first_action": "按 task_closure_workflow 逐步执行：1.评估任务状态(含当前任务授权主动收回) 2.WIP处理 3.经验提炼(含可消费性自检) 4.查重写入 5.文档自查 6.收尾报告",
@@ -498,6 +500,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "step_2_wip": {
                 "name": "WIP 处理",
                 "instruction": (
+                    "（wip_* 读写均经 parcae_advanced_tool 调用；2026-10-27 起不再常驻直连）\n"
                     "任务完成：wip_list 检查对应 WIP（默认轻量模式，已完结条目标题被截断，按标题匹配不到时用 status 过滤或 wip_get_many 取回全文）→ 有则 wip_update(status=completed, progress=100) → 无则跳过\n"
                     "任务中断：wip_list 检查 → 有则 wip_update(progress/next_steps/current_state) → 无则 wip_create\n"
                     "需要多条详情时用 wip_get_many(ids=[...]) 一次取回，不要用 summary=false 整表拉取\n"
@@ -588,7 +591,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "skill": "temp_cleanup",
         "name": "temp文件夹清理",
         "skill_file": ".agents/skills/temp_cleanup.md",
-        "keywords": ["整理temp", "清理temp", "temp清理", "临时文件整理", "temp太乱", "清理临时文件", "temp cleanup", "temp整理"],
+        "keywords": ["整理temp", "清理temp", "temp清理", "临时文件整理", "temp太乱", "清理临时文件", "temp cleanup", "temp整理", "temp 文件夹", "temp/"],
         "description": "temp目录定期清理工作流（按性质三问判定→静态清单→用户确认→回收站删除→移动→wip处理）",
         "memory_key": "temp_cleanup",
         "first_action": "读取 .agents/skills/temp_cleanup.md 获取三问决策树和四条交叉校验；扫描 temp/ 顶层，每个拟删文件先实际读 ≥30 行再判定，按性质而非按目录名查表",
@@ -658,8 +661,8 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "keywords": ["写HTML页面", "创建工具页面", "HTML调试", "可视化页面", "Dashboard", "前端页面"],
         "description": "浏览器+截图+OCR闭环验证",
         "memory_key": None,
-        "first_action": "确认输出位置（如 workspace/ 或 temp/）；编写/修改 HTML 代码；多步浏览器操作先 browser_session_create 复用热态 session（自动注入站点经验）",
-        "workflow_summary": "1.写代码 2.browser_session_create 复用热态（P2-1 自动注入 site_lessons） 3.browser_navigate(goto) 打开文件 4.browser_snapshot 看结构 5.browser_action 操作元素 6.popup/filechooser/dialog 场景优先 browser_wait_and_action（原子 wait+trigger） 7.browser_evaluate 读 DOM 状态 8.browser_console_logs 抓 JS 报错 9.browser_screenshot 10.OCR 11.分析问题 12.修改→重新验证 13.browser_session_close 收尾（关闭 tab 释放资源，避免 Chrome tab 累积）",
+        "first_action": "确认输出位置（如 workspace/ 或 temp/）；编写/修改 HTML 代码；多步浏览器操作先 browser_list_tabs 看有没有已开的页面可复用，再用 browser_session_create 接管（同域 30s 只允许一次 reload/goto，别靠刷新重开）",
+        "workflow_summary": "1.写代码 2.browser_session_create 复用热态（有已开页面用 url_pattern 接管；P2-1 自动注入 site_lessons） 3.browser_navigate(goto) 首次打开文件 4.browser_snapshot 看结构 5.browser_action 操作元素 6.popup/filechooser/dialog 场景优先 browser_wait_and_action（原子 wait+trigger） 7.browser_evaluate 读 DOM 状态 8.browser_console_logs 抓 JS 报错 9.browser_screenshot 10.OCR 11.分析问题 12.修改→reload 一次验证（本地 file: 豁免同域节流，但仍别连刷） 13.任务确认结束后才 browser_session_close 收尾；中途别关（租约自动回收，关掉重开 = 再付一次冷启动）",
         "mcp_tools_priority": [
             "browser_session_create (多步操作首步，热态 <250ms，自动注入站点经验)",
             "browser_navigate (goto/back/forward/reload，已有 session 时导航到新文件)",
@@ -672,7 +675,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "browser_selector_stats (查已知稳定 selector 规避失败选择器)",
             "browser_find_url (找历史访问的内部页面，auto_open=true 一键开 session)",
             "browser_match_site (显式查站点经验库)",
-            "browser_session_close (收尾必步：关闭 tab 释放资源，避免 Chrome tab 累积)",
+            "browser_session_close (任务真结束后才收尾；中途别关——idle 租约自动回收，关掉重开 = 冷启动 + 再吃一次同域导航节流)",
             "capture_screen / ocr_path (兜底)",
         ],
         "key_pitfalls": [
@@ -701,9 +704,10 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "name": "Guarded Computer Use",
         "skill_file": ".agents/skills/computer_use/SKILL.md",
         # 移除"翻页"（太泛，与 browser_automation 冲突）
-        "keywords": ["操作电脑", "屏幕操作", "点击", "截图", "帮我操作", "自动操作"],
+        "keywords": ["操作电脑", "屏幕操作", "点击", "截图", "截个图", "帮我操作", "自动操作"],
         "description": "UIA 语义层（P0-1 CoInitialize + P1-4 硬编码 ControlType） + OCR/DOM 优先定位 + 图像描述兜底 + 键鼠操控（P0 焦点安全 + P0-2 Unicode 代理对 + P0-3 状态语义 + P0-4 format=path + P1-1 dry_run + P1-2 canonical_window 刷新 + P1-3 hwnd 统一 + P1-A OCR 可观测性 + P1-B 窗口生命周期 + P2-1 desktop_transaction）",
         "memory_key": None,
+        "related_memory_keys": ["parcae_focus_leak_safety"],
         "first_action": "在第一次副作用 Computer Use 操作前先调 screen_request_control(task_description=具体任务, source='agent')，用户在确认窗点「允许接管」即按你请求的 mode 开启当前任务授权（点拒绝则状态不变；界面已无「只允许本次」的勾选项）；获准后再用 screen_app_list/screen_window_resolve 拿 window_token→focus_window→capture_screen→按 UIA > 浏览器 DOM > OCR bbox > vision_locate 定位→危险操作先 dry_run 且始终逐次确认→多步原子操作用 screen_desktop_transaction→任务结束调 screen_release_control。三档权限模式：NO_PERMISSION(无授权)→NORMAL(普通执行,10min 告警+20min 降级)→WATCHDOG(看门狗,默认10h到期降级到 NORMAL,不因空闲撤销)",
         "workflow_summary": "1.screen_request_control 请求用户介导的当前任务授权（normal/watchdog 由 agent 在请求时指定，用户只能允许/拒绝不能改模式） 2.screen_app_list/window_resolve 拿 window_token 3.focus_window 激活目标 4.capture_screen 拿 snapshot_id 5.定位按 UIA > browser DOM > OCR bbox > vision_locate 6.语义动作用 screen_semantic_action 7.坐标动作用 execute_action/batch_actions 8.检查 transport/delivery/postcondition 9.危险操作 dry_run 后仍逐次确认 10.多步原子操作用 screen_desktop_transaction 11.WINDOW_TOKEN_INVALID 后重新 resolve 12.任务结束 screen_release_control；NORMAL 模式 10min 无操作进告警(黄色),30min 自动降级到 NO_PERMISSION；WATCHDOG 模式默认 10h 到期降级到 NORMAL(不直接释放)",
         "mcp_tools_priority": [
@@ -714,7 +718,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "capture_screen (拿 snapshot_id 绑定坐标)",
             "screen_accessibility_snapshot (P0-5 UIA 语义层 + P0-1 CoInitialize + P1-4 硬编码 ControlType，优先于 OCR/视觉)",
             "screen_semantic_action (P0-5 invoke/select/toggle/set_value/expand/collapse/scroll)",
-            "localagent_advanced_tool(screen_ocr) / ocr_path (P1-A 可观测：/ocr/status 看 cold_start)",
+            "parcae_advanced_tool(screen_ocr) / ocr_path (P1-A 可观测：/ocr/status 看 cold_start)",
             "browser_action(action=click, target={css/text/...}) (浏览器 DOM 优先)",
             "understand_image / vision_locate (按需兜底)",
             "execute_action / batch_actions (传 snapshot_id+expected+dry_run，P0-2 Unicode 代理对 + P0-3 状态语义 + P1-1 dry_run)",
@@ -789,8 +793,8 @@ GUIDE_REGISTRY: dict[str, dict] = {
         ],
         "description": "通用浏览器编排：snapshot→action→wait_for 闭环，支持任意网站的自动化操作",
         "memory_key": None,
-        "first_action": "确认目标 URL 和操作意图；browser_session_create(url=...) 创建持久 session（自动注入站点经验）；browser_snapshot 看页面结构；browser_action 操作元素",
-        "workflow_summary": "1.browser_session_create(url) 创建热态 session（自动注入站点经验） 2.browser_snapshot(session_id, interesting_only=true) 获取 ARIA tree 3.从 nodes 中找目标元素的 node_id 或 role+name 4.browser_action(session_id, target, action) 执行 click/fill/press/select 5.browser_wait_for(session_id, condition) 等待结果 6.验证：再 snapshot 确认状态变化 7.循环 2-6 直到目标达成 8.popup/filechooser/dialog 用 browser_wait_and_action 原子操作 9.browser_session_close 收尾（关闭 tab 释放资源，避免 Chrome tab 累积）",
+        "first_action": "确认目标 URL 和操作意图；browser_list_tabs 看该站是否已开着 tab——开着就 browser_session_create(url_pattern=...) 接管，没开才 url=... 新建（同域 30s 只允许一次 reload/goto）；browser_snapshot 看页面结构；browser_action 操作元素",
+        "workflow_summary": "1.browser_session_create：优先 url_pattern 接管已有 tab，没有才 url 新建（自动注入站点经验） 2.browser_snapshot(session_id, interesting_only=true) 获取 ARIA tree 3.从 nodes 中找目标元素的 node_id 或 role+name 4.browser_action(session_id, target, action) 执行 click/fill/press/select 5.browser_wait_for(session_id, condition) 等待结果 6.验证：再 snapshot 确认状态变化 7.循环 2-6 直到目标达成 8.popup/filechooser/dialog 用 browser_wait_and_action 原子操作 9.任务确认结束后才 browser_session_close 收尾；中途别关（idle 租约自动回收；关掉重开 = 多一次冷启动 + 再吃一次同域导航节流）",
         "mcp_tools_priority": [
             "browser_session_create (首步，热态 <250ms；自动注入 site_lessons)",
             "browser_snapshot (ARIA tree 定位元素，获取 node_id)",
@@ -802,7 +806,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "browser_screenshot (视口/全页/元素)",
             "browser_console_logs (抓 JS 报错)",
             "browser_match_site (查站点经验库)",
-            "browser_session_close (收尾必步：关闭 tab 释放资源，避免 Chrome tab 累积)",
+            "browser_session_close (任务真结束后才收尾；中途别关——idle 租约自动回收，关掉重开 = 冷启动 + 再吃一次同域导航节流)",
             "capture_screen / ocr_path (兜底)",
         ],
         "key_pitfalls": [
@@ -814,7 +818,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "dialog 被 Playwright 自动 dismiss，wait_for(dialog) 仅作意图声明",
             "console_logs 增量：传 since_cursor=上次 next_cursor 避免重复读",
             "session 失效时回退到无 session 模式（url_pattern 子进程）",
-            "任务完成后必须调 browser_session_close 关闭 tab（close_page=true 默认），否则 Chrome tab 累积导致资源泄漏；idle 900s 超时只是兜底",
+            "任务**确认结束**后才调 browser_session_close 关闭 tab（close_page=true 默认）；中途歇一下别关——900s idle 租约只是兜底回收，主动关掉再开要重付冷启动并再吃一次同域导航节流；另有 30s/域 的 reload/goto 频率上限（超频 NAV_RATE_LIMITED，别靠刷新解决问题）",
         ],
         "level": "standard",
     },
@@ -831,8 +835,8 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "first_action": "确认关机触发条件（游戏完成 / 时间到 / 文件出现 / 自定义脚本）；agent 自己写检测 loop（time.sleep + 检测），条件满足时调 POST /auto_shutdown/trigger（task_id/reason/screenshot）；用户喊取消时调 /auto_shutdown/cancel。**调 trigger 前先关闭有窗口的程序（尤其模拟器/全屏应用），否则关机会被阻碍**",
         "workflow_summary": "1.确认触发条件 + task_id 2.agent 写检测 loop（sleep + 检测函数）3.条件满足 → 调 POST /auto_shutdown/trigger（端点内部自动截屏 + 推 inbox + 调 shutdown /s /t 120）4.120s 内用户反悔 → 调 POST /auto_shutdown/cancel（端点调 shutdown /a）5.关机完成 / 用户中止",
         "mcp_tools_priority": [
-            "localagent_advanced_tool(tool='auto_shutdown_trigger', params={task_id, reason, screenshot, dry_run})",
-            "localagent_advanced_tool(tool='auto_shutdown_cancel', params={dry_run})",
+            "parcae_advanced_tool(tool='auto_shutdown_trigger', params={task_id, reason, screenshot, dry_run})",
+            "parcae_advanced_tool(tool='auto_shutdown_cancel', params={dry_run})",
             "inbox_list (查关机通知历史)",
             "capture_screen / screen_ocr (检测条件时用，agent 自行决定)",
             "exec_python (跑检测脚本，agent 自行编写)",
@@ -888,7 +892,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "Read (config.toml [loops.headless_session] 段)",
             "Edit (config.toml 修改触发条件/资源限制)",
             "Read (config.example.toml 模板参考)",
-            "localagent_advanced_tool(tool='loop_list_tasks') (查后端 loop 任务状态)",
+            "parcae_advanced_tool(tool='loop_list_tasks') (查后端 loop 任务状态)",
             "exec_python (调 server.activity_tracker.headless_runner.run_main_agent 验证配置生效)",
         ],
         "key_pitfalls": [
@@ -916,7 +920,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "name": "PySide6客户端开发",
         "skill_file": ".agents/skills/client_dev.md",
         # 移除重复的"客户端开发"（与"开发客户端"语义重复）
-        "keywords": ["开发客户端", "GUI开发", "新增面板", "面板卡顿", "PySide6", "客户端性能", "面板开发", "widget优化"],
+        "keywords": ["开发客户端", "GUI开发", "新增面板", "客户端新增", "面板卡顿", "PySide6", "客户端性能", "面板开发", "widget优化"],
         "description": "PySide6面板开发+性能规范+异步加载模式",
         "memory_key": None,
         "first_action": "读取 .agents/skills/client_dev.md 获取面板架构和性能规范",
@@ -999,7 +1003,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         # 详见 docs/agent-guide-keywords.md 原则 2。
         "keywords": [
             "Commander's Intent", "Harness", "目标七问", "五种死法",
-            "leader 心法", "目标任务书结构", "leader",
+            "leader 心法", "目标任务书", "目标任务书结构", "leader",
         ],
         "description": "目标工程方法论源：Commander's Intent + 目标七问 + Harness 五种死法",
         "memory_key": None,
@@ -1023,7 +1027,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "keywords": [
             "开发网站", "开发游戏", "写后端", "做 App", "跨工作区开发", "无关开发", "新项目开发",
             "开发一个", "做个独立项目", "生活任务", "临时任务", "工作区决策", "其他工作",
-            "临时脚本", "生活记账", "排个班", "健身记录",
+            "临时脚本", "生活记账", "排个班", "健身记录", "哪个工作区",
         ],
         "description": "工作区决策树：非本项目维护的请求按决策树选工作区位置（新项目文件夹/temp/workspace），建立后询问是否协助打开，完成时明确工作区位置",
         "memory_key": None,
@@ -1115,7 +1119,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "skill": "to-spec",
         "name": "写 Spec",
         "skill_file": ".agents/skills/dev/to-spec/SKILL.md",
-        "keywords": ["写 spec", "整理 spec", "出 PRD", "把讨论记下来", "to-spec", "规格说明"],
+        "keywords": ["写 spec", "整理 spec", "出 PRD", "PRD", "把讨论记下来", "to-spec", "规格说明"],
         "description": "把当前对话综合成 spec 并存档（不做访谈）",
         "memory_key": None,
         "first_action": "读取 .agents/skills/dev/to-spec/SKILL.md 获取 spec 模板和存档流程",
@@ -1142,6 +1146,27 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "tracer-bullet 是端到端垂直切片，有阻塞边",
             "ticket 存 workspace/tickets/<feature-slug>/<NN>-<slug>.md",
             "用 extra_data.blocked_by 表达阻塞关系",
+        ],
+        "level": "standard",
+    },
+    # ────────────── dev.handoff（会话交接：换会话前把状态压成可接手稿）──────────────
+    "dev.handoff": {
+        "skill": "handoff",
+        "name": "会话交接",
+        "skill_file": ".agents/skills/dev/handoff/SKILL.md",
+        "keywords": ["写交接", "交接稿", "写交接文档", "接手文档", "换会话", "我换对话", "换个对话", "上下文要满了", "留给下一个会话", "hand off", "handoff", "交接出去", "交接给下一个"],
+        "description": "把当前会话压成交接稿，让没有这段记忆的新会话直接接手",
+        "memory_key": None,
+        "first_action": "读取 .agents/skills/dev/handoff/SKILL.md：写入侧产 temp/handoff/HANDOFF_<日期>_<主题>.md（7 段骨架）；接手侧先 ls -t temp/handoff/*.md 找状态为「待接手」的那份",
+        "workflow_summary": "1.够格判定(实质交流<3轮/活已完则不写) 2.取证据(git status/git log/失败日志) 3.按 7 段骨架填 4.零上下文自检 5.接手侧逐条核对证据并改状态为已接手",
+        "mcp_tools_priority": ["Read / Write", "exec_cmd (git status / git log / ls -t temp/handoff)"],
+        "key_pitfalls": [
+            "落盘 temp/handoff/，不写 .agents/memory/（那里入库，一次性稿会污染 commit）",
+            "不注册 wip_tasks：删文件后 DB 会留悬挂记录；任务是否未完成由 wip_tracker 管",
+            "第 2 段每条「已完成」必须带验证方式（命令+结果/commit/文件:行），否则等于没做",
+            "禁止写「上面」「刚才」「按照前述方案」——新会话没有上面",
+            "一个任务只保一份稿：写新稿时删旧稿；任务完成整份删",
+            "「跨机交接」是 cross-machine-delivery-bundle 的触发词，本 skill 只接「换会话」",
         ],
         "level": "standard",
     },
@@ -1238,7 +1263,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "skill": "grill-me",
         "name": "拷问我的计划",
         "skill_file": ".agents/skills/dev/grill-me/SKILL.md",
-        "keywords": ["grill me", "grill-me", "拷问我", "压力测试计划", "找漏洞", "追问计划", "打磨计划"],
+        "keywords": ["grill me", "grill-me", "拷问我", "压力测试计划", "找漏洞", "方案的漏洞", "追问计划", "打磨计划"],
         "description": "对计划或设计进行持续追问式访谈，压力测试其稳健性",
         "memory_key": None,
         "first_action": "读取 .agents/skills/dev/grill-me/SKILL.md；本 skill 是 dev.grilling 的入口",
@@ -1275,7 +1300,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "skill": "grill-with-docs",
         "name": "边拷问边沉淀文档",
         "skill_file": ".agents/skills/dev/grill-with-docs/SKILL.md",
-        "keywords": ["grill-with-docs", "grill with docs", "边追问边记录", "边拷问边出 ADR", "边打磨边沉淀文档"],
+        "keywords": ["grill-with-docs", "grill with docs", "边追问边记录", "边拷问边出 ADR", "沉淀 ADR", "边打磨边沉淀文档"],
         "description": "对计划或设计进行持续追问式访谈，并在过程中沉淀 ADR 和项目词汇表",
         "memory_key": None,
         "first_action": "读取 .agents/skills/dev/grill-with-docs/SKILL.md；本 skill 路由到 dev.grilling + dev.domain_modeling",
@@ -1299,7 +1324,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "workflow_summary": "1.Setup 跳过 context.mjs，agent 直接读项目根 PRODUCT.md/DESIGN.md 2.按命令规范执行 craft/audit/polish 等 3.对照 absolute bans 自检（side-stripe borders / gradient text / glassmorphism / identical card grids 等）4.mobile 必检 320/375/414/768 px 4 档",
         "mcp_tools_priority": [
             "Read（读 upstream/SKILL.md + reference/<cmd>.md + register.md）",
-            "localagent_agent_chat 或 localagent_advanced_tool(llm_pool_call)（生成设计代码 / 文档）",
+            "parcae_agent_chat 或 parcae_advanced_tool(llm_pool_call)（生成设计代码 / 文档）",
             "browser_navigate + browser_snapshot + browser_take_screenshot（audit 验证现有页面 / live 模式实时迭代）",
             "Write（产出设计代码 / 规范文档）",
         ],
@@ -1326,7 +1351,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "workflow_summary": "1.选动词（build/audit/redesign/study）2.选主题（20 catalog 或 custom 分支，按 diversification rule 不重复）3.产出设计代码 4.对照 6 大 disciplines 自检（pre-emit critique / honest copy / locked tokens / no re-drawn chrome / mobile 4 档 / no italic headers）5.可选 emit design.md（study 命令）",
         "mcp_tools_priority": [
             "Read（读 upstream/SKILL.md + references/<topic>.md）",
-            "localagent_agent_chat 或 localagent_advanced_tool(llm_pool_call)（生成设计代码 / DNA 提取 / audit 报告）",
+            "parcae_agent_chat 或 parcae_advanced_tool(llm_pool_call)（生成设计代码 / DNA 提取 / audit 报告）",
             "browser_navigate + browser_snapshot + browser_take_screenshot（audit 验证现有页面）",
             "WebFetch（study URL mode 读 HTML/CSS）",
             "Write（产出设计代码 / design.md / audit punch list）",
@@ -1399,9 +1424,9 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "mcp_tools_priority": [
             "Task sub-agent（阶段 1 并行提取、阶段 4 盲测）",
             "Read / Write（读写工作目录文件）",
-            "localagent_agent_chat 或 localagent_advanced_tool(llm_pool_call)（各阶段生成内容）",
-            "localagent_memory_*（阶段 5 路由到 memory 时）",
-            "localagent_wip_create（阶段 5 路由到 wip 时）",
+            "parcae_agent_chat 或 parcae_advanced_tool(llm_pool_call)（各阶段生成内容）",
+            "memory_list / memory_get / memory_set（阶段 5 路由到 memory 时）",
+            "parcae_advanced_tool(wip_create)（阶段 5 路由到 wip 时）",
         ],
         "key_pitfalls": [
             "工作目录是 workspace/cangjie/<slug>/，不是原版的 books/<slug>/",
@@ -1465,7 +1490,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "skill": "dual_layer_explanation",
         "name": "双层解释法",
         "skill_file": ".agents/skills/daily/dual_layer_explanation/SKILL.md",
-        "keywords": ["双层解释", "双层解释法", "小白专家两版解释", "学一个概念", "听不懂的概念", "用两层解释帮我学", "dual layer explanation"],
+        "keywords": ["双层解释", "双层解释法", "小白专家两版解释", "小白解释", "学一个概念", "听不懂的概念", "用两层解释帮我学", "dual layer explanation"],
         "description": "学陌生概念时分别从小白和专家两个角度解释一遍，避免'好像懂了'的错觉。小白版用生活化语言+具体例子，专家版用准确术语讲清机制/边界/误解",
         "memory_key": None,
         "first_action": "读取 .agents/skills/daily/dual_layer_explanation/prompt.md；用 AskUserQuestion 问用户想学什么概念；按 Prompt 执行两层解释+3 项整理(对应关系/易错点/3 个检查问题)",
@@ -1501,7 +1526,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "skill": "fact_checking",
         "name": "事实核查",
         "skill_file": ".agents/skills/daily/fact_checking/SKILL.md",
-        "keywords": ["事实核查", "核查说法", "验证观点", "检查推理链", "这个说法对吗", "可信度评估", "fact checking", "笛卡尔怀疑"],
+        "keywords": ["事实核查", "核查说法", "验证观点", "检查推理链", "这个说法对吗", "是否可信", "可信度评估", "fact checking", "笛卡尔怀疑"],
         "description": "对任何说法(观点/结论/数据/方案)做笛卡尔式怀疑。先拆成事实/结论/价值判断三层，对事实部分联网核查并标记 5 档可信度，再检查推理链 5 项漏洞，最后给补强版本",
         "memory_key": None,
         "first_action": "读取 .agents/skills/daily/fact_checking/prompt.md；用 AskUserQuestion 问用户要核查什么；按 Prompt 拆三层(事实/结论/价值判断)→联网核查(WebSearch/WebFetch)标 5 档→检查推理链 5 项→输出 4 项(可信事实/关键漏洞/补强版本/可相信程度)",
@@ -1557,7 +1582,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "skill": "cross_domain_borrowing",
         "name": "跨领域借解",
         "skill_file": ".agents/skills/daily/cross_domain_borrowing/SKILL.md",
-        "keywords": ["跨领域借解", "跨领域类比", "其他行业怎么解决", "跨领域借鉴", "cross domain", "跨界借解", "底层结构相似"],
+        "keywords": ["跨领域借解", "跨领域类比", "其他行业怎么解决", "跨领域借鉴", "跨界类比", "cross domain", "跨界借解", "底层结构相似"],
         "description": "把问题剥掉行业术语抽象成底层结构，从历史案例和至少 3 个距离较远的领域寻找底层结构相似的解法，翻译成适合当前处境的解决方案+推荐低成本可逆实验",
         "memory_key": None,
         "first_action": "读取 .agents/skills/daily/cross_domain_borrowing/prompt.md；用 AskUserQuestion 问用户背景+当前做法+现实约束+具体卡点；按 Prompt 剥行业术语→找 3 项(底层结构/核心矛盾/普通解法失效原因)→从历史案例+至少 3 个距离较远领域找相似问题→每案例说明 5 项→选 3 种机制翻译成方案+推荐低成本可逆实验",
@@ -1664,7 +1689,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "memory_list (查看现有记忆)",
             "memory_get (查重)",
             "memory_set (写入结构化记忆)",
-            "localagent_advanced_tool(memory_maintain) (可选触发维护)",
+            "parcae_advanced_tool(memory_maintain) (可选触发维护)",
         ],
         "key_pitfalls": [
             "不存储可 grep 的内容（代码结构、git 历史、已修复的 bug）",
@@ -1728,7 +1753,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
                 "name": "可选触发维护",
                 "instruction": (
                     "如果写入了 3 条以上新记忆，可调用 "
-                    "localagent_advanced_tool(memory_maintain, {force: true}) 触发一次维护，"
+                    "parcae_advanced_tool(memory_maintain, {force: true}) 触发一次维护，"
                     "让维护器验证新写入的记忆。\n"
                     "这不是必须的——维护器会在下次到期时自动运行。"
                 ),
@@ -1763,10 +1788,10 @@ GUIDE_REGISTRY: dict[str, dict] = {
         "first_action": "按 wip_archive_workflow 逐步执行：1.wip_list(status='completed') 取已完结清单（默认轻量，标题被截断，仅用于挑 id） 2.wip_get_many(ids=[...]) 批量取回全文提炼经验+填 consumption_contexts/trigger_keywords 3.生成清单→用户审核→memory_set 写入 4.wip_delete 物理删除",
         "workflow_summary": "1.筛选 completed 2.提炼经验+可消费性自检 3.用户审核+写入 4.物理删除",
         "mcp_tools_priority": [
-            "wip_list(status='completed') (step_1 取清单，直连免审批)",
-            "wip_get_many (step_2 批量取回全文，直连免审批)",
+            "parcae_advanced_tool(tool='wip_list', params={'status': 'completed'}) (step_1 取清单，免审批)",
+            "parcae_advanced_tool(tool='wip_get_many', params={'ids': [...]}) (step_2 批量取回全文，免审批)",
             "memory_set (step_3 写入结构化记忆)",
-            "localagent_advanced_tool(wip_delete) (step_4 物理删除，网关 DELETE)",
+            "parcae_advanced_tool(wip_delete) (step_4 物理删除，网关 DELETE)",
         ],
         "key_pitfalls": [
             "用户审核是硬约束：step_3 生成清单后必须等待用户明确批准，不擅自写入或删除",
@@ -1783,14 +1808,14 @@ GUIDE_REGISTRY: dict[str, dict] = {
                 "instruction": (
                     "调用 wip_list(status='completed') 获取所有已完结 WIP 的清单（默认轻量模式：已完结条目标题被截断，这里只用于拿 id，不是用来读内容的）。\n"
                     "若没有 completed 的，告知用户无需归档并结束。\n"
-                    "wip_list 是直连 MCP 工具，免审批。"
+                    "wip_list 经 parcae_advanced_tool 调用，免审批。"
                 ),
             },
             "step_2_extract": {
                 "name": "逐条提炼经验",
                 "instruction": (
                     "对每条 completed WIP：\n"
-                    "1. localagent_advanced_tool(tool='wip_get', params={'task_id': '<id>'}) 读详情\n"
+                    "1. parcae_advanced_tool(tool='wip_get', params={'task_id': '<id>'}) 读详情\n"
                     "2. 评估可归档性：含跨会话复用价值的项目状态/决策约束/踩坑经验 → 可归档；\n"
                     "   一次性临时任务/已被代码git记录/AGENTS.md已记录 → 不归档\n"
                     "3. 合并相似 WIP：多条 WIP 经验主题重合时合并为一条记忆\n"
@@ -1813,7 +1838,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
                 "name": "删除已归档 WIP",
                 "instruction": (
                     "写入记忆后，物理删除 WIP 记录：\n"
-                    "localagent_advanced_tool(tool='wip_delete', params={'task_id': '<id>'})\n"
+                    "parcae_advanced_tool(tool='wip_delete', params={'task_id': '<id>'})\n"
                     "返回 success=true, status_code=200 即删除成功。\n"
                     "若返回 500（httpx delete bug 再现），临时绕过：\n"
                     "exec_python 调 requests.delete(f'{API}/wip/{wid}') 直接 HTTP，并立即向用户报告 bug。"
@@ -1842,7 +1867,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "执行版本发布 6 步流程（项目纯本地，不发 git tag / GitHub release / push remote）：\n"
             "1. 读 CHANGELOG.md 确认 [Unreleased] 段有实际变更内容（空则告知用户无需 release）\n"
             "2. 确定新版本号：读 CHANGELOG.md 找最近 release 段（如 [0.10.0] - 2026-07-15），递增 patch（0.10.0→0.10.1，常规）或 minor（0.10.0→0.11.0，重大功能），不跨 major 除非用户指定\n"
-            "3. 版本号同步：RunCommand 跑 `uv run python tools/bump_version.py <新版本号>` 统一更新 server/main.py + server/core/health.py + pyproject.toml 的 VERSION 常量（防止漏改）\n"
+            "3. 版本号同步：RunCommand 跑 `uv run python tools/bump_version.py <新版本号>` 统一更新 server/version.py（唯一真源）+ pyproject.toml 的 VERSION（防止漏改）；⛔ main.py / health.py 已改成 from server.version import VERSION，不在目标里\n"
             "4. Edit CHANGELOG.md：把 `## [Unreleased]` 改为 `## [新版本号] - YYYY-MM-DD`（今天日期），在顶部插入新的空 `## [Unreleased]` 段（含 `### Added` 下 `- (暂无)` 等占位）\n"
             "5. RunCommand 跑 `uv run python tools/migrate_changelog.py`（默认 --keep 1），把旧 release 段归档到 docs/changelog-archive.md（newest first，幂等）\n"
             "6. git add + git commit：按目录 add（.agents/ client/ server/ docs/ tests/ + 顶级文件），不要用 git add -A（避免误纳入 config.toml / data/llm/keys.json 等敏感文件）。commit 信息格式 `vX.Y.Z: 主题1 + 主题2 + ...`（从 [Unreleased] 段提炼 3-5 个主题）。注意：pre-commit hook（scripts/hooks，硬化规则检查 C1-C4）会在 commit 时自动跑，红了按提示修复后再 commit\n"
@@ -1889,7 +1914,7 @@ GUIDE_REGISTRY: dict[str, dict] = {
             "Read / Grep / SearchCodebase (step_3-4 扫描代码和文档)",
             "RunCommand (step_4 跑 pytest/git log/sqlite3/uv pip audit)",
             "mcp_stats / loop_list_tasks / llm_pool_status / memory_status / /health (step_3-4 运行时状态)",
-            "localagent_advanced_tool (step_3 调 /openapi.json/mcp_stats 等网关端点)",
+            "parcae_advanced_tool (step_3 调 /openapi.json/mcp_stats 等网关端点)",
         ],
         "key_pitfalls": [
             "第一步必须用 AskUserQuestion 让用户选择方向，禁止未征询就自行全扫——12 大类全扫耗时长",
@@ -1901,6 +1926,395 @@ GUIDE_REGISTRY: dict[str, dict] = {
         ],
         "prerequisites": ["用户主动触发项目复审"],
         "level": "full",
+    },
+
+    # ────────────── dev/ 桶 · 2026-10-14 自 WorkBuddy 用户级 skill 迁入（出 harness 私有）──────────────
+    "dev.dev_toolkit_deploy": {
+        "skill": "dev-toolkit-deploy",
+        "name": "dev_toolkit 部署",
+        "skill_file": ".agents/skills/dev/dev-toolkit-deploy/SKILL.md",
+        "keywords": ["部署 dev_toolkit", "把 toolkit 弄过来", "这个项目 skill 太少", "装 dev toolkit", "toolkit 部署", "dev-toolkit-deploy"],
+        "description": "把 <project_root>/workspace/dev_toolkit（34 个 skill 蓝图）增量合并到某个项目，而不是全量覆盖——目标项目多半已有自己的 .agents/ 资产（业务 skill、AGENTS.md、memory），全量覆盖会毁掉真机实测结论",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/dev/dev-toolkit-deploy/SKILL.md；先判目标项目是「全新」还是「已有资产」；已有资产走 6 步增量合并（摸清现有→备份→按项目类型裁剪→拷入→合并 _index.md→校验），⛔ 禁止全量覆盖",
+        "workflow_summary": "1.判新/旧 2.摸清现有资产 3.备份将被替换的文件 4.按项目类型裁剪 5.拷入(排除裁剪项) 6.合并_index.md 7.校验",
+        "mcp_tools_priority": ["Read (SKILL.md + 目标项目 _index.md)", "exec_cmd (cp / diff / ls)", "uv run python -m tools.check_skills (校验)"],
+        "key_pitfalls": [
+            "关键不是拷贝而是增量合并；全量覆盖会毁掉目标项目的 .agents/ 资产（业务 skill、AGENTS.md、memory）",
+            "合并 _index.md 是最容易出错的一步",
+            "拷入前必须先备份将被替换的文件",
+        ],
+        "level": "standard",
+    },
+    "dev.parcae_remote_sync": {
+        "skill": "parcae-remote-sync",
+        "name": "Parcae 与远端合并",
+        "skill_file": ".agents/skills/dev/parcae-remote-sync/SKILL.md",
+        "keywords": ["和远端合并", "同步一下远端", "pull 一下", "远端分叉", "origin/master 分叉", "和远端同步", "parcae-remote-sync"],
+        "description": "Parcae 主仓库与 origin/master 分叉时的安全合并流程：分「本地落后+脏工作区」（备份/stash/快进/pop）与「本地领先+干净」（merge/消解 CHANGELOG 冲突）两场景，都要判远端那笔是否发版来决定冲突消解规则",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/dev/parcae-remote-sync/SKILL.md；先判场景（落后/领先 × 工作区脏/净）与「远端那笔是否已发版」；全程保持 CHANGELOG 的 CRLF",
+        "workflow_summary": "1.判场景 2.判远端是否发版 3.备份/stash(场景A)或直接merge(场景B) 4.消解冲突(尤其CHANGELOG) 5.提交merge",
+        "mcp_tools_priority": ["Read (SKILL.md)", "exec_cmd (git fetch/diff/stash/merge；三点 diff master...origin/master)"],
+        "key_pitfalls": [
+            "CHANGELOG 冲突消解规则取决于「远端那笔是否发版」",
+            "全程保持 CHANGELOG 的 CRLF，别被 core.autocrlf 带偏",
+            "备份/stash 是场景 A 的前置，别省",
+        ],
+        "level": "standard",
+    },
+    "dev.log_driven_defect_triage": {
+        "skill": "log-driven-defect-triage",
+        "name": "日志驱动故障分诊",
+        "skill_file": ".agents/skills/dev/log-driven-defect-triage/SKILL.md",
+        "keywords": ["贴的日志帮我看看", "看这个报错", "traceback", "跑完提示成功但数据不对", "报错了为什么说一切正常", "这个错以前没有", "我操作了但没生效", "卡我一会", "太慢了", "退出码 0 但失败", "log-driven-defect-triage"],
+        "description": "用户贴日志/报错（含 traceback、行号、或「明明报错了为什么还说一切正常」这类矛盾）时，把日志还原成可复现证据、定位根因；也覆盖「没有日志只说 XX 不成功」与「只有性能症状（卡/慢/重复）」两种情形",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/dev/log-driven-defect-triage/SKILL.md；先分流（有日志走第 0→4 步；只有「XX 不成功」走入口 B；只有性能症状走第 5/8 步）；第 0 步先量日志本身，别急着读",
+        "workflow_summary": "分流→第0步量日志→第1步从日志还原payload→第2步拿真机原文过真函数做修复前后对照→第3步版本归因→第4步质疑「一切正常」测的是哪个轴→(性能类)第5/8步数贵原语调用次数",
+        "mcp_tools_priority": ["Read (SKILL.md + 完整日志)", "exec_cmd / exec_python (复现、对照、计时)", "git show HEAD:<file> (版本归因)"],
+        "key_pitfalls": [
+            "看到「一切正常」的总结，先问它测的是哪个轴",
+            "报错指向的不是真凶——去完整日志取第一条（级联错误）",
+            "echo $? 之前插了管道 ⇒ 你量的是管道的尾巴（退出码 0 的假象）",
+            "症状是慢/重复时别急着读代码，先去数贵原语被调了几次",
+        ],
+        "level": "standard",
+    },
+    "dev.repo_push_readiness": {
+        "skill": "repo-push-readiness",
+        "name": "推远端前就绪体检",
+        "skill_file": ".agents/skills/dev/repo-push-readiness/SKILL.md",
+        "keywords": ["要推远端", "多机合作", "要开源", "首次 push", "加 remote", "换台机器继续", "仓库体检", "凭据泄露", "repo-push-readiness"],
+        "description": "把本地仓库推向远端（尤其多机协作）前的就绪体检：凭据扫描、大文件、gitignore 正确性、换行符与二进制声明、协作资产是否入库、断链检查，并给出可执行修复动作",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/dev/repo-push-readiness/SKILL.md；按第 0 步摸清现状 → 第 1 步凭据扫描（最重要）→ 第 5.5 步断链检查（最容易漏）→ 第 8 步建仓+推送+克隆验证",
+        "workflow_summary": "0.摸清现状 1.凭据扫描 2.大文件/目录 3.验忽略规则 4.换行符与二进制声明 5.协作资产入库 5.5.断链检查 6.基线自检 7.出报告 8.建仓+推送+克隆验证",
+        "mcp_tools_priority": ["Read (SKILL.md)", "exec_cmd (git check-ignore / ls-files / grep 凭据扫描 / clone 验证)"],
+        "key_pitfalls": [
+            "核心不是写 .gitignore，而是「先扫真相、再改规则、最后验证」",
+            "凭据进了历史就得洗，改规则只是噪音",
+            "第 5.5 步断链检查最容易漏、代价最大",
+            "首次推送有三个高频陷阱（见第 8.5 步）",
+        ],
+        "level": "standard",
+    },
+    "dev.sdd_spec_verification": {
+        "skill": "sdd-spec-verification",
+        "name": "SDD spec 开工前核验",
+        "skill_file": ".agents/skills/dev/sdd-spec-verification/SKILL.md",
+        "keywords": ["可以开工了吗", "这份计划齐不齐", "看看还差什么", "spec 核验", "开工前检查", "sdd 核验", "sdd-spec-verification"],
+        "description": "SDD（spec 驱动开发）动手前的齐备性核验：把 spec 里的调研事实与代码实际逐条对照、mockup 与 spec 决策对照、验收命令真跑一遍，产出「阻塞项/中等问题/已核实无误」清单，修完再开工",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/dev/sdd-spec-verification/SKILL.md；按核验六步（调研事实对代码→Bounds/文件归属→mockup一致性→引用路径存在性→验收命令真跑→基线冻结），每步都要拿代码证据",
+        "workflow_summary": "1.调研事实逐条对代码 2.Bounds/文件归属 3.mockup vs spec 决策 4.引用路径存在性 5.验收命令真跑 6.基线冻结 → 出「阻塞/中等/已核实」清单",
+        "mcp_tools_priority": ["Read / Grep (spec 与代码对照)", "exec_cmd (真跑验收命令)"],
+        "key_pitfalls": [
+            "验收命令必须真跑，不能只写不跑",
+            "调研事实对代码是最容易出硬伤的一步",
+            "产出必须分「阻塞项/中等问题/已核验属实」三档",
+        ],
+        "level": "standard",
+    },
+    "dev.windows_kernel_readonly_forensics": {
+        "skill": "windows-kernel-readonly-forensics",
+        "name": "Windows 只读内核取证",
+        "skill_file": ".agents/skills/dev/windows-kernel-readonly-forensics/SKILL.md",
+        "keywords": ["内核不回收", "僵尸进程对象", "内存泄漏到重启才好", "哪个驱动在漏引用", "引用计数为什么是 1", "帮我枚举内核回调", "obtrace", "LiveKd", "windows-kernel-readonly-forensics"],
+        "description": "Windows 只读内核级取证：用 LiveKd 起内核调试读活内存（对象引用计数/EPROCESS/通知回调表/对象回调链），用 GFlags runtime 的 !obtrace 打出每次引用与解引用的调用栈，并把内核地址点名到模块。用于排查进程退出后内核对象不回收、内存只涨不降、引用泄漏",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/dev/windows-kernel-readonly-forensics/SKILL.md；先划安全边界（不写 Start、不重启、不碰设备）→ 借本机已有后端提权 → 免管理员先读 OBJECT_TYPE 计数器 → 必要时起 LiveKd",
+        "workflow_summary": "0.划安全边界 1.借已有后端提权 2.起LiveKd(-cf 需交互驱动) 3.读僵尸对象引用计数(先跑免管理员的 OBJECT_TYPE 计数器) 4.枚举四张通知回调表+对象回调链 5.点名到模块 6.压候选集",
+        "mcp_tools_priority": ["Read (SKILL.md)", "exec_cmd (gflags / cdb / LiveKd / kd 脚本)", "本机后端提权通道（避免弹 UAC）"],
+        "key_pitfalls": [
+            "首要理由是安全边界：不写 Start、不重启、不碰设备",
+            "看到一个反常数字，第一件事是怀疑测量工具（本次最贵的教训）",
+            "!obtrace 账本有 +32768 编码陷阱；!process 0 0 <name> 会卡死",
+            "点名模块别用 ln，用 CID 表判据（不依赖 KD）",
+        ],
+        "level": "full",
+    },
+
+    # ────────────── daily/ 桶 · 2026-10-14 自 WorkBuddy 用户级 skill 迁入（出 harness 私有）──────────────
+    "daily.cross_machine_delivery_bundle": {
+        "skill": "cross-machine-delivery-bundle",
+        "name": "跨机交付四件套",
+        "skill_file": ".agents/skills/daily/cross-machine-delivery-bundle/SKILL.md",
+        "keywords": ["把缺的东西打包给我", "帮我打包传进去", "跨机交接", "虚拟机缺的补一下", "跨机交付", "打包传给另一台机", "cross-machine-delivery-bundle"],
+        "description": "把一个工作区的文件从 A 机（真机）打包交付到 B 机（VM/另一台机），产出「压缩包+完整性清单+交付说明+落地脚本」四件套：先判自己在哪台机，再把报告里每个路径当断言逐条验，最后按项目 temp/ 内 staging 打包",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/daily/cross-machine-delivery-bundle/SKILL.md；第 0 步先判自己在哪台机（盘符判据），不做这步后面全白干；再定清单 → staging 放当前项目 temp/ → 出四件套",
+        "workflow_summary": "0.判自己在哪台机 1.把路径当断言定清单 2.staging 放当前项目 temp/ 3.出四件套(包+sha256清单+交付说明+落地脚本) 4.按模板写交付说明",
+        "mcp_tools_priority": ["Read (SKILL.md)", "exec_cmd (ls / 7z -tzip / sha256sum / cp)"],
+        "key_pitfalls": [
+            "不先判「自己在哪台机」后面全白干（盘符判据）",
+            "staging 必须放当前项目 temp/，别写到项目外",
+            "把报告里出现的每个路径当断言逐条验，别凭印象",
+        ],
+        "level": "standard",
+    },
+    "daily.esp32_arduino_offline_install": {
+        "skill": "esp32-arduino-offline-install",
+        "name": "ESP32 板包离线安装",
+        "skill_file": ".agents/skills/daily/esp32-arduino-offline-install/SKILL.md",
+        "keywords": ["ESP32 装不上", "arduino-cli 很慢", "ESP32 板包", "Arduino IDE 下载慢", "esp32 离线安装", "esp32-arduino-offline-install"],
+        "description": "Arduino IDE / arduino-cli 装 ESP32 板包极慢时，用 gh-proxy 镜像预下载到 staging 再离线安装（Windows 实测）。含 IDE 内置 CLI 不走系统代理、TEMP 指向系统目录致 cc1plus 报错等坑",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/daily/esp32-arduino-offline-install/SKILL.md；按 5 步：Range 测速选镜像 → 拿 package_esp32_index.json → 解析出 toolsDependencies 清单 → curl 批量下到 %LOCALAPPDATA%\\Arduino15\\staging\\packages\\ → 用 IDE 自带 arduino-cli 离线安装",
+        "workflow_summary": "1.测速选镜像(gh-proxy ~1.8MB/s) 2.拿索引 3.生成清单(host=x86_64-mingw32) 4.curl 批量下载到 staging 5.arduino-cli core install 离线装",
+        "mcp_tools_priority": ["Read (SKILL.md)", "exec_cmd (curl -L -C - / arduino-cli)"],
+        "key_pitfalls": [
+            "IDE 内置 arduino-cli 不走系统代理，加速器帮不上",
+            "命令行编译报 cc1plus @C:\\Windows\\TEMP 错 ⇒ 先改 TEMP/TMP 到用户目录",
+            "staging 缓存装完可删（解压后在 Arduino15\\packages\\）",
+        ],
+        "level": "standard",
+    },
+    "daily.future_group_intel_import": {
+        "skill": "future-group-intel-import",
+        "name": "群聊就业情报导入 Future",
+        "skill_file": ".agents/skills/daily/future-group-intel-import/SKILL.md",
+        "keywords": ["把 XX 群的招聘就业内容导入 Future", "就业情报导入", "秋招情报摘录", "私聊定向导出加到 Future", "群聊秋招情报", "复用当日事实池", "future-group-intel-import"],
+        "description": "把微信群「招聘/就业/秋招」话题内容、以及与学长/从业者的私聊对谈，按 <projects_parent>/Future 这套职业咨询工作区的规范导入该项目（raw 摘录/导出 + 02 档案收拢 + git 提交）",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/daily/future-group-intel-import/SKILL.md 与 Future 内部权威副本；§0 开工前必读；§4B 先判这批要不要并入 02；导出走 Parcae 的 chat_digest 管线",
+        "workflow_summary": "0.读Future内部权威副本 1.找群内容(chat_digest导出) 2.查素材缺口 3.抽招聘就业内容 4.落盘三份 4B.判是否并入02 5.收拢02档案 6.提交",
+        "mcp_tools_priority": ["Read (SKILL.md + Future/CONVENTIONS.md)", "exec_cmd (chat_digest 导出脚本 / verify_quotes.py / git)"],
+        "key_pitfalls": [
+            "落点与命名以 Future 项目内权威副本为准，别只看本 skill",
+            "口径要「按批恢复」——上一批若是收窄批，本批未必继承",
+            "verify_quotes.py 的 --export/--ext 一律传绝对路径",
+        ],
+        "level": "standard",
+    },
+    "daily.godot_mcp_toolchain_deploy": {
+        "skill": "godot-mcp-toolchain-deploy",
+        "name": "Godot MCP 工具链接入",
+        "skill_file": ".agents/skills/daily/godot-mcp-toolchain-deploy/SKILL.md",
+        "keywords": ["部署 Godot MCP", "接入 godot-ai-toolkit", "让 AI 能操作 Godot 场景", "gdflow init 报错", "Godot MCP", "godot-mcp-toolchain-deploy"],
+        "description": "把 Godot AI 工具链（gdflow.py + gdmcp CLI + Godot-MCP-Native 补丁版 + godot-multi-manager）接入一个 Godot 4.x 项目，让 Agent 能通过 MCP 操纵编辑器",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/daily/godot-mcp-toolchain-deploy/SKILL.md；按 5 步：拷工具链 → 先起 manager 再 init（顺序不能反）→ init → 验收 → 注册到 IDE 的 MCP 配置（~/.workbuddy/mcp.json）",
+        "workflow_summary": "1.拷工具链到目标工作区 2.先起 manager 再 init 3.init 4.验收 5.注册 IDE 的 MCP 配置",
+        "mcp_tools_priority": ["Read (SKILL.md + toolkit/docs/pitfalls.md)", "exec_cmd (godot-multi-manager / gdflow.py)"],
+        "key_pitfalls": [
+            "顺序不能反：先起 manager 再 init",
+            "autoload 与 headless 测试是 GDScript 通用坑（不只本工具链）",
+            "注册 MCP 后需在客户端信任/重连才生效",
+        ],
+        "level": "standard",
+    },
+    "daily.memory_hygiene_two_layer": {
+        "skill": "memory-hygiene-two-layer",
+        "name": "记忆卫生（分层压缩）",
+        "skill_file": ".agents/skills/daily/memory-hygiene-two-layer/SKILL.md",
+        "keywords": ["把记忆压缩一下", "记忆太长了", "记忆被截断", "这条不该在全局记忆里", "整理记忆", "memory truncated", "记忆分层", "memory-hygiene-two-layer"],
+        "description": "压缩被注入的长期记忆并维持「全局只放跨项目、项目只放铁律+指针、长细节下沉 TOPIC」结构。含注入上限按字符数计（全局 4000/项目 8000）的实测判据、升 L2 准入四问、置换纪律与 8 步动作顺序",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/daily/memory-hygiene-two-layer/SKILL.md；§0 先用字符数（不是字节）量注入层体积 → §1 定三层落点（真源在 .agents/memory/）→ §2 按 8 步动作顺序执行",
+        "workflow_summary": "0.按字符数量上限 1.定三层落点 2.备份→移→反向查重(项目→全局)→下沉TOPIC→量化验收→锚点验不丢信息→改文件头→写日志",
+        "mcp_tools_priority": ["Read (SKILL.md)", "exec_python (量字符数 / 锚点核验)"],
+        "key_pitfalls": [
+            "判据只用 len(text) 字符数，别看文件大小（中文 3 字节/字）",
+            "真源是 .agents/memory/，.workbuddy/memory/MEMORY.md 只是注入投影",
+            "新条目进 L2 必须报挤掉了谁，被挤的降级回 L1 不删除",
+            "不要动没读过的项目记忆就删东西",
+        ],
+        "level": "standard",
+    },
+    "daily.music_library_metadata_forensics": {
+        "skill": "music-library-metadata-forensics",
+        "name": "音乐库元数据取证与修复",
+        "skill_file": ".agents/skills/daily/music-library-metadata-forensics/SKILL.md",
+        "keywords": ["歌曲信息错误", "歌词绑错", "外文歌乱码", "歌词绑到别人的歌上", "专辑串了", "播放器曲库和归档对不上", "存量回扫", "音乐库元数据", "music-library-metadata-forensics"],
+        "description": "本地音乐库（归档库↔播放器）出现歌曲信息错误/歌词绑错/外文歌乱码时：只读取证 → 定位是数据脏还是上游代码把数据改坏 → 双向验证 → 勾选清单 → 按勾选落库 → 同步下游播放器 → 历史存量回扫",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/daily/music-library-metadata-forensics/SKILL.md；第 0 步先确认「在读哪个库」（常有运行中实例不是源码目录的陷阱）→ 第 1 步只读取证（不写一个字节）→ 用音频标签当 ground truth 反查数据库",
+        "workflow_summary": "0.确认读哪个库 1.只读取证 2.分清数据脏还是上游代码改坏 3.双向验证 4.出勾选清单（不静默批量改） 5.同步下游播放器(只增不删) 6.存量回扫(只认正向证据)",
+        "mcp_tools_priority": ["Read (SKILL.md)", "exec_python (只读库查询 / 音频标签解析)", "AskUserQuestion (勾选清单确认)"],
+        "key_pitfalls": [
+            "先确认在读哪个库——运行中的实例常不是源码目录",
+            "把「修复函数本身把好数据改坏」这一反向 bug 区分开",
+            "交付勾选清单，禁止静默批量改",
+            "存量回扫只按正向证据动手",
+        ],
+        "level": "full",
+    },
+    "daily.pdf_score_omr_and_audio_verify": {
+        "skill": "pdf-score-omr-and-audio-verify",
+        "name": "乐谱 OMR 与音频验证",
+        "skill_file": ".agents/skills/daily/pdf-score-omr-and-audio-verify/SKILL.md",
+        "keywords": ["这是不是那个视频的谱", "帮我转成 MIDI", "拿这份谱给转谱结果打分", "乐谱 OMR", "Audiveris", "MusicXML", "Synthesia 读键盘", "pdf-score-omr-and-audio-verify"],
+        "description": "拿到乐谱 PDF/图片后变成机器可读 MusicXML/MIDI；验证「这份谱是不是那条演奏视频的谱」；并用它当答案给转谱通道定量打分（DTW 对齐）。含 Audiveris 在 Windows 的免安装跑法，以及 DTW 时序特征必须带时值这个最贵的坑",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/daily/pdf-score-omr-and-audio-verify/SKILL.md；§0 先花 5 秒排除 OMR → §1 OMR 选 Audiveris（不要 oemer）→ §2 免安装解包 → §3 批量跑 → §7 用谱给通道打分时必须跑两个对照",
+        "workflow_summary": "0.排除OMR 1.选Audiveris 2.免安装解包 3.批量跑 4.music21解析 5.验证谱=那条演奏 6.写诚实边界 7.当答案给通道打分(DTW+两对照)",
+        "mcp_tools_priority": ["Read (SKILL.md)", "exec_cmd (Audiveris / gh-proxy 下载)", "exec_python (music21 / librosa DTW)"],
+        "key_pitfalls": [
+            "最贵的一个：DTW 的时序特征必须带时值，否则时间轴线性漂移（会把好通道判成瞎猜）",
+            "五个坑全是「仪器没验就先读数」；两个必跑对照不跑就等于没结论",
+            "若视频其实是 Synthesia 式 MIDI 渲染器，别拿它当实拍，直接读键盘 88 键键态",
+        ],
+        "level": "full",
+    },
+    "daily.vmware_bridged_networking_this_host": {
+        "skill": "vmware-bridged-networking-this-host",
+        "name": "本机 VMware 桥接网络",
+        "skill_file": ".agents/skills/daily/vmware-bridged-networking-this-host/SKILL.md",
+        "keywords": ["虚拟机怎么桥接", "VM 上不了网", "虚拟机要独立 IP", "避开按公网 IP 的风控", "vmnetcfg", "vmware_bridge", "VMware 桥接", "vmware-bridged-networking-this-host"],
+        "description": "在本机（Windows 真机）配置 VMware Workstation 虚拟机网络：桥接到唯一可用的物理网卡、收敛 VMnet0 的自动桥接，并澄清「桥接不改变公网出口 IP」这个最常见的误解",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/daily/vmware-bridged-networking-this-host/SKILL.md；§2 认唯一可桥接的物理网卡（以太网 Realtek 2.5GbE），⛔ 别选 Radmin VPN（自带网关 26.0.0.1，是自动桥接最大误选源）",
+        "workflow_summary": "1.认环境 2.认唯一可桥接物理网卡 3.收敛自动桥接(Disable-NetAdapterBinding 或 vmnetcfg) 4.澄清「桥接不改公网出口 IP」5.提权直接弹 UAC",
+        "mcp_tools_priority": ["Read (SKILL.md)", "exec_cmd (PowerShell Get-NetAdapter / Disable-NetAdapterBinding；vmnetcfg)"],
+        "key_pitfalls": [
+            "桥接只让 VM 在局域网内独立，公网出口 IP 仍与宿主相同",
+            "Radmin VPN 自带默认网关，是自动桥接的最大误选源",
+            "系统配置要提权时直接弹 UAC，别生成脚本让用户手动跑",
+        ],
+        "level": "standard",
+    },
+    "daily.windows_recycle_and_space_reclaim": {
+        "skill": "windows-recycle-and-space-reclaim",
+        "name": "安全删除与回收空间",
+        "skill_file": ".agents/skills/daily/windows-recycle-and-space-reclaim/SKILL.md",
+        "keywords": ["把这个目录删掉", "清理 temp", "太占存储了", "帮我回收空间", "磁盘满了", "删掉这个大文件", "怎么删到回收站", "那个文件还在吗", "windows-recycle-and-space-reclaim"],
+        "description": "在本机 Windows 上安全删除文件/目录并真正回收磁盘空间：走项目既有的 ctypes 回收站工具（因 Add-Type 被安全策略拦死），并解决「进了回收站却不释放空间」这个核心陷阱；含回收站条目审计、按身份核对后永久清理，以及从回收站把内容捞回来",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/daily/windows-recycle-and-space-reclaim/SKILL.md；§0 先分清对象决定要不要问 → §1 用 tools/disk/recycle.py（不是 rm/del）→ §2 注意进回收站≠释放空间 → 按 §3 四步流程走",
+        "workflow_summary": "0.分清对象 1.用 recycle.py 送回收站 2.认条目(回收站看不出哪条是哪个) 3.按身份核对后永久清理 (反向: 从回收站捞回)",
+        "mcp_tools_priority": ["Read (SKILL.md)", "exec_cmd (./.venv/Scripts/python.exe tools/disk/recycle.py)", "scripts/recycle_audit.py / recycle_purge.py"],
+        "key_pitfalls": [
+            "用 recycle.py（不是 rm/del）；本机所有删除都被 shim 转成送回收站",
+            "进回收站 ≠ 释放空间（同盘回收站不释放）",
+            "永久删由用户自己做；先做 dry run 列清单",
+            "删前留清单、按身份核对后才永久清理",
+        ],
+        "level": "standard",
+    },
+    "daily.media_file_organizer": {
+        "skill": "media-file-organizer",
+        "name": "媒体文件夹整理与重命名",
+        "skill_file": ".agents/skills/daily/media-file-organizer/SKILL.md",
+        "keywords": ["整理这个文件夹", "把视频摊开", "按日期角色重命名", "批量改名", "批量解压", "文件夹太乱", "媒体库整理", "差分视频整理", "把无关文件挪开", "file organizer", "media organizer", "media-file-organizer"],
+        "description": "混装媒体目录（视频/图片/差分加密 zip/杂物）整理成平铺 + 统一命名（月-日 角色 原画/差分）：只读盘点生成映射表，按同格式同月份分批执行，每批预检+回读；加密 zip 用 7-Zip 解压、旧包与杂物走回收站；收尾再核官方名并出四份清单",
+        "memory_key": None,
+        "first_action": "读 .agents/skills/daily/media-file-organizer/SKILL.md；§0 先问四件事（zip/mp4/杂物/名字口径）→ §1 跑 scripts/scan_media.py 只读盘点 → 映射表三条覆盖检查 → §3 分批预检+回读（⛔ 禁止一键脚本）→ §4 recycle.py → §5 官方名核对 → §6 verify_media_folder.py 验收；固定库增量更新走 references/bilibili-works-ingest.md（plan→复核→run）",
+        "workflow_summary": "0.确认四件事 1.只读盘点+映射表 2.定名规则 3.分批执行(预检/逐条/回读) 4.回收站+剩余集合核对 5.官方名核对 6.清单+全量验收",
+        "mcp_tools_priority": ["Read (SKILL.md)", "exec_python / exec_cmd (scripts/scan_media.py, verify_media_folder.py, ingest_media_batch.py)", "exec_cmd (./.venv/Scripts/python.exe tools/disk/recycle.py)"],
+        "key_pitfalls": [
+            "禁止一键脚本跑完整个目录（用户曾被上一版一键脚本误删全部文件）",
+            "禁止 rm/del/shutil.rmtree；只走 tools/disk/recycle.py",
+            "绝不覆盖已存在的目标名；目标存在就停下报告",
+            "mtime 是复制时间，日期要用 mvhd / zip 内 entry 名 / 子目录名",
+            "zip 名不可信，看 entry（可能是 exe、无扩展名、一个包两段视频、嵌套路径）",
+            "Python zipfile 解 ZipCrypto 只有 ~1.8MB/s，加密包用 7-Zip",
+            "staging 路径拼接前要把 \\ 和 / 替换掉，否则造出意外子目录",
+            "角色名先保留原写法；跨 IP 同名（提丰 vs 提弗洛斯）是不同角色",
+            "<data_drive>:/<bilibili_videos>作品（角色X.Y+月份目录）与 <data_drive>:/<media_staging>\\new（M-D 角色 版本+平铺）是两个独立库，判库看命名形态，别混放",
+        ],
+        "level": "standard",
+    },
+
+    # ────────────── adhoc.wb_history_recall（翻本机 WorkBuddy 历史会话；2026-10-29 从
+    #                `.agents/memory/TOPIC_wb_history.md` 升级为 skill，方法论不该躺记忆层）──────────────
+    "adhoc.wb_history_recall": {
+        "skill": "wb-history-recall",
+        "name": "翻历史会话还原对话",
+        "skill_file": ".agents/skills/daily/wb-history-recall/SKILL.md",
+        "keywords": [
+            "我不是说过吗", "我之前说过", "我的原话", "找回原话", "翻一下 workbuddy 数据库",
+            "wb 数据库", "历史会话", "之前的对话", "之前的会话", "另一个账号那个对话",
+            "当时谁定的", "这话是我说的还是你说的", "会话记录", "翻聊天记录",
+        ],
+        "description": "从本机 WorkBuddy 会话库（workbuddy.db + projects/*.jsonl）还原历史对话：默认同时抽用户原话与 agent 回复，找回裁定链与推翻记录；另有 list 的会话状态/活跃时间、dump --tail 尾部、--files 改动文件清单",
+        "first_action": "⛔ 不要只读用户说了什么。先 `uv run python -m tools.wb_history list -k 关键词`（跨账号；`--sort activity` 找最近还在动的）扫标题，再 `dump <id前缀>` 出双方，看首句目录（U/A 标角色）后定点读；用户一句「这一版 / 这个 / 不是这样」必须往上翻一条 agent 才知道指什么。要定位停在哪用 `--tail 20`，要改动面用 `--files`",
+        "workflow_summary": "1.list 多关键词扫标题 2.dump 出双方(默认)+首句目录 3.逐轮读：用户在回应什么、agent 给了什么选项 4.结论带「谁说的+时间+前后语境」5.记推翻链",
+        "mcp_tools_priority": [
+            "exec_cmd (uv run python -m tools.wb_history list / dump)",
+            "Read (temp/wb_hist/<session>_chat.md)",
+        ],
+        "key_pitfalls": [
+            "⛔ 只抽用户一侧 = 有倾向性取证：会把 agent 的提议当用户要求、把反问当最终裁定、看不懂指代对象",
+            "「用户说了什么」与「最后落地什么」是两件事，以时间靠后的为准，并记下推翻链",
+            "标题是自动生成的，常和用户记忆里的叫法不一致 ⇒ 多关键词 + 必要时扫正文",
+            "role=user 大多由注入块拼成，真话在 <user_query> 内；<cb_summary> 是压缩摘要块且内部回放着历史 user_query（521 条里 520 条整条只是摘要）⇒ 必须整块剥掉再找本轮输入，别取第一个/最后一个 user_query",
+            "<task-notification>(891)/<teammate-message>(37)/续写指令(89) 也落在 role=user 且没有 user_query，不当掉就会当成用户要求",
+            "一台机器并存多个账号，只按当前账号找会漏 ⇒ 按 sessions.user_id 分组（list 第三列）",
+            "命令行里出现家目录路径可能被沙箱拒 ⇒ 路径写进脚本，或先 copy 到 temp/wb_hist/",
+            "[n] 是全量条目序号（-k/--tail/--user-only 不重排）；噪音过滤规则升级会整体位移 ⇒ 引用连 session id + 时间一起写",
+        ],
+        "level": "standard",
+    },
+
+    # ────────────── adhoc.wb_takeover（限流换号后接手被打断的会话；与 wb_history 同一套读取，
+    #                但产出是「接手包 + 派发提示词」而不是取证）──────────────
+    "adhoc.wb_takeover": {
+        "skill": "wb-takeover",
+        "name": "限流换号接手会话",
+        "skill_file": ".agents/skills/daily/wb-takeover/SKILL.md",
+        "keywords": [
+            "限流换号", "被限流", "限流了", "限流截断", "429", "换号", "接手的会话",
+            "要接手的", "断在半路", "接着做", "继续任务", "刚才那几场断哪了",
+            "扫一下会话", "当前账号", "重置时间", "派发提示词", "接手包",
+            "看着结束了", "其实还没完", "还想接着弄", "等回话", "没来得及处理",
+        ],
+        "description": "限流换号后接手被打断的 WorkBuddy 会话：scan 分三段列出候选（被系统打断的 / 正常收尾但末句把球踢给你的 / 其余已收尾的），导出独立接手包（HANDOFF 事实头 + 全量对话 + 源 jsonl 拷贝 + 派发提示词）",
+        "first_action": "先 `uv run python -m tools.wb_takeover scan --skip-current`（默认窗口 24h、三段式、编号跨段连续）：第一段 `●` 逐场读 `末用户/末agent/末工具/重置` 自己判断断在哪；第二段 `◇ 等回话` 是「看着收尾了其实还有话要说」的那批，读 `球在你` 那句判要不要接；⛔ 别把脚本输出当结论复述。然后按连续序号汇总（每场 1-2 行，第二段必须写清「要你做什么」），等用户报数字。⛔ 别把手机号当反查输入（库里查不到 uuid），解析不出就按「最近活动的号」推断并明说。派包提示词必须**逐场完整给出**，⛔ 不许写「同上文」「同上」。",
+        "workflow_summary": "1.accounts 看两个号 2.scan（三段式）摊开候选 3.按序号汇总给用户（自己写「断在 / 球在你」）4.用户报数字 5.export --pick 出包 6.逐条把 PROMPT.md 原样贴给用户去派发",
+        "mcp_tools_priority": [
+            "exec_cmd (uv run python -m tools.wb_takeover scan / export / accounts)",
+            "Read (temp/wb_takeover/<日期>/<会话8位>/HANDOFF.md)",
+        ],
+        "key_pitfalls": [
+            "⛔ 收尾原因只能从 jsonl 尾条判断，不能看 sessions.status：19 场非正常收尾里只有 4 场 status='error'，其余散在 archived / 已删除",
+            "⛔ 已归档的会话一律不列，连 429 也不列：status='archived' = 用户明确不再理会（原话「不用自作多情再掏出来问我」「归档一定是我明确不再管的东西」），326 场里 285 场都是 archived。判「怎么断的」看 jsonl 尾条，判「还归不归他管」看 status，两个问题别混",
+            "别把「接手中断的 XXX」「继续 XXX」当成新的待接手场次——那是用户派出去的接手会话，会顶到清单最前；标一句「已被接手」即可。另外 working 的会话（用户正在里头敲）也不该当候选",
+            "⛔ 429 横幅必须 re.match 从头锚定；用「子串包含」会把在正文里引用过那句话的会话误判成限流（本机 44f8ef91 中招过）",
+            "手机号反查不了 uuid（~/.workbuddy/*.json 没有 account/phone），映射只落不入库的 data/wb_accounts.json；解析不出别卡住问用户",
+            "chat_full.md 里没有工具回显（function_call 是独立事件）⇒ 断点动作在 HANDOFF 的工具调用流水与 source.jsonl 里；别据此推断当时的 agent 没看过这些输出",
+            "[n] 序号随 --hours/--only 重排；引用时连 session id + 时间一起写。--pick 只对最后一次 scan 有效",
+            "⛔ status=completed 不代表活干完了，只代表 agent 说完了：实测 9 场 completed 里 5 场末句在等用户回话（「等你上传」「你说一声」）⇒ 靠末句措辞认，别靠 status",
+            "⛔ 「等回话」判定：问句型必须同一句里以问号收尾（否则引用别人的「是否要更严」会误判）；命中多个取位置最靠后的（否则会截成小标题）；代码块先剥",
+            "别把 scan 输出管道给 head：会 SIGPIPE 掉后续逻辑（编号表已改先落盘，但仍有风险）",
+            "默认不把「已完成」列进待接手清单，但要读一眼末agent——脚本只按最后一条消息分型，判不出「活没干完就收尾」",
+        ],
+        "level": "standard",
+    },
+
+    # ────────────── adhoc.qoder_history_recall（翻本机 Qoder 历史会话；与 wb 同一铁律的另一套落点）──────────────
+    "adhoc.qoder_history_recall": {
+        "skill": "qoder-history-recall",
+        "name": "翻 Qoder 历史会话还原对话",
+        "skill_file": ".agents/skills/daily/qoder-history-recall/SKILL.md",
+        "keywords": [
+            "qoder 里那个对话", "我在 qoder 说过", "翻一下 qoder 数据库", "qoder 会话记录",
+            "qoder 那边怎么定的", "另一个 IDE 里那场", "qoder 数据库", "qoder 历史会话",
+            "这个 IDE 的对话", "qoder 说过什么",
+        ],
+        "description": "从本机 Qoder（QoderCN）会话库（~/.qoder-cn/projects/*/*.jsonl）还原历史对话：默认同时抽用户原话与 agent 回复，找回裁定链与推翻记录；无索引表，标题现推；另有 dump --tail 尾部、--files 改动文件清单、压缩点位置",
+        "memory_key": None,
+        "first_action": "⛔ 不要只读用户说了什么。先 `uv run python -m tools.qoder_history list -k 关键词`（标题=首条人类消息，不中再加 --deep 扫正文），再 `dump <id前缀>` 出双方，看首句目录（U/A 标角色）后定点读；用户一句「这一版 / 这个」必须往上翻一条 agent。要定位停在哪用 `--tail 20`，要改动面用 `--files`，跨 harness 的同一决定再翻 `wb_history` 对时间线",
+        "workflow_summary": "1.list 多关键词扫标题(可 --deep) 2.dump 出双方+首句目录 3.逐轮读：用户在回应什么、agent 给了哪些选项 4.结论带「谁说的+时间+前后语境」5.跨 harness 时标来源并记推翻链",
+        "mcp_tools_priority": [
+            "exec_cmd (uv run python -m tools.qoder_history list / dump)",
+            "Read (temp/qoder_hist/<session>_chat.md)",
+        ],
+        "key_pitfalls": [
+            "⛔ 只抽用户一侧 = 有倾向性取证：会把 agent 的提议当用户要求、把反问当最终裁定、看不懂指代对象",
+            "type=user 的行只有约 1% 是人类，其余是工具回显/内部重试 ⇒ 真人类判据是 origin.kind==\"human\"",
+            "一条 agent 回复按 content block 拆成多行、共用 message.id，不聚合会碎成几百条只有工具调用的空回复",
+            "没有 sessions 索引表 ⇒ 标题只能取首条人类消息前 45 字，与用户记忆里的叫法常不一致",
+            "压缩续写的 `This session is being continued…` 是 agent 摘要不是原话；`[Request interrupted by user]` 是中断标记",
+            "压缩点在 type=system + subtype=compact_boundary（本机 362 条）⇒ 压线之前的轮次当时只被看到摘要，别据此推断「它当时知道这些」",
+            "改动面只看 file-history-snapshot 的 trackedFileBackups（--files）；版本号是快照次数不是编辑次数",
+            "[n] 是全量条目序号（-k/--tail/--user-only 不重排）；过滤器升级会整体位移 ⇒ 引用连 session id + 时间一起写",
+            "时间戳两种格式：user/assistant 是 ISO(UTC)，runtime-config/active-leaf 是毫秒 epoch",
+            "最大会话 113MB ⇒ 先看首句目录再定点读；--deep 会全文扫，别默认开",
+            "别去 AppData\\Roaming\\Qoder*\\User 找正文，那是 VSCode 壳数据（本机停在 8-29）",
+            "跨 harness 别把 Qoder 与 WorkBuddy 的原话混成一段，必须以时间靠后者为准并标明来源",
+        ],
+        "level": "standard",
     },
 }
 
@@ -1924,6 +2338,7 @@ _DEV_ROLES: dict[str, str] = {
     "dev.domain_modeling": "method",
     "dev.prototype": "method",
     "dev.wayfinder": "method",
+    "dev.handoff": "method",
     # support: 辅助审查/排障
     "dev.code_review": "support",
     "dev.triage": "support",
@@ -1939,6 +2354,12 @@ _DEV_ROLES: dict[str, str] = {
     "dev.impeccable": "tool",
     "dev.hallmark": "tool",
     "dev.windows_process_disk_io_audit": "tool",
+    "dev.dev_toolkit_deploy": "tool",
+    "dev.parcae_remote_sync": "support",
+    "dev.log_driven_defect_triage": "support",
+    "dev.repo_push_readiness": "support",
+    "dev.sdd_spec_verification": "support",
+    "dev.windows_kernel_readonly_forensics": "tool",
 }
 
 # dev 桶入口决策树：开发任务第一步根据目标清晰度选入口
@@ -1957,11 +2378,11 @@ _DEV_ENTRY_POINTS = {
 GENERAL_GUIDE = {
     "usage": "调用 agent_guide(task='用户任务描述') 做关键词匹配，或 agent_guide(task_type='recurring.accounting') 精确获取某个任务的指导",
     "session_startup": [
-        "1. 确认 MCP 可用（调任意 mcp_localagent_* 工具，如 exec_status）",
+        "1. 确认 MCP 可用（调任意 mcp_parcae_* 工具，如 exec_status）",
         "2. 根据用户任务调 agent_guide(task='...') 获取指导；未匹配时浏览下方全量清单选 task_type",
         "3. 【仅新会话首次任务】agent 评估本次任务可能用得上的 skill（基于 task 匹配结果 + 任务上下文 + 用户历史偏好），主动用 AskUserQuestion(multiSelect=true) 询问用户要加载哪些 skill。用户可多选、可跳过（选'其他'或直接说不需要）。本项目不分 model/user-invoked，所有 skill 都可选。用户选定后 agent 自己 Read 对应 skill 文件加载工作流。后续会话中途不再重复询问，除非用户主动要求。",
         "4. 按需读相关记忆：memory_get(<skill 的 memory_key>) 了解上次进度；通用偏好 memory_get('preferences')（轻量，按需）",
-        "5. 用户问'有什么任务'/'待办'/'上次没做完的'时，再调 agent_guide(task_type='system.task_reminder') 或 wip_list（默认即轻量，直接调即可）—— 不要主动检查，避免无关查询污染上下文",
+        "5. 用户问'有什么任务'/'待办'/'上次没做完的'时，再调 agent_guide(task_type='system.task_reminder') 或 wip_list（经 parcae_advanced_tool 调用；默认即轻量）—— 不要主动检查，避免无关查询污染上下文",
     ],
     "session_closure": [
         "1. 任务完成/中断/会话结束前，调 agent_guide(task_type='system.task_closure') 获取收尾指引",

@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-
+from tests.client_ui._local_store import local_store_factory as _local_store_factory  # noqa: E402
 
 # ============================================================================
 # Fixtures
@@ -42,7 +42,7 @@ def _make_chat_panel(monkeypatch, tmp_path):
     from client.panels.chat import ChatPanel
 
     db_path = str(tmp_path / "top_bar_test.db")
-    monkeypatch.setattr(chat_module, "DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(chat_module, "_make_read_store", _local_store_factory(db_path))
     return ChatPanel()
 
 
@@ -438,7 +438,7 @@ class TestRefreshLastUpdated:
         """有活跃会话 → 显示会话 updated_at 时间。"""
         import asyncio
 
-        from client.core.agent import EventStore
+        from lib.agent_runtime import EventStore
 
         db_path = str(tmp_path / "top_bar_test.db")
         store = EventStore(db_path=db_path)
@@ -485,12 +485,12 @@ class TestRunOutcomeTotalTokens:
     """RunOutcome 应有 total_tokens 字段（T10 D47）。"""
 
     def test_total_tokens_default_zero(self):
-        from client.core.agent.types import RunOutcome
+        from lib.agent_runtime.types import RunOutcome
         outcome = RunOutcome(session_id="s1", status="completed")
         assert outcome.total_tokens == 0
 
     def test_total_tokens_settable(self):
-        from client.core.agent.types import RunOutcome
+        from lib.agent_runtime.types import RunOutcome
         outcome = RunOutcome(
             session_id="s1", status="completed",
             iterations=2,

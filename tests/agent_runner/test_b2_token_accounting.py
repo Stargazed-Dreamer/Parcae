@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
+from lib.agent_runtime import (  # noqa: E402
     EventStore,
     MockLLM,
     MockToolExecutor,
@@ -32,7 +32,7 @@ from client.core.agent import (  # noqa: E402
     RunOutcome,
     SessionRunner,
 )
-from client.core.agent.types import LLMResponse, Message  # noqa: E402
+from lib.agent_runtime.types import LLMResponse, Message  # noqa: E402
 
 # ============================================================================
 # 1. cost 字段已删除（types.py）

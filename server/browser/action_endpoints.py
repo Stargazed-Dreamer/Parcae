@@ -207,6 +207,8 @@ async def browser_action(req: BrowserActionRequest):
         # P2-3: 确定 target_type/value 用于记录统计
         from .stats import record_selector_call
         t = req.target
+        # 2026-11-01：先记下是否用了 node_id（下面会把它改写成 css，之后判断不到了）
+        _node_id_used = t.node_id is not None
         # P2-2: node_id 优先（仅 session 模式，需 snapshot 缓存）
         if t.node_id is not None:
             if sess is None or not sess.last_snapshot_nodes:
@@ -296,6 +298,54 @@ async def browser_action(req: BrowserActionRequest):
             _t_type, _t_val = "text", t.text
         else:
             _t_type, _t_val = "none", ""
+
+        # ── 2026-11-01 跨会话防护（见 server/browser/page_guard.py）──────────
+        # 多个 session 可能绑在同一个物理 page 上（url_pattern 复用 / force=true 加入共享），
+        # 此时"拿着旧快照的 css_path 去操作新 DOM"会静默点错元素。
+        # 两道闸：①快照后被**别的会话**改过就判 STALE_NODE；②操作前排队，不并发硬闯。
+        from .page_guard import PageBusy, get_page_guard
+
+        _pg = get_page_guard()
+        _owner = sess.owner if sess else ""
+        if _node_id_used and sess is not None and sess.last_snapshot_page_gen is not None:
+            _meta = _pg.meta(page)
+            if _meta.gen != sess.last_snapshot_page_gen and _meta.last_writer != req.session_id:
+                elapsed = int((_time.perf_counter() - start) * 1000)
+                return BrowserActionResponse(
+                    success=False, action=req.action, matched_count=0,
+                    url_before=page.url, url_after=page.url, elapsed_ms=elapsed,
+                    error=BrowserErrorResponse(
+                        error_code="STALE_NODE",
+                        error_message=BROWSER_ERROR_CODES["STALE_NODE"],
+                        phase="locate",
+                        debug_detail=(
+                            f"snapshot 之后该页面已被另一个会话操作过 "
+                            f"(gen {sess.last_snapshot_page_gen}→{_meta.gen}，"
+                            f"last_writer={_meta.last_writer[:8] or '?'}"
+                            f"/owner={_meta.last_writer_owner or '?'}"
+                            f"/action={_meta.last_action or '?'})；"
+                            f"node_id 反查出的 css_path 可能已指向别的元素，请重新 snapshot"
+                        ),
+                        elapsed_ms=elapsed,
+                    ),
+                )
+        _guard_cm = _pg.exclusive(
+            page, session_id=req.session_id, owner=_owner, action=req.action,
+        )
+        try:
+            await _guard_cm.__aenter__()
+        except PageBusy as _busy:
+            elapsed = int((_time.perf_counter() - start) * 1000)
+            return BrowserActionResponse(
+                success=False, action=req.action, matched_count=0, elapsed_ms=elapsed,
+                error=BrowserErrorResponse(
+                    error_code="PAGE_BUSY",
+                    error_message=BROWSER_ERROR_CODES["PAGE_BUSY"],
+                    phase="act",
+                    debug_detail=_busy.describe(),
+                    elapsed_ms=elapsed,
+                ),
+            )
         try:
             loc = None
             if t.css:
@@ -414,8 +464,25 @@ async def browser_action(req: BrowserActionRequest):
                 success=False, action=req.action, matched_count=0,
                 elapsed_ms=elapsed, error=err,
             )
+        finally:
+            # 释放页级令牌并把版本推进一格（供其他会话的快照过期判定使用）
+            await _guard_cm.__aexit__(None, None, None)
 
     # 无 session：走 exec_python 子进程模型（冷启动）
+    # 2026-11-01（G4）：没给任何目标时不再"抓第一个 tab"——多 tab 下那等于
+    # 静默操作别人的页面。这里先在后端消歧（知道有哪些 tab、也知道谁持有）。
+    from .target_resolver import cold_guard
+
+    _cold = await cold_guard(req.tab_id, req.url_pattern, start)
+    if isinstance(_cold, str):
+        # 后端替你选定了唯一可信 tab（其余是外来者/无主页），走精确匹配，
+        # 免得子进程 _find_page 又按物理 tab 数拦一次
+        req.tab_id = _cold
+    elif _cold is not None:
+        return BrowserActionResponse(
+            success=False, action=req.action, matched_count=0,
+            elapsed_ms=_cold.elapsed_ms, error=_cold,
+        )
     # 修复幽灵参数：无会话模式支持 tab_id 精确消歧。先把 CDP target id 解析为 URL，
     # 再作为精确匹配传给子进程 _find_page(tab_id=url)，避免多同域 tab 触发
     # AMBIGUOUS_TAB 且调用方无法消解。

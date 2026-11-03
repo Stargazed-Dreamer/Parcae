@@ -22,10 +22,39 @@ T25 改写要点（相对旧版）：
 
 from __future__ import annotations
 
+import pytest
+
 import server.overlay_client
 from server.screen.session import Mode as SessionMode
 from server.screen.session import get_session_manager
 from server.screen.session.manager import reset_session_manager
+
+
+@pytest.fixture(autouse=True)
+def elevated_backend(monkeypatch):
+    """声明"后端已提权 + 键鼠不真发"。
+
+    2026-10-22 提权闸门：注入类端点与 `/screen/control/request` 在未提权时**直接**
+    返回 status="not_elevated"（不弹接管确认窗）——因为非提权进程注入的键鼠事件会被
+    Windows UIPI 静默丢弃。本文件测的是授权状态机与门禁顺序，必须从真实前提
+    （start.bat 提权启动）出发；同时把 `_execute_action` 换成假实现，避免用例真的把
+    点击/按键打到当前桌面。
+    """
+    from server.screen import (
+        action_endpoints,
+        batch_endpoints,
+        desktop_transaction_endpoints,
+        routes,
+    )
+
+    def _fake_execute_action(action, **kwargs):
+        return {"success": True, "message": "mocked: 不真发键鼠"}
+
+    monkeypatch.setattr(routes, "_ADMIN_STATUS", True)
+    monkeypatch.setattr(routes, "_execute_action", _fake_execute_action)
+    for mod in (action_endpoints, batch_endpoints, desktop_transaction_endpoints):
+        monkeypatch.setattr(mod, "_ADMIN_STATUS", True, raising=False)
+        monkeypatch.setattr(mod, "_execute_action", _fake_execute_action, raising=False)
 
 
 class _Clock:

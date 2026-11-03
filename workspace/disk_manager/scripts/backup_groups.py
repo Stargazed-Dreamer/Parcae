@@ -119,7 +119,7 @@ def _home() -> Path:
 # ---------- HackBrowserData 定位 / 获取 ----------
 
 def _hbd_cache_dir() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA", _home())) / "LocalAgent" / "bin" / "hbd"
+    base = Path(os.environ.get("LOCALAPPDATA", _home())) / "Parcae" / "bin" / "hbd"
     return base
 
 
@@ -131,6 +131,18 @@ def ensure_hack_browser_data() -> Path | None:
         return Path(env)
     cache = _hbd_cache_dir()
     found = next(cache.glob("hack-browser-data*.exe"), None)
+    if not found:
+        # 改名前旧目录：首次命中时把 exe 搬到新缓存，搬不动就直接用旧路径
+        legacy = Path(os.environ.get("LOCALAPPDATA", _home())) / "LocalAgent" / "bin" / "hbd"
+        old = next(legacy.glob("hack-browser-data*.exe"), None)
+        if old:
+            try:
+                cache.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old), str(cache / old.name))
+                found = cache / old.name
+                _log(f"[迁移] HackBrowserData 缓存 {legacy} -> {cache}")
+            except OSError:
+                found = old
     if found:
         return found
     # 下载到缓存目录（重试吸收冷启动 TLS 超时）

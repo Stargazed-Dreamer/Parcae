@@ -107,7 +107,7 @@ async def v1_models(request: Request):
     if pool is not None:
         ids |= _pool_model_names(pool)
     ids |= set(get_key_store().all_alias_names())
-    data = [{"id": m, "object": "model", "owned_by": "localagent"} for m in sorted(ids)]
+    data = [{"id": m, "object": "model", "owned_by": "parcae"} for m in sorted(ids)]
     return {"object": "list", "data": data}
 
 

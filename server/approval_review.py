@@ -34,7 +34,7 @@ from pathlib import Path
 
 from server.config import get_cleanup_config, get_command_guard_config
 
-logger = logging.getLogger("localagent.approval_review")
+logger = logging.getLogger("parcae.approval_review")
 
 # ========== 审批审计日志（原 server/approval_log.py 归并） ==========
 # 持久化到 data/approvals.jsonl，重启不丢失。
@@ -454,7 +454,7 @@ def _build_review_prompt(operation_id: str, request_data: dict,
     }, ensure_ascii=False, indent=2)
 
     system_prompt = (
-        "你是 LocalAgent 项目的安全审批官。审查 agent 发起的代码/命令执行请求，"
+        "你是 Parcae 项目的安全审批官。审查 agent 发起的代码/命令执行请求，"
         "判断是否可自动放行（无需打扰用户）。\n\n"
         "审批目标：防范极端错误（rm -rf、删数据库、破坏系统），不是刁难正常工作。"
         "大部分 agent 请求是合法的，请客观中立评估，不要过度保守。\n\n"
@@ -480,7 +480,7 @@ def _build_review_prompt(operation_id: str, request_data: dict,
 
     prompt = (
         f"[trusted_bg 项目背景]\n"
-        f"LocalAgent 是个人 AI Agent 项目。审批防极端错误，不是刁难。\n"
+        f"Parcae 是个人 AI Agent 项目。审批防极端错误，不是刁难。\n"
         f"本项目运行在 Trae IDE 中，agent 通过 MCP 工具与后端协作，工具输出路径"
         f"{tool_output_dir} 的读写是正常协作流程。\n\n"
         f"[trusted_meta 端点元数据]\n"

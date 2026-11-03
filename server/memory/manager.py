@@ -81,6 +81,44 @@ def index_summary_from_value(value: str) -> str:
     return _structured_shape(parsed)
 
 
+# ---------------------------------------------------------------------------
+# fact 检索用词项切分（2026-10-10 工具体检 B1：把整串 LIKE 改成分词 OR 召回）
+# ---------------------------------------------------------------------------
+
+# 与 messages 侧 BM25 用同一套过滤口径（bm25.py:85）：ASCII 单字符丢弃，中文单字保留。
+# 刻意不去发明停用词表 —— 两侧口径必须一致，否则同一句 query 在 facts 和 messages
+# 上召回的语义对不齐，排序就没法比较。
+_MAX_FACT_TERMS = 12  # 词项数上限，兜住超长 query 生成的 SQL 长度
+
+
+def _escape_like(s: str) -> str:
+    """转义 LIKE 通配符。用户 query 里带 `%` / `_` 时，不转义会退化成全表匹配。"""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _fact_query_terms(query: str) -> list[str]:
+    """把 query 切成用于 fact 检索的词项（已去重、已保序、已限长）
+
+    分词不到任何词项时（query 全是单字符 ASCII 或纯空白）回退成整串一项，
+    保持老行为 —— 至少 `LIKE '%query%'` 还能查到东西，而不是静默返回空。
+    """
+    from server.memory.bm25 import _tokenize
+
+    raw = (query or "").strip()
+    if not raw:
+        return []
+    terms = [
+        t.strip().lower()
+        for t in _tokenize(raw)
+        if t.strip() and (len(t.strip()) > 1 or "\u4e00" <= t.strip() <= "\u9fff")
+    ]
+    if not terms:
+        return [raw.lower()]
+    seen: set[str] = set()
+    deduped = [t for t in terms if not (t in seen or seen.add(t))]
+    return deduped[:_MAX_FACT_TERMS]
+
+
 # 全局单例
 _instance: Optional["MemoryManager"] = None
 _instance_lock = threading.Lock()
@@ -399,9 +437,12 @@ class MemoryManager:
             seen_keys.add(f["key"])
 
         # 从 messages 表（补充：只列 facts 中没有的 key）
+        # C1（2026-10-18）：facts 里已失效的 key，不能再从 messages 兜底列出来。
+        # 否则"删了还在列表里"——失效等于没失效。
         cur = self.store.conn.execute(
             """SELECT key, source, content, created_at FROM messages
-               WHERE id IN (SELECT MAX(id) FROM messages WHERE key IS NOT NULL GROUP BY key)"""
+               WHERE id IN (SELECT MAX(id) FROM messages WHERE key IS NOT NULL GROUP BY key)
+                 AND key NOT IN (SELECT key FROM facts WHERE archived_at IS NOT NULL)"""
         )
         for row in cur.fetchall():
             if row[0] in seen_keys:
@@ -501,8 +542,11 @@ class MemoryManager:
         # 与"v3 旧数据"（两列均 NULL）行，交给下方 Python 逐条匹配。
         # 历史缺陷：候选集只含 LIKE 命中行且回退条件写成 `if not rows`（仅 SQL 空结果触发），
         # 导致只要存在任一 context 命中行，keyword-only/旧数据记忆永远不被召回。
+        # C1（2026-10-18）：已失效行永不召回。括号必须包住整个 OR 组，
+        # 否则 `AND archived_at IS NULL` 只会约束最后一个 OR 分支。
         candidate_clause = (
-            f"({where_clause}) OR consumption_contexts IS NULL OR consumption_contexts = '[]'"
+            f"(({where_clause}) OR consumption_contexts IS NULL OR consumption_contexts = '[]')"
+            " AND archived_at IS NULL"
         )
 
         try:
@@ -683,9 +727,16 @@ class MemoryManager:
 
         v3 改进：启用 EvidenceLedger 时，组织三源召回（messages + facts + summaries）
         为结构化证据集返回；未启用时回退到原 messages-only 行为。
+
+        source=None 时默认排除 `source='tool'` 的工具调用日志（实测占 messages
+        的 91.7%，不排除会把真记忆挤掉）；要查工具日志显式传 source="tool"。
         """
         # 1. 原 messages 搜索（SemanticSearch 内部已记录 trace）
-        msg_results = self.semantic.search(query, top_k=top_k * 2, since=since, until=until, source=source)
+        exclude_sources = {"tool"} if source is None else None
+        msg_results = self.semantic.search(
+            query, top_k=top_k * 2, since=since, until=until, source=source,
+            exclude_sources=exclude_sources,
+        )
 
         # 2. 启用 EvidenceLedger 时，从 facts 和 summaries 也搜一遍，然后组织证据
         if self.config.enable_evidence_ledger:
@@ -708,26 +759,62 @@ class MemoryManager:
     def _search_facts(self, query: str, top_k: int = 10) -> list[dict]:
         """从 facts 表搜索匹配 query 的事实
 
-        简单实现：用 SQL LIKE 匹配 key 或 value，按 updated_at DESC 排序。
-        不调 LLM，性能可控。
+        v2（2026-10-10，工具体检 B1）：原来是 `LIKE '%整串 query%'`，中文一加空格
+        就零命中 —— 查「抽卡 游戏 状态」时三个词都在 value 里、整串却不连续，
+        fact 全漏；而 messages 走向量+BM25 永远能凑满 top_k 把位置占掉，于是这个
+        端点对外表现成「只搜得到 message」，且是**静默**的。
+
+        现在：按 BM25 侧的同款分词切成词项 → SQL 侧 OR 召回候选 → Python 侧按
+        「命中词项数 / 词项总数」算 match_score 排序。整串的每个词项都是它的子串，
+        所以原来能精确子串命中的场景排序不变（覆盖率满分），只是不再因为差一个空格
+        就整条消失。
+
+        ⛔ match_score 只是**召回质量**，不是可信度：下游 `EvidenceLedger` 会把它
+        乘到 confidence 上当 retrieval_score（fact 的 confidence 实测恒为 1.0，
+        不乘的话任何一条 fact 命中都稳压所有 message）。
+        不调 LLM；facts 表 161 条量级，全表 LIKE 无压力。
         """
+        terms = _fact_query_terms(query)
+        if not terms:
+            return []
+
         try:
-            # 用 %query% 模糊匹配 key 或 value
-            pattern = f"%{query}%"
+            # OR 召回：任一词项命中即进候选（召回宁宽）；排序交给下面的覆盖率
+            cond = " OR ".join(["key LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\'"] * len(terms))
+            params: list[str] = []
+            for t in terms:
+                pat = f"%{_escape_like(t)}%"
+                params.extend([pat, pat])
             cur = self.store.conn.execute(
-                """SELECT id, key, value, source, confidence, fact_type, occurred_at,
+                f"""SELECT id, key, value, source, confidence, fact_type, occurred_at,
                           updated_at
-                   FROM facts
-                   WHERE key LIKE ? OR value LIKE ?
-                   ORDER BY updated_at DESC
-                   LIMIT ?""",
-                (pattern, pattern, top_k),
+                    FROM facts
+                    WHERE ({cond}) AND archived_at IS NULL""",
+                params,
             )
             columns = [desc[0] for desc in cur.description]
-            return [dict(zip(columns, row, strict=False)) for row in cur.fetchall()]
+            rows = [dict(zip(columns, row, strict=False)) for row in cur.fetchall()]
         except Exception as e:
             logger.warning(f"_search_facts 失败: {e}")
             return []
+
+        scored: list[dict] = []
+        for r in rows:
+            hay = f"{r.get('key') or ''}\n{r.get('value') or ''}".lower()
+            hits = sum(1 for t in terms if t in hay)
+            if not hits:
+                # SQL LIKE 对 ASCII 大小写不敏感、Python 的 `in` 敏感，兜掉这层差异
+                continue
+            r["matched_terms"] = hits
+            r["match_score"] = round(hits / len(terms), 4)
+            scored.append(r)
+
+        # 命中词项数降序；同分用 updated_at 降序（ISO 字符串可直接比）
+        scored.sort(
+            key=lambda r: (r["matched_terms"], str(r.get("updated_at") or "")),
+            reverse=True,
+        )
+        return scored[:top_k]
 
     def _search_summaries(self, query: str, top_k: int = 10) -> list[dict]:
         """从 summaries 表搜索匹配 query 的摘要

@@ -21,7 +21,7 @@ from PIL import Image
 
 from .remote_vl import remote_vl
 
-logger = logging.getLogger("localagent.feedback_vl")
+logger = logging.getLogger("parcae.feedback_vl")
 
 # VL 调用超时（秒）。超时返回 error，不阻塞主操作响应。
 _DEFAULT_TIMEOUT = 20

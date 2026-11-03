@@ -24,6 +24,7 @@
 - `grill-me`：拷问计划入口，路由到 `grilling`（按用途归入 dev：开发决策压力测试）
 - `grilling`：追问访谈核心逻辑（一次一个问题 + 推荐答案，design tree 逐个解决决策依赖）
 - `grill-with-docs`：边拷问边沉淀 ADR + 项目词汇表（路由到 `grilling` + `domain-modeling`）
+- `handoff`：会话交接（换会话/上下文将满时压成可接手稿 `temp/handoff/`，含接手侧）
 - `implement`：6 步实现 ticket 流程
 - `prototype`：UI 变体 / 状态机终端原型探索
 - `resolving-merge-conflicts`：git 合并冲突解决流程

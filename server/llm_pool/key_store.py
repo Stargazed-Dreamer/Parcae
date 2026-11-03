@@ -48,7 +48,7 @@ from server.llm_pool.types import (  # noqa: F401
     UseCaseDef,
 )
 
-logger = logging.getLogger("localagent.key_store")
+logger = logging.getLogger("parcae.key_store")
 
 # keys.json 当前 schema 版本（迁移链末态）。CRUD 写 wrapper 时必须引用本常量，
 # 禁止写版本字面量——否则每次写盘后 _load_keys_cached 都会重跑迁移链并重建 .json.v8backup（5-11）
@@ -213,7 +213,7 @@ class ResolvedKey:
 # =====================================================================
 
 # 模块级 fallback：config 读取失败时使用。基于 __file__ 的绝对路径，不依赖 cwd。
-# key_store.py 在 server/llm_pool/ 下，parent×3 才是项目根 localAgent/
+# key_store.py 在 server/llm_pool/ 下，parent×3 才是项目根 Parcae/
 _UNIFIED_KEYS_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "llm" / "keys.json"
 _keys_file_lock = threading.RLock()
 _cache: list[KeyRecord] | None = None
@@ -226,7 +226,7 @@ def _resolve_against_project_root(p: str | Path) -> Path:
     p = Path(p)
     if p.is_absolute():
         return p
-    # key_store.py 在 server/llm_pool/ 下，parent×3 才是项目根 localAgent/
+    # key_store.py 在 server/llm_pool/ 下，parent×3 才是项目根 Parcae/
     return Path(__file__).resolve().parent.parent.parent / p
 
 
@@ -826,6 +826,87 @@ def _load_keys_cached(force: bool = False) -> list[KeyRecord]:
 # =====================================================================
 
 
+# =====================================================================
+# Ticket 03：候选遍历方向按 use_case 分策略
+# =====================================================================
+
+# 定位类 use_case 的输出会直接变成点击坐标——**错的比贵的更糟** ⇒ 质量优先（tier 降序）。
+# 其余（高频截图分析 vl_ocr / vl_activity_tracker，以及全部 llm/aigc use_case）
+# 保持既有行为：便宜优先（tier 升序）。
+# ⛔ tier 语义（成本/质量档）不因此被重新定义：这里只决定同一批候选的**遍历方向**。
+_MODEL_ORDER_DESC_USE_CASES = frozenset({"vl_vision"})
+
+
+def model_order_for_use_case(use_case: str | None) -> str:
+    """公有助手：返回该 use_case 的模型遍历方向（Ticket 03）。
+
+    Returns:
+        "asc"  —— tier 升序（便宜优先；默认，与本次改造前的行为逐字一致）
+        "desc" —— tier 降序（质量优先；定位兜底 vl_vision 专用）
+
+    未注册/未传 use_case 一律 "asc"，因此既有调用方（LLM 池、apikey 预览）
+    在本次改造前后拿到同一个模型。
+    """
+    return "desc" if (use_case or "") in _MODEL_ORDER_DESC_USE_CASES else "asc"
+
+
+def ordered_models_for_use_case(rec: KeyRecord, tier, required_scope: str,
+                                use_case: str | None = None,
+                                exclude_models: set[str] | None = None) -> list[str]:
+    """公有助手（Ticket 03）：按 use_case 策略展开一条 key 的候选模型名列表。
+
+    返回顺序**即该 use_case 的降级链顺序**——第一个是这次会用的，后面依次是
+    上一个被判永久失效时的接班人。调用方（远程 VL 的 failover）只需按顺序取。
+
+    过滤口径与既有 `_pick_model_for_tier` 完全一致：enabled + scope + tier 范围，
+    再剔除 exclude_models（本轮已确认永久失败的模型）。
+
+    Args:
+        rec: 一条 key 记录
+        tier: int / (min,max) / None（None 时不过滤 tier）
+        required_scope: 如 "vl" / "llm"
+        use_case: 决定遍历方向；None = 升序（兼容既有调用）
+        exclude_models: 已确认永久失败的模型名集合
+
+    Returns:
+        模型名列表（可能为空）
+    """
+    min_t, max_t = _normalize_tier_range(tier) if tier is not None else (0, 0)
+    candidates = [m for m in rec.models
+                  if m.get("enabled", True)
+                  and required_scope in m.get("scope", ["llm"])]
+    if exclude_models:
+        candidates = [m for m in candidates if m.get("name") not in exclude_models]
+    if max_t > 0:
+        candidates = [m for m in candidates
+                      if min_t <= int(m.get("tier", 3)) <= max_t]
+    if not candidates:
+        return []
+    # 稳定排序：同 tier 内保持 keys.json 里的原有先后（与既有行为一致）
+    desc = model_order_for_use_case(use_case) == "desc"
+    candidates.sort(key=lambda m: int(m.get("tier", 3)), reverse=desc)
+    return [m["name"] for m in candidates]
+
+
+def pick_model_for_use_case(rec: KeyRecord, tier, required_scope: str,
+                            use_case: str | None = None,
+                            preferred_model: str | None = None,
+                            exclude_models: set[str] | None = None) -> str:
+    """公有助手（Ticket 03）：按 use_case 的遍历方向选一个模型。
+
+    与 `ordered_models_for_use_case` 同一个方向策略；preferred_model 仍是**软偏好**
+    （在候选链内才生效，不引入新候选）。无候选时返回 ""。
+    """
+    names = ordered_models_for_use_case(rec, tier, required_scope, use_case, exclude_models)
+    if not names:
+        return ""
+    if preferred_model:
+        for name in names:
+            if name == preferred_model:
+                return name
+    return names[0]
+
+
 def _pick_model_for_tier(rec: KeyRecord, tier, required_scope: str,
                          preferred_model: str | None = None,
                          exclude_models: set[str] | None = None) -> str:
@@ -841,28 +922,18 @@ def _pick_model_for_tier(rec: KeyRecord, tier, required_scope: str,
     3. preferred_model 在候选中 → 优先返回（软偏好）
     4. 否则返回候选第一个（最低 tier）
 
+    Ticket 03 起：本函数不带 use_case，因此方向恒为升序（与改造前逐字一致）。
+    需要"按 use_case 定方向"的调用方（resolve_keys）改走
+    `pick_model_for_use_case(..., use_case=...)` / `ordered_models_for_use_case()`。
+
     exclude_models：本次调用内已确认"永久失败"的模型名（如上游已下架的模型 ID）。
     剔除后若无候选则返回 ""，调用方据此跳过该 key——这是同 key 内模型级 fallback 的
     落点：远程 VL 此前每个 key 只解析出一个模型，400 死模型没有下一个可换。
     """
-    min_t, max_t = _normalize_tier_range(tier) if tier is not None else (0, 0)
-    candidates = [m for m in rec.models
-                  if m.get("enabled", True)
-                  and required_scope in m.get("scope", ["llm"])]
-    if exclude_models:
-        candidates = [m for m in candidates if m.get("name") not in exclude_models]
-    if max_t > 0:
-        candidates = [m for m in candidates
-                      if min_t <= int(m.get("tier", 3)) <= max_t]
-    if not candidates:
-        return ""
-    # 按 tier 升序（优先更低 tier）
-    candidates.sort(key=lambda m: int(m.get("tier", 3)))
-    if preferred_model:
-        for m in candidates:
-            if m["name"] == preferred_model:
-                return m["name"]
-    return candidates[0]["name"]
+    # Ticket 03：过滤 + 排序已上移到 ordered_models_for_use_case（方向由 use_case 定）。
+    # 本函数不传 use_case ⇒ 恒为 tier 升序，与改造前逐字一致；签名与返回形状都不动。
+    return pick_model_for_use_case(rec, tier, required_scope, None,
+                                   preferred_model, exclude_models)
 
 
 def _to_resolved_key(rec: KeyRecord, model: str) -> ResolvedKey:
@@ -947,8 +1018,11 @@ def resolve_keys(use_case: str, tier=None,
             continue
 
         # tier 范围匹配：在 uc.scope 候选中必须有 tier 在范围内的 model
-        chosen_model = _pick_model_for_tier(
+        # Ticket 03：遍历方向按 use_case 分策略——vl_vision（定位兜底）取 tier 降序
+        # 保质量，其余取升序保成本。tier 语义（成本/质量档）不变，也不新增配置项。
+        chosen_model = pick_model_for_use_case(
             rec, resolved_range, uc.scope,
+            use_case=use_case,
             exclude_models=(exclude_models or {}).get(rec.id),
         )
         if not chosen_model:

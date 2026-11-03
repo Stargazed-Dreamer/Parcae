@@ -1,6 +1,6 @@
 # disk_io_audit —— 前后端磁盘读写审计
 
-审计 LocalAgent 后端（`server.main`, FastAPI :8766）与前端（`client.main`, PySide6）
+审计 Parcae 后端（`server.main`, FastAPI :8766）与前端（`client.main`, PySide6）
 在**日常运行**中自身产生的磁盘读写量，用来发现「不合理的高频 / 过量落盘」。
 
 ## 脚本一览
@@ -15,6 +15,8 @@
 | `fix_port_and_start.py` | 重启后 8766 被 WinNAT 抢占时修复并拉起后端+探针（**需管理员**） | ~30 秒 |
 | `restart_and_track.py` | 「重启后端 → 起追踪」一键（两级 detach，防被后端 Job 带走） | ~1 分钟 |
 | `srum_attrib.py` | 回答「**某段时期内**谁在高强度读写」：读 Windows SRUM 账本 `SRUDB.dat`，出每应用总量 + 每小时时间线 + Top 榜 | ~1 分钟 |
+| `ssd_wear_snapshot.py` | **跨周/跨月耐久监测**：读 NVMe SMART 的「数据单位写入」，按窗口记真实落盘字节 + harness 强度指纹（**已接入 loop 任务，每 30 分钟一行**，见下） | ~2 秒 |
+| `ssd_wear_report.py` | 把上面的 CSV 折成「写入 × 活跃度」证据表：分桶中位数、相关性、异常窗口、散点图 | ~1 秒 |
 
 > `srum_attrib.py` 有两个前置动作绕不过去：① SRUDB 被 SruService 独占锁定，须**管理员**先
 > `esentutl /y C:\Windows\System32\sru\SRUDB.dat /d <副本> /o` 拷出；② 解析库 `dissect.esedb`
@@ -157,6 +159,106 @@ python tools/disk_io_audit/microbench.py --idle 60 --n 5
     --heartbeat temp/disk_io_audit_YYYYMMDD/probe.heartbeat
 ```
 
+## 跨周/跨月耐久监测（`ssd_wear_snapshot.py` + `ssd_wear_report.py`）
+
+### 挂在哪跑：loop 任务为主，开机启动兜底
+
+| 入口 | 节奏 | 作用 |
+|---|---|---|
+| loop 任务 `disk_manager.ssd_wear` | 每 30 分钟一行 | **主力**：能分出「高强度时段 / 空闲时段」 |
+| `programs.json` 条目 `SSD写入监测` | 每次登录 +120 s | 兜底：后端很久没起时仍有数据（`--skip-if-recent 900` 防重复行） |
+
+配置在 `config.toml` 的 `[loops.disk_manager]`（`ssd_wear_interval` / `ssd_wear_first_run_delay` /
+`skip_if_recent_secs`），action 实现在 `workspace/disk_manager/loop_actions.py`。
+改完要**重启后端**才生效（`TASK_BUILDERS` 在 `loop_manager` 模块导入时合并）。
+
+**为什么挂在 loop 上可以容忍后端重启/崩溃**：SMART `Data Units Written` 是**盘级累计**，
+间隔多久都能正确相减 —— 断档只会让窗口变宽，不会丢数据。这与「进程计数器」类方案
+（重启即清零）本质不同，所以不需要为了采数去养一个常驻进程。
+
+**为什么不能只挂开机**：开机那一条确实能拿到「上一次会话总共写了多少」，但它同时记的
+强度指纹是**开机 2 分钟后的空闲态**（进程刚起、CPU 很低）⇒ 写入量与活跃度**配对错位**，
+永远回答不了「高写入是不是发生在高强度时段」。这是把采样挪进 loop 的真正理由。
+
+### 为什么不能用 SRUM / psutil 回答「一共写了多少 TB」
+
+| 尺子 | 性质 | 能否当落盘字节 |
+|---|---|---|
+| NVMe SMART `Data Units Written` | 盘控制器自己数、**单调递增**、跨重启持续 | ✅ **真值** |
+| SRUM `BytesWritten` | 进程逻辑写（含 IPC、页缓存重复脏化） | ❌ 本机实测可虚高数倍 |
+| psutil `io_counters()` / 任务管理器 | 同上，Electron 多进程下更极端 | ❌ 实测虚高过 **36×** |
+| 物理盘 `Win32_PerfRawData_PerfDisk` | 自开机累计的块设备字节 | ⚠ 可信但**开机清零**，只适合同会话窗口 |
+
+2026-11-03 校准（同一 45 s 窗口、两边同时取差分）：SMART **0.136 GB** vs psutil `PhysicalDrive0`
+**0.135 GB**，差 0.7% ⇒ 单位换算 `Data Units × 1000 × 512` 没问题，SMART 差分可以当落盘量用。
+
+### 「是不是高强度使用」怎么判 —— 三个观测量，看关系不设阈值
+
+每行 CSV 记同一窗口内的三个量（`win_secs` / `dw_bytes` / `cpu_s` / `cores` / `harness_json`）：
+
+| 观测量 | 含义 | 已知限界 |
+|---|---|---|
+| `dw_bytes` → GB/h | 该窗口真实落盘字节 | 真值（设备计数器） |
+| `cores` = `cpu_s / win_secs` | 窗口内 harness 进程平均占用几个核 | **下限**：进程中途退出，最后一段 CPU 结算不到（首轮 `new_pids` 全高，属正常） |
+| `log_n` / `log_wr_mb` | 被写日志文件数 / 日志新增字节 | 只在**上一轮有基线**时才算增量；无基线且非本窗口新建 ⇒ 记 0（宁可少算，不虚报） |
+
+CPU 用 `pid:create_time` 做键与上一轮快照求差（防 pid 复用）。三个都已实测过的坑：
+**系统累计 CPU 开机清零**（跨重启差分为负）、**日志目录总体积会被轮转清掉**
+（WorkBuddy 曾 1088 MB → 204 MB，不能拿目录体积做增量）、**harness 累计 CPU 随进程退出丢失**
+（所以必须落基线求差，不能只读当前值）。
+
+判读方式（`ssd_wear_report.py` 直接输出）：
+- **按核数分桶**看写入中位数：若「≥2 核」桶的 GB/h 明显高于「≈0 核」桶 ⇒ 写入确实跟着负载走；
+- **核数≈0 但写入 > 中位数 2 倍**的窗口单独列出来 —— 这些**不是 agent 写的**，要回头用
+  `srum_attrib.py` 找别的来源（系统更新 / 索引 / 备份 / 其它进程）；
+- 相关系数（Pearson/Spearman）只说明同向，**不说明因果**，幅度是否成比例要看分桶表。
+
+### v3 加的第四个观测量：内存压力（`commit_gb` / `pf_used_mb` / `pf_peak_mb`）
+
+**这是 2026-11-03 查那个 9.79 GB 突发逼出来的。** 那次实测结论：大额写入**不是**任何 app 的数据写入，
+而是**内存压力下的分页写回落（pagefile）** —— 而分页写入有一个致命性质：
+
+> `pagefile.sys` 的 mtime **冻结在开机时刻**（本机 10:17:41 开机后再也没变过）。
+> 往页文件写字节**不产生任何文件时间戳** ⇒ 全盘 mtime 扫描（实测扫过 2,676,975 个文件）
+> 只会找到 0.07 GB，让人误以为"没人写"。**别拿"扫不到文件"当"没有写入"。**
+
+当时的硬数字（开机 4.54 h 内）：disk0 写 **61.15 GB**，其中 `\Memory\Pages Output` 累计
+**43.05 GB = 70%**；SRUM `System` 条目当日累计 36.69 GiB 独立佐证（差 9%）。
+
+所以每个窗口现在同时记提交电荷与页文件用量。判别方式：
+
+| 观测 | 结论 |
+|---|---|
+| 设备增量大，页文件已用/提交也同步涨 | **分页写回落**（`System` 名下，内核工作线程记账）——对 SSD 是纯损耗、零信息留存 |
+| 设备增量大，页文件净增 ≈ 0、提交平稳 | 另有落盘路径：某应用真写文件 / 写后即删的临时文件 / 缓存写回 |
+
+⚠ 两个必须一起看的限界：
+- `pf_used_mb` 是**水位**不是流量 —— 页被读回释放时水位会降，所以只能看「同向且同量级」，不能当流水账；
+- `Pages Output` 只有「自开机累计」这一个原始计数器（`Win32_PerfRawData_PerfOS_Memory.PagesOutputPersec`
+  是 **PERF_COUNTER_COUNTER 的累计原始值**，`Formatted` 版本才是 /s），也切不到单分钟。
+
+```bash
+# 文本汇总（默认只吃 ≥10 分钟窗口，避免 30 秒窗口的瞬时速率冒充结论）
+uv run python tools/disk_io_audit/ssd_wear_report.py
+# 另存散点图（x=核数, y=GB/h, 点大小=窗口写入量）
+uv run python tools/disk_io_audit/ssd_wear_report.py --html temp/ssd_report.html
+```
+
+### 读结果
+
+```bash
+# 看存量（不追加）
+cut -d, -f1,3,4,6 workspace/disk_manager/ssd_wear_log.csv
+```
+
+对 `2026-10-30` 这类尖峰日（SRUM 报 1216 GiB 写）要先怀疑口径：
+**只有 SMART 的日增量才是当天真的落了多少字节。**
+
+旧 schema（v1，无 `win_secs`/`dw_bytes`/`cores` 列）会在首次运行时自动升级，
+原文件留一份 `.bak-schema`。
+
+⚠ 不要用「寿命百分比没变」当安全证据：该字段粒度 1%，按本机当前速率约 82 天通电才动一格。
+
 ## 参数速查
 
 ```
@@ -178,4 +280,22 @@ probe.py
   --heartbeat PATH      心跳文件：每 tick 原子写入存活状态与当前速率（长跑必备）
   --report FILE         聚合模式
   --verbose             每个 tick 都打印
+
+ssd_wear_snapshot.py
+  --csv PATH            累计记录（默认 workspace/disk_manager/ssd_wear_log.csv）
+  --state PATH          CPU / 日志基线（默认 workspace/disk_manager/ssd_intensity_state.json）
+  --log PATH            pythonw 下的输出日志（stdout 不可写时自动重定向）
+  --tbw TB              标称耐久，用于算剩余年限（默认 600）
+  --delay-secs SEC      先等 N 秒再采集（开机启动用，等磁盘活动平息）
+  --skip-if-recent SEC  距上次采集不足 N 秒则跳过（loop 用 600，开机兜底用 900）
+  --json                输出单行 JSON（loop 任务的 action 解析用）
+  --quiet               只写 CSV，不打印分析
+
+ssd_wear_report.py
+  --csv PATH            累计记录
+  --disk N              看哪块盘（默认 0 = 系统盘）
+  --min-win SEC         只用窗口 ≥N 秒的行（默认 600）
+  --since YYYY-MM-DD    只看该日期之后
+  --html PATH           另存散点图 HTML
+  --quiet               只写 CSV，不打印分析
 ```

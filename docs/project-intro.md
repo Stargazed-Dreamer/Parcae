@@ -1,4 +1,4 @@
-# LocalAgent 项目深度导览（project-intro）
+# Parcae 项目深度导览（project-intro）
 
 > **这份文档写给谁**：第一次打开这个仓库、想搞明白"这项目到底在干什么、怎么运转、我该从哪看起"的人——无论是新维护者、接手的开发者，还是纯粹好奇的朋友。
 >
@@ -86,7 +86,7 @@
 
 ### 一句话
 
-**LocalAgent 是跑在你自己 Windows 电脑上的私人 AI 助理系统。它让你正在用的 AI（不管哪个 IDE 里的模型）能"看见屏幕、操作浏览器、跑代码、读写文件、记住你的习惯"，并且这套能力对所有 AI 软件通用。**
+**Parcae 是跑在你自己 Windows 电脑上的私人 AI 助理系统。它让你正在用的 AI（不管哪个 IDE 里的模型）能"看见屏幕、操作浏览器、跑代码、读写文件、记住你的习惯"，并且这套能力对所有 AI 软件通用。**
 
 ### 它实际被用来干什么（作者的真实用法，供想象）
 
@@ -112,7 +112,7 @@
                                    │ MCP 协议（一种标准电话线）
                                    ▼
                     ┌──────────────────────────────┐
-                    │    LocalAgent 后端（总部大楼）  │
+                    │    Parcae 后端（总部大楼）  │
                     │                              │
                     │  📁 档案室：记忆、待办、WIP     │
                     │  📞 总机：LLM 池（多张 AI 电话卡）│
@@ -128,7 +128,7 @@
 
 ### 和"直接用 ChatGPT"有什么不同？
 
-| | 直接用网页版 AI | LocalAgent |
+| | 直接用网页版 AI | Parcae |
 |---|---|---|
 | 能看你的屏幕吗 | 只能你手动截图发它 | 自己截屏、自己找窗口、自己定位点击 |
 | 能操作你的电脑吗 | 不能 | 鼠标键盘、UIA 语义层、浏览器 CDP |
@@ -430,7 +430,7 @@ flowchart TD
 | `agent_chat` | GUI 对话/评分端点 | 3-5 |
 | `hourly_summarize` | Loop 整点活动总结 | 3-5 |
 | `download_watcher` | 下载文件分类（含文件内容，sensitive） | 4-5 |
-| `memory_compress` / `memory_validate` | 记忆压缩/验证（处理个人数据，sensitive） | 2-4 |
+| `memory_compress` | 记忆压缩（处理个人数据，sensitive） | 2-4 |
 | `command_guard` | 危险命令的 LLM 预审 | 3-5 |
 | `vl_activity_tracker` / `vl_ocr` / `vl_vision` | 屏幕描述 / VL OCR / 界面元素解析 | 2-5 |
 | `stock_advisor_opening/closing/evening/query` | 组件自注册（见下）：开盘/收盘 3-5，晚间复盘 4-5，午询 3-5 | — |
@@ -985,13 +985,13 @@ GUI 聊天面板背后是一台自研对话引擎。它的出生故事值得先�
 
 上下文越聊越长，估算快到模型上限、或真被上游"超限"打回时，有一次性的补救——见下一节。
 
-> 深挖：`client/core/agent/runner.py`（主循环本体，文件头列了每一步的设计依据）→ `client/core/agent/event_store.py`（消息与工具调用的落库）
+> 深挖：`lib/agent_runtime/runner.py`（主循环本体，文件头列了每一步的设计依据）→ `lib/agent_runtime/event_store.py`（消息与工具调用的落库）
 
 ### 11.3 压缩：宁可长，不可坏
 
 对话越长越贵，也越容易撞上下文上限。引擎的对策是**压缩**：最近几轮对话保持原貌一字不动，中间的历史让一个便宜模型按固定七段格式（任务目标/关键文件/决策/进度/阻塞/下一步/其他）写成摘要顶上；阈值是代码里的比例常量。摘要生成失败就**原样返回不压缩**——宁可超长，不可丢信息。而且这个补救只自动做一次：压缩后重试再爆就直接明确失败，绝不进入"压缩→再爆→再压缩"的死循环（这就是 11.1 保留清单里"防死循环标志不因重试清零"的用武之地）。
 
-> 深挖：`client/core/agent/compactor.py`（阈值常量、七字段摘要模板、"失败返回原消息"的兜底分支，文件头就是说明书）
+> 深挖：`lib/agent_runtime/compactor.py`（阈值常量、七字段摘要模板、"失败返回原消息"的兜底分支，文件头就是说明书）
 
 ### 11.4 DoomLoop：AI 原地打转时，掐掉它
 
@@ -999,13 +999,13 @@ GUI 聊天面板背后是一台自研对话引擎。它的出生故事值得先�
 
 命中后做什么？**不自动重试**——因为重试大概率接着循环，纯粹白烧钱。改做三件事：已生成的半截回答**保住落库**（不让你对着空气等）；写一条**只有你看得见的警告**（不进 AI 的上下文，不污染它下次的表现）；会话标记为中断。换种问法还是新开对话，由你决定。
 
-> 深挖：`client/core/agent/runner.py`（命中后的处理分支，注释写明"不再重试"的决策编号）→ `client/core/agent/doom_loop.py`（滑动窗口重复检测算法；注意其文件头还留着早期"重试三次"的旧设计注释，以 runner 的实际分支为准）
+> 深挖：`lib/agent_runtime/runner.py`（命中后的处理分支，注释写明"不再重试"的决策编号）→ `lib/agent_runtime/doom_loop.py`（滑动窗口重复检测算法；注意其文件头还留着早期"重试三次"的旧设计注释，以 runner 的实际分支为准）
 
 ### 11.5 Reconciler：开机打扫战场
 
 进程崩溃会留下烂摊子：状态永远"转圈"的会话、发出去了却没等到结果的工具调用、写了一半的流式事件。引擎每次启动跑一遍**打扫程序**：把残留的活跃会话标记中断、给悬空工具调用补上错误结果、把半截流式事件合并成完整消息。它幂等（重复跑不重复补），还带活跃性守卫——近期真有动静的会话一律跳过，怕误伤还在跑的。这就是 11.1 保留清单里"启动时打扫战场"的实现。
 
-> 深挖：`client/core/agent/reconciler.py`（文件头就是三步清扫清单与幂等、守卫规则）
+> 深挖：`lib/agent_runtime/reconciler.py`（文件头就是三步清扫清单与幂等、守卫规则）
 
 ### 11.6 引擎不认识界面：核心库与 GUI 的分工
 
@@ -1013,7 +1013,7 @@ GUI 聊天面板背后是一台自研对话引擎。它的出生故事值得先�
 
 GUI 侧（面孔）守另一套纪律：后台线程跑引擎，主线程只读本地聊天库高频渲染（4.3 讲过的双实例 + WAL 设计）；打字机效果、消息时间线、侧边栏会话树，全部建立在"主线程永不直接调引擎"之上。
 
-> 深挖：`client/core/agent/facade.py`（GUI 与引擎的分界面，文件头写明"核心逻辑不依赖 Qt"）→ `docs/chat-engine.md`（线程桥接架构图与主线程/工作线程分工）
+> 深挖：`lib/agent_runtime/facade.py`（GUI 与引擎的分界面，文件头写明"核心逻辑不依赖 Qt"）→ `docs/chat-engine.md`（线程桥接架构图与主线程/工作线程分工）
 
 ### 11.7 面孔背后的规矩：界面设计系统
 
@@ -1025,7 +1025,7 @@ GUI 侧（面孔）守另一套纪律：后台线程跑引擎，主线程只读�
 
 主线程把消息递给后台线程的引擎，输入框立刻空出来。引擎载入历史、顺手修补悬空调用、组装请求、经 LLM 池借到电话——第一个字回来了，打字机开始打字。中途思考内容开始复读 → 死循环检测掐断：半截回答保留，一条只有你能看到的警告浮现在时间线里。回答带着工具调用 → 先落库，再串行执行，结果回灌，回到开头再来一轮；某轮上下文估算快爆 → 压缩一次再试。直到某一轮不再有工具调用，落库、收尾。此刻你直接拔电源也没关系——下次启动，打扫程序会把烂摊子收拾干净，这段对话照样在侧边栏里完整躺着。
 
-> 自验：在 GUI 里问一个必须调工具才能回答的问题（"看看现在几点并写进 temp 下某个文件"），对照 11.2 数一数主循环跑了几轮；再打开 `client/core/agent/` 目录扫一眼文件头，几乎每个文件都写着"不依赖 Qt"。
+> 自验：在 GUI 里问一个必须调工具才能回答的问题（"看看现在几点并写进 temp 下某个文件"），对照 11.2 数一数主循环跑了几轮；再打开 `lib/agent_runtime/` 目录扫一眼文件头，几乎每个文件都写着"不依赖 Qt"。
 
 ---
 
@@ -1539,7 +1539,7 @@ AI 密钥这边另有专门的**监听守护**：改完 `keys.json`（比如给�
 **能力边界**
 
 **Q：GUI 里的对话和 IDE 里的 agent，工具和纪律是同一套吗？**
-工具目录同源——GUI 对话引擎的工具清单就是从后端接口清单物化出来的，与 IDE agent 经 MCP 看到的同出一门；执行都打回后端，都过服务端同一套审批与安全层（把关在 HTTP 中间件，不区分请求从哪来）。行为合同也同源：GUI 引擎同样注入 AGENTS.md、首轮自动调 agent_guide。真正的差别在宿主：IDE agent 是外部软件里的模型、走 MCP 协议、适合长程自主跑；GUI 是自家客户端里的会话，你在场一问一答。深挖：`client/core/agent/tool_registry.py`、`client/core/agent/runner.py`
+工具目录同源——GUI 对话引擎的工具清单就是从后端接口清单物化出来的，与 IDE agent 经 MCP 看到的同出一门；执行都打回后端，都过服务端同一套审批与安全层（把关在 HTTP 中间件，不区分请求从哪来）。行为合同也同源：GUI 引擎同样注入 AGENTS.md、首轮自动调 agent_guide。真正的差别在宿主：IDE agent 是外部软件里的模型、走 MCP 协议、适合长程自主跑；GUI 是自家客户端里的会话，你在场一问一答。深挖：`lib/agent_runtime/tool_registry.py`、`lib/agent_runtime/runner.py`
 
 **Q：headless 会话的"AI 本体"是什么？也是 IDE 里的模型吗？**
 不是。到点后是**后端进程自己**把与 GUI 对话同一套引擎核心组装起来跑——没有 IDE、没有界面，经本机回环地址调工具；跑完再让一个"裁判"判定干没干成，结论推进收件箱。它受迭代轮数与墙钟时间两类资源上限约束，防失控空转。深挖：`server/activity_tracker/headless_runner.py`
@@ -1712,7 +1712,7 @@ AI 密钥这边另有专门的**监听守护**：改完 `keys.json`（比如给�
 
 **已做的验证**（第四批，第 16-20 章 + 附录 A-B）：
 - 第 16-18 章：写作时逐条对照深挖行所列源文件核实（`config.example.toml`、`lib/secret/`、`server/llm_pool/key_store.py`、`server/core/keys_watch.py`、`SECURITY-RISKS.md`（第 15/16 条明文备份）、`scripts/hooks/pre-commit`、`tools/check_hard_rules.py`、`tests/server_endpoints/test_smoke_endpoints.py`、`pyrightconfig.json` 等）；本批另复核了关键路径存在性与风险条目编号
-- 第 19-20 章：部署骨架对照 `docs/deployment.md` 只给入口不复制细节；FAQ 每个答案先读代码核实再落笔（对照 `server/activity_tracker/headless_runner.py`、`server/screen/routes.py` 与 `server/screen/session/manager.py`、`server/approval_review.py`、`server/user_message.py`、`client/core/agent/tool_registry.py` 与 `runner.py`、`server/agent_guide.py` 低置信分支、`server/activity_tracker/loop_manager.py` 补跑规则、`server/core/middleware.py` 审批中间件、`docs/api-reference.md` 统计端点）
+- 第 19-20 章：部署骨架对照 `docs/deployment.md` 只给入口不复制细节；FAQ 每个答案先读代码核实再落笔（对照 `server/activity_tracker/headless_runner.py`、`server/screen/routes.py` 与 `server/screen/session/manager.py`、`server/approval_review.py`、`server/user_message.py`、`lib/agent_runtime/tool_registry.py` 与 `runner.py`、`server/agent_guide.py` 低置信分支、`server/activity_tracker/loop_manager.py` 补跑规则、`server/core/middleware.py` 审批中间件、`docs/api-reference.md` 统计端点）
 - 附录 A/B：术语与比喻逐条对照正文；速查表全部路径逐一 ls 验证存在
 
 **未验证 / 已知边界**：
@@ -1735,7 +1735,7 @@ AI 密钥这边另有专门的**监听守护**：改完 `keys.json`（比如给�
 
 **入门（第 1-3 章）**
 
-1. LocalAgent 和"直接用 ChatGPT"的本质区别是什么？为什么换 IDE 软件不会丢上下文，状态存在哪里？（第 1 章）
+1. Parcae 和"直接用 ChatGPT"的本质区别是什么？为什么换 IDE 软件不会丢上下文，状态存在哪里？（第 1 章）
 2. 项目由哪四个主要部分组成？它们之间怎么连接？（第 2 章）
 3. 从你说"识别账单并记账"到账记上，中间经过哪些步骤？每一步谁在决策？（第 3 章）
 4. 为什么浏览器要用独立的调试实例，而不是直接控制你正在用的浏览器？（第 2 章）

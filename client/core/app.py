@@ -30,7 +30,6 @@ from client.core.panel_base import PanelBase
 from client.core.panel_registry import PanelRegistry
 from client.core.services import ServiceManager
 from client.core.state import AppState
-from client.panels.chat import ChatPanel
 from client.panels.dashboard import DashboardPanel
 from client.panels.llm_pool import ModelPoolPanel
 from client.panels.monitoring import MonitoringPanel
@@ -158,7 +157,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("LocalAgent Client")
+        self.setWindowTitle("Parcae Client")
         self.resize(1200, 760)
         self.setMinimumSize(900, 600)
 
@@ -438,12 +437,13 @@ class MainWindow(QMainWindow):
             tasks._due_card.set_subtitle(f"到期 {due_count} 个")
 
     def closeEvent(self, event):
-        # D24: 防关机丢会话 — 中断活跃 runner + 更新 session.status=interrupted（毫秒级，非阻塞）
-        # auto_shutdown 关机时 OS 自动触发 closeEvent（WM_QUERYENDSESSION），无需额外 hook
+        # T7：关前端只断开本地监听；runtime 里的会话继续跑到终态（不再中断/改状态）
+        # 对话面板可由 [client] hidden_panels 关掉，此时 panels 里没有 "chat"，跳过即可。
         try:
-            chat_panel = cast(ChatPanel, self.panels.get("chat"))
-            if chat_panel is not None and hasattr(chat_panel, "interrupt_active_session"):
-                chat_panel.interrupt_active_session()
+            chat_panel = self.panels.get("chat")
+            detach = getattr(chat_panel, "detach_active_session", None)
+            if callable(detach):
+                detach()
         except Exception:
             pass
         # 8-4: 停 badge 轮询并限时等待在飞线程退出，避免退出时运行中 QThread 被销毁

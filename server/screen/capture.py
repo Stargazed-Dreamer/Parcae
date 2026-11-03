@@ -13,7 +13,7 @@ from typing import Any
 
 from PIL import Image
 
-logger = logging.getLogger("localagent.screen")
+logger = logging.getLogger("parcae.screen")
 
 
 # ========== 模块常量（避免魔法数散落各处） ==========
@@ -24,6 +24,10 @@ _STITCH_STRIP_RATIO = 0.3        # 滚动拼接时取前图底部 30% 作为模�
 _STITCH_STRIP_MIN_H = 10         # 模板最小高度
 _STITCH_DIFF_THRESHOLD = 15      # 拼接匹配阈值（平均像素差 < 此值视为重叠）
 _STITCH_MIN_OVERLAP_RATIO = 0.05 # 最小重叠比例
+
+# BitBlt 偶发失败的自愈参数（2026-10-17 实证，见 _grab_virtual_screen 注释）
+_CAPTURE_RETRY = 2               # 失败后重试次数（每次重试前重建线程本地 mss 实例）
+_CAPTURE_RETRY_DELAY = 0.05      # 重试前让位间隔：给桌面组合器一个恢复窗口
 
 
 # ========== mss 实例复用（线程本地） ==========
@@ -41,15 +45,59 @@ def _get_mss():
     return sct
 
 
+def _discard_mss() -> None:
+    """丢弃当前线程的 mss 实例（下次 _get_mss() 会重新构造）。
+
+    为什么必须有这个出口：mss 的 Windows GDI 后端在 `__init__` 时就
+    `GetWindowDC(0)` 取源 DC 并**长期持有**（只有 `close()` 释放，`grab()` 仅在
+    尺寸变化时重建 DIB，从不碰 DC）。源 DC 一旦失效，该实例之后的 BitBlt 会
+    **持续失败且不会自愈** —— 重建实例换取新 DC 是当时唯一的恢复手段。
+    """
+    sct = getattr(_mss_local, "sct", None)
+    _mss_local.sct = None
+    if sct is None:
+        return
+    try:
+        sct.close()
+    except Exception:
+        logger.debug("释放失效的 mss 实例时出错（已忽略）", exc_info=True)
+
+
 # ========== 截图函数 ==========
+
+def _grab_virtual_screen() -> tuple[Image.Image, int, int]:
+    """抓取整个虚拟屏，返回 (PIL Image, 虚拟屏左上角 left, top)。带 BitBlt 失败自愈。
+
+    2026-10-17 实证：`/screen/capture` 偶发 `ScreenShotError: Windows graphics function
+    failed (no error provided): BitBlt`（GetLastError()==0，源 DC 瞬时失效所致）。
+    同一进程里失败前 18 秒、失败后 4 分 50 秒均抓取成功 ⇒ 判定为瞬时抖动。
+    因此失败即丢弃本线程实例重建后重试，而不是把抖动直接抛给调用方。
+    """
+    last_exc: Exception | None = None
+    for attempt in range(_CAPTURE_RETRY + 1):
+        if attempt:
+            logger.warning(
+                "全屏截图第 %d/%d 次失败（%s），重建线程本地 mss 实例后重试",
+                attempt, _CAPTURE_RETRY, last_exc,
+            )
+            _discard_mss()
+            time.sleep(_CAPTURE_RETRY_DELAY)
+        try:
+            sct = _get_mss()
+            monitor = sct.monitors[0]  # 虚拟屏（所有显示器合集）
+            screenshot = sct.grab(monitor)
+            img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+            return img, int(monitor["left"]), int(monitor["top"])
+        except Exception as exc:
+            last_exc = exc
+    # 重试耗尽：抛最后一个真实异常，保持与改动前一致的异常类型（调用方依赖它）
+    raise last_exc  # type: ignore[misc]
+
 
 def _capture_fullscreen() -> bytes:
     """全屏截图，返回PNG bytes"""
-    sct = _get_mss()
-    monitor = sct.monitors[0]  # 全屏（所有显示器合集）
-    screenshot = sct.grab(monitor)
+    img, _off_x, _off_y = _grab_virtual_screen()
     # 转为PNG bytes
-    img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
@@ -105,12 +153,9 @@ def _capture_via_fullscreen_crop(hwnd: int) -> bytes | None:
         w, h = right - left, bottom - top
         if w <= 0 or h <= 0:
             raise ValueError(f"窗口尺寸无效: {w}x{h}")
-        sct = _get_mss()
-        monitor = sct.monitors[0]
-        screenshot = sct.grab(monitor)
-        full_img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+        # 复用全屏抓取路径（含 BitBlt 失败自愈重试）
         # 虚拟屏偏移修正（副屏在左边时 monitors[0].left 为负）
-        off_x, off_y = monitor["left"], monitor["top"]
+        full_img, off_x, off_y = _grab_virtual_screen()
         crop_box = (
             max(0, left - off_x),
             max(0, top - off_y),

@@ -49,7 +49,15 @@ async def _find_page(context, url_pattern=None, tab_id=None):
                 return page, None
         return None, 'TAB_NOT_FOUND'
     if not url_pattern:
-        return (context.pages[0] if context.pages else None), None
+        # 2026-11-01（G4）：不再"没指定就用第一个 tab"。
+        # 旧行为在多 agent / 用户自己也开着页时会静默操作别人的 tab——
+        # 出错形态不是报错而是"点了别人的页面"，最难排查。
+        # 只有一个 tab 时仍允许兜底（无歧义）；多个 tab 一律要求显式指定。
+        if not context.pages:
+            return None, 'TAB_NOT_FOUND'
+        if len(context.pages) == 1:
+            return context.pages[0], None
+        return None, 'TAB_REQUIRED'
     matches = [p for p in context.pages if url_pattern in p.url]
     if len(matches) == 0:
         return None, 'TAB_NOT_FOUND'

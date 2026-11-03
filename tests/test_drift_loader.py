@@ -20,8 +20,13 @@ import drift_detector as dd  # noqa: E402
 
 
 def _make_pkg(files: dict[str, str]) -> Path:
-    """在 ROOT/temp 下造一个临时包（必须在 ROOT 内：加载器用 relative_to(ROOT) 报错）。"""
-    pkg = dd.ROOT / "temp" / f"_drift_loader_{uuid.uuid4().hex[:8]}"
+    """在 ROOT/temp/tests 下造一个临时包（必须在 ROOT 内：加载器用 relative_to(ROOT) 报错）。
+
+    统一落在 temp/tests/（测试专属 scratch 区），不再散在 temp/ 根目录。
+    """
+    tests_dir = dd.ROOT / "temp" / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    pkg = tests_dir / f"_drift_loader_{uuid.uuid4().hex[:8]}"
     pkg.mkdir(parents=True, exist_ok=True)
     for fn, content in files.items():
         (pkg / fn).write_text(content, encoding="utf-8")

@@ -20,6 +20,21 @@
 
 **弱匹配阈值**：top-1 score < 15 走 low_confidence 精简响应（只返候选清单不返 TaskGuide）。
 
+### memory_index 是有界清单（2026-10-09 起）
+
+`TaskGuide.memory_index` **保序截断到 12 条**（`server/agent_guide.py:_MEMORY_INDEX_MAX`），
+超限时同时回一个 `memory_index_truncated = {shown, total, hint}`（该字段已加进
+`lib/agent_runtime/runner.py` 的展示白名单，否则模型会以为"清单就这些"）。
+
+为什么要有界：必读块（进 `first_action`）本来就只取 `_MUST_READ_MAX`=5 条，但
+`memory_index` 是**整份清单原样返回**、由 runner JSON 塞进 ephemeral 上下文。它会被
+`consumption_contexts` 的通配（`"*"` / `"adhoc.*"`）灌大——2026-10-09 只读实测合并后条数：
+`adhoc.chat_digest` **68**、`adhoc.web_archive` **67**、`adhoc.task_room` **65**、`adhoc.ocr` 64
+（旧记录里的"一次 38 条"是当时那轮的读数，不是上限）。
+
+截断**保序**，而静态声明的 `memory_key` / `related_memory_keys` 天然排在动态命中之前
+⇒ 不会被裁掉；被裁的几乎全是通配命中，需要时用 `memory_search` / `memory_list` 取全量。
+
 ### 关键含义
 
 - **kw_exact 是最强信号**（+10），一个 keyword 命中就能让 strong_match=True。所以 **keywords 必须精确，不能泛**。
@@ -231,8 +246,8 @@ for kw, tts in sorted(shared.items(), key=lambda x: -len(x[1])):
 三条缺口的处置：
 
 - **C1「仓库死代码 / 无人读产物」没有归宿 —— 用户 2026-10-07 裁决：不建路由。** 决策当时的现状：`system.temp_cleanup` 整篇对象锁在 `temp/`（第一句就是「对 `temp/` 下每一项依次问 Q1/Q2/Q3」），而且**动作也不匹配**——仓库死代码要改的是 `server/` 源码、`check_hard_rules` 白名单与文档引用，不是"移进回收站"；`system.project_audit` 管发现不管摘除，第一步还要求你先选 12 大类方向。⇒ 这类活继续由人发起（10-06 那次就没走任何 skill）。**要复活这件事，先定动作边界，别从加 keywords 开始。**
-- **C2 `workspace/windows_forensics` 未注册**：实测没有 `manifest.toml`，该线句子只能落 general 并被误拉。**未决，等点单。**
-- **C3 kw_fuzzy 的英文通道噪声底**：最小实验 `temp/20261006_kwfuzzy_path_experiment.py` —— 一句不含任何关键词的纯英文句子给 `adhoc.headless_session` **26 分**；同句加一段含 `localAgent` 的绝对路径 → **42**（+16，其中 +6 来自 kw_fuzzy「判定 agent(50%)」，因为项目名里嵌着 `agent`）。缓解事实：这类候选一律 `strong_match=False`，走 GeneralGuide，只污染候选清单、不误派 TaskGuide（与 §3.5 的 O2 同族）。**未决，等点单。**
+- **C2 `workspace/windows_forensics` 未注册 —— 用户 2026-10-08 裁决：不注册，本条关闭，对应 WIP 已删。** 现状（10-08 复核，与 10-07 一致）：`workspace/windows_forensics/` 下**没有 `manifest.toml`**（只有 `SKILL.md`/`CONCLUSION.md`/`data`/`report`/`tools`），`server/` 全目录也搜不到 `windows_forensics` 任何注册痕迹 ⇒ 该线确实没接 guide。裁决理由：这条线用得不多，不接 guide 就算了。⇒ 表格 #1/#2 两行标的「见 C2」现在指向本条，即**已知且接受**：这类句子继续落 general / 被误拉到 `adhoc.headless_session`、`dev.computer_use`，不再为它扩路由。**要复活，前提是这条线重新日常化，而不是先加 keywords。**
+- **C3 kw_fuzzy 的英文通道噪声底**：最小实验 `temp/20261006_kwfuzzy_path_experiment.py` —— 一句不含任何关键词的纯英文句子给 `adhoc.headless_session` **26 分**；同句加一段含 `Parcae` 的绝对路径 → **42**（+16，其中 +6 来自 kw_fuzzy「判定 agent(50%)」，因为项目名里嵌着 `agent`）。缓解事实：这类候选一律 `strong_match=False`，走 GeneralGuide，只污染候选清单、不误派 TaskGuide（与 §3.5 的 O2 同族）。**未决，等点单。**
 
 ## 4. 编写 keywords 的标准流程
 
@@ -319,6 +334,17 @@ for q in ['用户说法1', '用户说法2', ...]:
 
 这样 `agent_guide(task="爬一下文章", context="tabs.json")` 能通过 context 文件内的 URL domain 加分。
 
+### 步骤 7：跑评测集，并区分“调词集”和“留出集”
+
+```bash
+uv run python tests/guide_eval/run_eval.py
+```
+
+- `cases.jsonl` 里 `source="holdout_20261021"` 的 15 条是**留出集**：调词时不许拿它们当依据，只用来回答“换一种说法还灵不灵”。
+- **调词集上的 100% 不是泛化结论**。2026-10-21 实测：原回归集从 89.5% 调到 100%，但同一批改动在留出集上只从 1/15 到 2/15；合并后才是有意义的数字（82.1% → 92.3%）。
+- 新加说法要进 `cases.jsonl`，但标注来源；不要把留出集当调词集反复刷。
+- 阈值/同义词这类结构性杠杆另测，别用“多加几个词”掩盖 paraphrase 不迁移的问题。
+
 ## 5. 维护清单
 
 每次修改 GUIDE_REGISTRY 时检查：
@@ -330,6 +356,7 @@ for q in ['用户说法1', '用户说法2', ...]:
 - [ ] 如果是 entry role，独占用户触发词（检查 method/support 没有重复）
 - [ ] 跑实际匹配测试：top-1 是预期、score ≥ 15、分差 ≥ 5
 - [ ] 如果是 web 类 skill，加 domain_hints
+- [ ] 跑 `tests/guide_eval/run_eval.py`；**留出集（`source=holdout_*`）不参与调词**，调词前后分别报调词集与留出集
 - [ ] 更新 [CHANGELOG.md](../CHANGELOG.md) 记录变更
 
 ## 6. 相关文件

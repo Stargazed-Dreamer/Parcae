@@ -26,7 +26,7 @@ from fastapi import APIRouter, HTTPException
 from lib.schema import BaseSchema
 from server.config import get_loops_config
 
-logger = logging.getLogger("localagent.loop_manager")
+logger = logging.getLogger("parcae.loop_manager")
 
 router = APIRouter(prefix="/loop", tags=["loop"])
 
@@ -458,8 +458,8 @@ def _load_optional_loop_defs() -> dict[str, list[dict]]:
     主代码库不直接 import 任何 workspace 组件，删除 workspace/<component>/
     后 manifest 消失，loop 任务自动注销。
     """
-    import importlib
-
+    from lib.component_loader import load_component_module, warm_probe
+    from server.component_manifest import _WORKSPACE_DIR as _ws_dir
     from server.component_manifest import load_manifests
 
     result: dict[str, list[dict]] = {}
@@ -470,14 +470,31 @@ def _load_optional_loop_defs() -> dict[str, list[dict]]:
         manifests = load_manifests()
     except Exception:
         manifests = {}
+
+    # 先把本轮要加载的全部入口收齐，一次性丢给子进程试 import。
+    # 目的：组件模块级阻塞（连网 / 等锁 / 加载模型）在子进程里超时就被剔除，
+    # 不会卡死主进程启动；语法错误则由 component_loader 的预检零副作用拦下。
+    # 原实现只 catch ImportError，SyntaxError 直接击穿并让 main.py 启动即崩。
+    children = sorted(_ws_dir.iterdir()) if _ws_dir.exists() else []
+    specs: dict[str, Path] = {}
+    for name, m in manifests.items():
+        if m.enabled and m.loop_tasks is not None:
+            specs[f"workspace.{name}.{m.loop_tasks.file[:-3]}"] = _ws_dir / name / m.loop_tasks.file
+    for child in children:
+        if not child.is_dir() or child.name.startswith('_') or child.name.startswith('.'):
+            continue
+        specs[f"workspace.{child.name}.loop_actions"] = child / "loop_actions.py"
+    try:
+        warm_probe({mod: src for mod, src in specs.items() if src.exists()})
+    except Exception as exc:  # 预热失败不阻断：单模块加载仍有兜底
+        logger.warning("loop 组件试 import 预热失败: %s", exc)
+
     for name, m in manifests.items():
         if not m.enabled or m.loop_tasks is None:
             continue
         module_name = f"workspace.{name}.{m.loop_tasks.file[:-3]}"
-        try:
-            mod = importlib.import_module(module_name)
-        except ImportError as e:
-            logger.warning("manifest 组件 %s loop_tasks 模块加载失败 (%s): %s", name, module_name, e)
+        mod = load_component_module(module_name, component=name, path=specs.get(module_name))
+        if mod is None:
             continue
         defs = getattr(mod, m.loop_tasks.entries_var, None)
         if isinstance(defs, dict) and defs:
@@ -487,17 +504,18 @@ def _load_optional_loop_defs() -> dict[str, list[dict]]:
     # 2. 回退旧机制：扫 workspace/*/loop_actions.py，跳过已通过 manifest 加载的组件
     # 使用 component_manifest._WORKSPACE_DIR 而非 workspace.__path__，
     # 让 monkeypatch _WORKSPACE_DIR 的测试能同时影响 manifest 加载和 fallback 扫描。
-    from server.component_manifest import _WORKSPACE_DIR as _ws_dir
-    if not _ws_dir.exists():
-        return result
-    for child in sorted(_ws_dir.iterdir()):
+    for child in children:
         if not child.is_dir() or child.name.startswith('_') or child.name.startswith('.'):
             continue
         if child.name in loaded_components:
             continue
-        try:
-            mod = importlib.import_module(f'workspace.{child.name}.loop_actions')
-        except ImportError:
+        module_name = f"workspace.{child.name}.loop_actions"
+        src = specs.get(module_name)
+        if src is None or not src.exists():
+            # 组件没有 loop_actions.py（多数组件只有 SKILL.md），不是错误，静默跳过
+            continue
+        mod = load_component_module(module_name, component=child.name, path=src)
+        if mod is None:
             continue
         defs = getattr(mod, 'LOOP_TASK_DEFS', None)
         if isinstance(defs, dict) and defs:

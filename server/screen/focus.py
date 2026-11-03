@@ -1,6 +1,6 @@
 """焦点安全：canonical window token、焦点证据、焦点泄漏检测。
 
-评估文档（docs/evaluations/2026-07-20-computer-use-vs-localagent.md）P0 改进：
+评估文档（docs/evaluations/2026-07-20-computer-use-vs-parcae.md）P0 改进：
 1. 键盘动作必须拒绝未知焦点（FOCUS_NOT_VERIFIED）
 2. 规范化 UWP/WinUI 窗口句柄（GetAncestor GA_ROOTOWNER 解析）
 3. 每次动作返回焦点证据（foreground_before/after、target_match 等）
@@ -13,7 +13,7 @@
 import logging
 import sys
 
-logger = logging.getLogger("localagent.screen")
+logger = logging.getLogger("parcae.screen")
 
 
 # ========== 状态码常量（动作响应中返回，便于 agent 编程判断） ==========

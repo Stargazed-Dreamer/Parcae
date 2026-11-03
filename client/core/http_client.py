@@ -14,7 +14,7 @@ from typing import Optional, cast
 
 import requests
 
-from client.core.constants import FAKE_PROXY_URL, HTTP_TIMEOUT_S, SERVER_URL
+from client.core.constants import FAKE_PROXY_URL, HTTP_TIMEOUT_S, get_server_url
 from client.core.logging_config import get_logger
 
 logger = get_logger("http_client")
@@ -30,8 +30,9 @@ class HttpClient:
     _instance: Optional["HttpClient"] = None
     _instance_lock = threading.Lock()
 
-    def __init__(self, base_url: str = SERVER_URL):
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str | None = None):
+        # 显式传 base_url 时固定（测试 / 指向别的实例）；否则每个请求动态取当前端口
+        self._fixed_base_url = base_url.rstrip("/") if base_url else None
         self._session = requests.Session()
         # 本客户端只访问 127.0.0.1（后端 8766 / fake proxy 9999），
         # 禁止继承系统/环境代理（HTTP_PROXY 等）：外部加速器关闭或换端口时，
@@ -40,6 +41,17 @@ class HttpClient:
         # 最近一次请求的 HTTP 状态码（None=网络异常/未发请求）。
         # 供 HttpWorker.status_code 信号透传，让面板区分 404/409/超时等
         self.last_status_code: int | None = None
+
+    @property
+    def base_url(self) -> str:
+        """当前后端 base URL。
+
+        ⛔ 不要改成 init 时定死的属性：端口可能因 Windows 保留区（WinError 10013）
+        被顺延到 8767，此时客户端必须跟着声明文件走，否则死连旧端口。
+        """
+        if self._fixed_base_url:
+            return self._fixed_base_url
+        return get_server_url().rstrip("/")
 
     @classmethod
     def instance(cls) -> "HttpClient":

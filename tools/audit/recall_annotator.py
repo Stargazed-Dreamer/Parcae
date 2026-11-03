@@ -5,8 +5,7 @@
 挑好的"，判卷人会被系统自己的答案锚定，所以这里把整池摊开盲评。
 
 盲评口径（与 docs/memory-system.md「判卷纪律」同源）：
-- 不显示分数、不显示 `matched_by`（该字段谎报：`server/memory/evidence.py:197`
-  只看字段是否为 None，而检索层给缺路填的是 0 值，于是 BM25-only 也报 both）
+- 不显示分数、不显示 `matched_by`
 - 不显示"系统当前上了屏哪几条"
 - 顺序按 `(task_type, key)` 的 sha256 打乱：跨运行稳定，中断后能接着标
 
@@ -35,6 +34,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime
@@ -51,7 +51,24 @@ _LABEL_OF = {name: lbl for _, name, lbl in LABELS}
 
 # 标题字段优先级：KV 记忆的摘要在前，旧写入只有 content 的退到正文首行
 _TITLE_FIELDS = ("summary", "name", "title", "description", "goal", "content")
+# 没有专用标题字段的记忆（如 {diagnose,fix,gotcha}）按语义优先级退到描述性字段；
+# 最后才退到任意字符串值——别把 PowerShell 命令当标题（reference_hyperv_launchtype_gotcha）。
+_TITLE_FALLBACK_FIELDS = (
+    "decision", "conclusion", "lesson", "why", "gotcha", "symptom",
+    "problem", "rule", "preference", "note", "fix", "howto",
+)
 _MIN_POOL = 5  # 候选池小于这个数的 task_type 没有判卷意义
+_DATE_LIKE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}([ T].*)?$")
+
+
+def _text_head(v: str) -> tuple[str, str] | None:
+    lines = [x.strip() for x in v.strip().splitlines() if x.strip()]
+    if not lines:
+        return None
+    head = lines[0].lstrip("#").strip()
+    if len(head) < 2 or _DATE_LIKE.match(head):
+        return None
+    return head[:90], " ".join(lines[1:])[:220]
 
 
 def resolve_db_path() -> Path:
@@ -66,17 +83,22 @@ def _title_of(raw: str) -> tuple[str, str]:
     try:
         d = json.loads(raw)
     except Exception:
-        s = (raw or "").strip()
-        head, _, rest = s.partition("\n")
-        return head[:90], rest.strip()[:220]
+        got = _text_head((raw or "").strip())
+        return got if got else ("(空记忆)", "")
     if not isinstance(d, dict):
         return str(d)[:90], ""
-    for f in _TITLE_FIELDS:
+    for f in (*_TITLE_FIELDS, *_TITLE_FALLBACK_FIELDS):
         v = d.get(f)
         if isinstance(v, str) and v.strip():
-            lines = [x.strip() for x in v.strip().splitlines() if x.strip()]
-            return lines[0].lstrip("#").strip()[:90], " ".join(lines[1:])[:220]
-    return "(无标题)", ""
+            got = _text_head(v)
+            if got:
+                return got
+    for v in d.values():
+        if isinstance(v, str) and v.strip():
+            got = _text_head(v)
+            if got:
+                return got
+    return "(无标题)", "字段: " + " / ".join(list(d)[:8])
 
 
 def build_questions(db: Path, min_seen: int) -> list[dict]:

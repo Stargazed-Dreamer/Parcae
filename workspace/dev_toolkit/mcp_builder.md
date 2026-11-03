@@ -1,6 +1,6 @@
 # mcp_builder - MCP 服务构建
 
-> 整合自 anthropics/skills 的 mcp-builder + LocalAgent 项目三层 MCP 架构实战经验。
+> 整合自 anthropics/skills 的 mcp-builder + Parcae 项目三层 MCP 架构实战经验。
 > 适用于新项目要构建 MCP 服务让 LLM 调用工具的场景。
 
 ## 1. 概述
@@ -52,7 +52,7 @@
 
 ## 3. Tool Annotations 规范
 
-来自 MCP 协议规范 + LocalAgent 项目落地实践。
+来自 MCP 协议规范 + Parcae 项目落地实践。
 
 ### 3.1 四个 hint
 
@@ -87,7 +87,7 @@ TOOL_ANNOTATIONS = {
 
 **两者互补**：一个工具可以 `readOnlyHint=true`（语义只读）但 `approval_required=true`（因为读敏感数据要审批）。
 
-### 3.3 LocalAgent 全工具映射（参考）
+### 3.3 Parcae 全工具映射（参考）
 
 来自 `<project_root>\server\mcp_whitelist.py`：
 
@@ -119,7 +119,7 @@ TOOL_ANNOTATIONS = {
 
 ## 4. 用 Python + fastapi-mcp 构建
 
-来自 LocalAgent 项目实践（`<project_root>\server\core\mcp_gateway.py`）。
+来自 Parcae 项目实践（`<project_root>\server\core\mcp_gateway.py`）。
 
 ### 4.1 项目结构
 
@@ -318,7 +318,7 @@ app.listen(3000);
 
 ## 7. 工具粒度决策（三层架构）
 
-来自 LocalAgent 项目实践。
+来自 Parcae 项目实践。
 
 ### 7.1 三层暴露策略
 
@@ -358,7 +358,7 @@ app.listen(3000);
 
 ### 7.3 为什么要分层（防膨胀）
 
-来自 LocalAgent 实战教训：
+来自 Parcae 实战教训：
 
 | 问题 | 后果 |
 |------|------|
@@ -367,11 +367,11 @@ app.listen(3000);
 | LLM 工具选择准确率下降 | 太多相似工具导致误选 |
 | 维护成本爆炸 | 改一个工具要改 N 处文档 |
 
-### 7.4 LocalAgent 实际数据
+### 7.4 Parcae 实际数据
 
 来自 `<project_root>\server\mcp_whitelist.py`：
 - DIRECT_TOOLS：~35 个直连工具
-- 网关自动收纳：~50 个工具（通过 `localagent_advanced_tool` 访问）
+- 网关自动收纳：~50 个工具（通过 `parcae_advanced_tool` 访问）
 - GATEWAY_EXCLUDE：~20 个排除工具（仅 REST 可用）
 
 总 REST 端点 ~105 个，但 MCP 工具列表只暴露 ~37 个（35 直连 + 2 网关），避免膨胀。
@@ -382,7 +382,7 @@ app.listen(3000);
 遇到"要调后端能力"的需求
 │
 ├─ 1. 直连 MCP 工具（白名单）→ 直接用
-│  查白名单：localagent_list_tools()
+│  查白名单：parcae_list_tools()
 │
 ├─ 2. advanced_tool 网关 → 适用于非直连的 REST 端点
 │  调 GET 类端点免审批（safety=read_only）
@@ -577,6 +577,6 @@ curl -X POST http://127.0.0.1:8766/mcp \
 - **Python SDK**：`https://github.com/modelcontextprotocol/python-sdk`
 - **fastapi-mcp**：`https://github.com/jlowin/fastapi-mcp`
 - **anthropics/skills mcp-builder**：`https://github.com/anthropics/skills/blob/main/skills/mcp-builder/SKILL.md`
-- **LocalAgent 项目 MCP 网关**：`<project_root>\server\core\mcp_gateway.py`
-- **LocalAgent 项目白名单**：`<project_root>\server\mcp_whitelist.py`
-- **LocalAgent 三层架构文档**：`<project_root>\docs\mcp-reference.md`
+- **Parcae 项目 MCP 网关**：`<project_root>\server\core\mcp_gateway.py`
+- **Parcae 项目白名单**：`<project_root>\server\mcp_whitelist.py`
+- **Parcae 三层架构文档**：`<project_root>\docs\mcp-reference.md`

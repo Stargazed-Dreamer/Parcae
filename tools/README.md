@@ -17,8 +17,12 @@ tools/
 ├── mindforge/            # MindForge 文档转换守护进程
 ├── network/              # 本机网络/网卡工具（WiFi 掉线一键修复 bat）
 ├── release/              # 源码分发 profile 只读审计
+├── runtime/              # 后端运行期工具（run_backend 退出监控外壳、backend_postmortem 死亡复盘）
 ├── spacesniffer/         # SpaceSniffer 复刻（.sns 快照 treemap 浏览器，带 GUI）
 ├── wechat_export_organize.py  # 微信收藏导出整理
+├── wb_history.py         # 翻 WorkBuddy 会话库还原历史对话（list / dump，默认双方；--tail / -c / --files）
+├── wb_takeover.py        # 限流换号后接手被打断的会话（scan 列候选 / export 出接手包 / accounts 看号）
+├── qoder_history.py      # 翻 Qoder(QoderCN) 会话库还原历史对话（同上口径，另一端落点；--tail / -c / --files）
 ├── user_message_gui.py   # 用户消息输入 GUI
 ├── fake_llm_proxy.py     # Fake LLM Proxy（学习/调试用虚拟 API）
 ├── x_video_dl.py         # x.com(Twitter) 视频下载（savetwitter 免梯子链路）
@@ -46,8 +50,8 @@ tools/
   - 为什么存在：`surfaced_ratio` 这类行为指标只报数不设线（没基线），而"前 5 条到底该不该"必须由人判——
     判卷人不能是被评对象自己。出题池取 `context_projections.rank_before` 的**并集**（含 86% 从未上屏的候选），
     不是只给已上屏的 5 条，否则考的是"能不能挑出系统已经挑好的"
-  - 盲评：不显示分数、不显示 `matched_by`（`server/memory/evidence.py:197` 只看 None 而检索层给缺路填 0，
-    实测 BM25-only 也报 `both`）、不显示当前上屏集；顺序按 `(task_type, key)` 的 sha256 打乱，跨运行稳定可续标
+  - 盲评：不显示分数、不显示 `matched_by`、不显示当前上屏集（盲评是为了不受系统已有判断影响，不是为了藏一个坏字段）；
+    顺序按 `(task_type, key)` 的 sha256 打乱，跨运行稳定可续标
   - 三档 `1 必须 / 2 有用 / 3 无关`，`U` 撤销、`N` 换池；**未标＝不主张相关**，不进 gold 也不算噪声，
     所以一趟只挑该读的十来条，不必把 555 条逐个打勾
   - CLI：`uv run python tools/audit/recall_annotator.py [--stats] [--min-seen 10] [--out 路径]`；
@@ -55,6 +59,20 @@ tools/
   - ⚠️ 同目录其他工具：仓库级 pyright 不覆盖，改后显式 `uv run pyright tools/audit/recall_annotator.py`；
     ⚠️ `QT_QPA_PLATFORM=offscreen` 下中文全渲染成豆腐块（字体解析返回空 family），**版式自检要看几何尺寸不看像素**，
     真平台实测解析为 `Microsoft YaHei UI`、`QFontMetrics.inFont('记')=True`
+- `recall_eval.py` — **A 通道召回评测**（只读，读 gold 算账）
+  - 读 `tests/memory_eval/gold.jsonl`（最后一行为准，`unset` = 撤销）与 `context_projections`（同一 task_type 的多次投影取**并集**），
+    输出分档上屏率（must/useful/noise × 曾上屏/从未上屏）与逐 task_type 的 must 漏召、noise 上屏清单
+  - CLI：`uv run python tools/audit/recall_eval.py [--json]`；报告写 `temp/audit/recall_eval.md`（可再生产物）
+  - ⚠️ **gold 是定向抽样产出的，率不能当全库召回率**：脚本报告头会打印这条警告。要外推须另做随机抽样判卷
+  - 字段名 `matched_by` 的历史坑已修（`server/memory/evidence.py` 曾把所有混合检索结果报成 `both`），当前报告反映真实通道
+- `search_eval.py` — **检索通道 golden query 评测**（Z3 口径，只读）
+  - 只判两条通道：messages 的 BM25（与生产默认一致，排除 `source='tool'`）与 facts 的 SQL 词项召回/覆盖率；
+    **不判 summaries，也不判端到端融合排序**
+  - golden query 在 `tests/memory_eval/search_gold.jsonl`：`trace` = 历史 `search_traces` 里真实发过的查询，
+    `contract` = 按 fact 声明的 `trigger_keywords` 构造；gold 是 fact key，可机械核对，不是主观相关度
+  - CLI：`uv run python tools/audit/search_eval.py [--json]`；报告写 `temp/audit/search_eval.md`
+  - ⚠️ 只读实现：先用 SQLite backup API 把生产库复制到 `temp/audit/search_eval.db`，查询打在副本上，跑完删除
+  - ⚠️ 率只用同口径趋势对比，不外推为全库召回率；阈值等 ≥14 天重跑后再定
 
 ### `browser/` — 浏览器通用工具
 - `start_debug_browser.py` — 启动独立调试 Chrome 实例（端口 9222，不影响工作浏览器）

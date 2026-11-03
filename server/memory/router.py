@@ -12,8 +12,11 @@ from pydantic import Field, field_validator
 
 from lib.schema import BaseSchema
 from server.memory.manager import get_memory_manager
+from server.memory.norms import NORMS_BUDGET_CHARS, build_norms_bundle
+from server.memory.wrapup import list_pending_candidates, submit_wrapup
+from server.memory.write import MemoryWriteError, review_candidate
 
-logger = logging.getLogger("localagent.memory.router")
+logger = logging.getLogger("parcae.memory.router")
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 
@@ -86,6 +89,62 @@ class MemorySetRequest(BaseSchema):
             v, VALID_FACT_TYPES,
         )
         return None
+
+
+class WrapupQuote(BaseSchema):
+    """收尾提交里的一条用户原话（不可改写）。"""
+    text: str = Field(..., description="原文；落库后永不 UPDATE")
+    speaker: str = Field("user", description="user / agent_relay / system")
+    project_id: str | None = Field(None, description="归属项目；缺省用请求级 project_id")
+    sensitivity: str = Field("personal", description="public / private-eng / personal")
+    captured_at: str | None = Field(None, description="这句话发生的时间（ISO）")
+
+
+class WrapupCandidate(BaseSchema):
+    """一条记忆候选。
+
+    **故意不把 kind / sensitivity 写成 Literal**：非法值要以
+    ``status='rejected'`` + 原因码回给 agent（不静默丢），而不是 422 整单打回。
+    """
+    content: str = Field(..., description="正文（必填）")
+    key: str | None = Field(None, description="稳定键；不传则按内容生成")
+    title: str | None = Field(None, description="短标题")
+    summary: str | None = Field(None, description="1-2 句摘要，注入只看这个")
+    kind: str | None = Field(
+        None, description="norm/fact/pitfall/preference/procedure/reference/current_state"
+    )
+    scope: str | None = Field(None, description="global / project:<id> / topic:<id>")
+    origin: str | None = Field(
+        None, description="user_quote / agent_extracted / system / tool；缺省按有无 quote 推断"
+    )
+    sensitivity: str | None = Field(None, description="public / private-eng / personal")
+    evidence_refs: list[str] | None = Field(None, description="可机器核对的证据")
+    source_quote_ids: list[int] | None = Field(None, description="指向 source_quotes.id")
+    quote_text: str | None = Field(None, description="内联原话，服务端先落 source_quotes 再引用")
+    quote_speaker: str | None = Field(None, description="内联原话的说话人")
+    must_read: int | None = Field(None, description="1 = 必读，只允许 kind='norm'")
+    expires_at: str | None = Field(None, description="kind='current_state' 必填")
+    confidence: float = Field(0.8, ge=0.0, le=1.0)
+    fact_type: str | None = Field(None, description="旧分类，兼容用（不传则 NULL）")
+    occurred_at: str | None = Field(None, description="事实发生时间（ISO）")
+    consumption_contexts: list[str] | None = None
+    trigger_keywords: list[str] | None = None
+
+
+class MemoryWrapupRequest(BaseSchema):
+    """收尾提交：原话 + 记忆候选，一次交。"""
+    run_id: str | None = Field(None, description="run/会话码标识")
+    project_id: str | None = Field(None, description="项目归属，给 quotes 兜底")
+    default_scope: str = Field("global", description="候选没给 scope 时用它")
+    quotes: list[WrapupQuote] = Field(default_factory=list)
+    candidates: list[WrapupCandidate] = Field(default_factory=list)
+
+
+class CandidateReviewRequest(BaseSchema):
+    """DL5 待审候选处置：accept 走写入漏斗，reject 只改状态。"""
+    action: str = Field(..., description="accept / reject")
+    overrides: dict = Field(default_factory=dict, description="采纳前人工修正的字段")
+    reason: str | None = Field(None, description="退回原因，默认 manual_reject")
 
 
 class MemorySearchRequest(BaseSchema):
@@ -235,6 +294,49 @@ async def memory_record(req: MemoryRecordRequest):
     return await asyncio.to_thread(_do_record)
 
 
+@router.post("/wrapup", operation_id="memory_wrapup",
+             summary="收尾提交：原话 + 记忆候选 → 去重 → 落库")
+async def memory_wrapup(req: MemoryWrapupRequest):
+    """DL3 的唯一收尾落库入口。
+
+    返回逐条去向（accepted / merged / duplicate / rejected + 原因码），
+    **被拒的也会留在 memory_candidates 里**，不会静默丢。
+    """
+    mgr = get_memory_manager()
+    payload = req.model_dump()
+    return await asyncio.to_thread(
+        submit_wrapup, mgr.store, payload, default_scope=req.default_scope
+    )
+
+
+@router.get("/candidates", operation_id="memory_candidates",
+            summary="待审候选（被拒的写入，供人工改后重提）")
+async def memory_candidates(
+    limit: int = Query(50, ge=1, le=200),
+    run_id: str | None = Query(None, max_length=64, description="只看某个 run 的候选"),
+):
+    mgr = get_memory_manager()
+    items = await asyncio.to_thread(list_pending_candidates, mgr.store, limit, run_id)
+    return {"items": items, "count": len(items)}
+
+
+@router.post("/candidates/{candidate_id}/review", operation_id="memory_candidate_review",
+             summary="采纳 / 退回一条待审候选（DL5）")
+async def memory_candidate_review(candidate_id: int, req: CandidateReviewRequest):
+    mgr = get_memory_manager()
+    try:
+        result = await asyncio.to_thread(
+            review_candidate, mgr.store, candidate_id, req.action,
+            overrides=req.overrides, reason=req.reason,
+        )
+    except MemoryWriteError as err:
+        raise HTTPException(
+            status_code=err.http_status,
+            detail={"code": err.code, "message": err.message},
+        ) from err
+    return {"ok": True, **result}
+
+
 @router.get("/stats", operation_id="memory_stats",
             summary="详细记忆统计")
 async def memory_stats():
@@ -277,38 +379,30 @@ async def memory_reindex():
 class MaintainRequest(BaseSchema):
     """手动触发维护请求"""
     force: bool = Field(False, description="是否强制运行（忽略 should_run 检查）")
-    force_revalidate: bool = Field(
-        False,
-        description="先把所有已验证标签（keep/update/archive）重置为 pending 再跑一轮。"
-                    "用于验证器改版后重判存量记忆；会按 batch_limit 逐轮消耗 cheap 池，"
-                    "所以只接受显式调用",
-    )
 
 
 @router.post("/maintain", operation_id="memory_maintain",
-             summary="手动触发记忆维护（老化+验证）")
+             summary="手动触发记忆维护（垃圾预过滤 + 老化 + 指标聚合）")
 async def memory_maintain(req: MaintainRequest):
-    """手动触发记忆维护器：扫描 stale 记忆 + LLM 验证。
+    """手动触发记忆维护器：预过滤垃圾 + 重算 stale_score + 指标日聚合。
 
     通常自动触发（每 maintain_interval_hours 小时），也可手动调用。
     force=True 时忽略 should_run 检查立即执行。
-    force_revalidate=True 时先把全部已验证标签重置为 pending（验证器改版后重判存量）。
+
+    2026-10-31 起没有 `force_revalidate`：LLM 验证器已删除，没有可重跑的判决。
     """
     mgr = get_memory_manager()
-    requeued = None
-    if req.force_revalidate:
-        requeued = await asyncio.to_thread(mgr.maintainer.requeue_all_validated)
     if not req.force and not mgr.maintainer.should_run():
         return {"status": "skipped", "reason": "not_due_yet",
                 "last_run": mgr.maintainer.get_status().get("last_run")}
     result = await mgr.maintainer.run()
-    return {"status": "ok", "result": result, "requeued": requeued}
+    return {"status": "ok", "result": result}
 
 
 @router.get("/maintain/status", operation_id="memory_maintain_status",
             summary="记忆维护器状态")
 async def memory_maintain_status():
-    """获取维护器状态：上次运行时间、stale 数量、验证统计"""
+    """获取维护器状态：上次运行时间、stale 数量、已归档数量（验证器已删除）"""
     mgr = get_memory_manager()
     return mgr.maintainer.get_status()
 
@@ -494,6 +588,28 @@ def _memory_get_as_of(mgr, key: str, as_of: str) -> dict:
     }
 
 
+@router.get("/norms", operation_id="memory_norms",
+            summary="DL1 上下文红线 bundle（norms）")
+async def memory_norms(
+    project_id: str | None = Query(
+        None, max_length=128,
+        description="项目标识（不含 'project:' 前缀）；不传只取 global",
+    ),
+    budget: int = Query(
+        NORMS_BUDGET_CHARS, ge=500, le=20_000,
+        description="字符预算；默认 5,000（2026-10-27 由 2,000 上调）",
+    ),
+):
+    """取 norms bundle：安全类优先、超预算截断、去向全回显。
+
+    DL4 的 `context.next` 第一页直接调它；当前先以 REST 暴露，方便单独验收。
+    """
+    mgr = get_memory_manager()
+    return await asyncio.to_thread(
+        build_norms_bundle, mgr.store, project_id=project_id, budget=budget
+    )
+
+
 @router.get("/{key}", operation_id="memory_get",
             summary="读取记忆")
 async def memory_get(
@@ -586,7 +702,7 @@ async def memory_set(key: str = Path(..., pattern=_KEY_PATTERN), req: MemorySetR
         if not meta.get("fact_type"):
             result["guidance"] = (
                 "这条记忆的 fact_type 为空：按类型过滤（find_consumable_memories 的 SQL、"
-                "staleness 阈值表、验证器的分型判据）都不会命中它。"
+                "staleness 阈值表、中枢 L7 的形态巡检）都不会命中它。"
                 f"候选取值 {VALID_FACT_TYPES}，下次写入带上 fact_type=…；"
                 "留空不会导致写入失败。"
             )
@@ -598,12 +714,28 @@ async def memory_set(key: str = Path(..., pattern=_KEY_PATTERN), req: MemorySetR
 @router.delete("/{key}", operation_id="memory_delete",
                summary="删除记忆")
 async def memory_delete(key: str = Path(..., pattern=_KEY_PATTERN)):
-    """删除指定 key 的记忆"""
+    """删除指定 key 的记忆（C1：改为**失效**，可用 POST /{key}/restore 还原）"""
     mgr = get_memory_manager()
     deleted = mgr.delete(key)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"记忆 '{key}' 不存在")
-    return {"status": "deleted", "key": key}
+    return {"status": "deleted", "key": key, "recoverable": True, "archived": True}
+
+
+@router.post("/{key}/restore", operation_id="memory_restore",
+             summary="恢复已失效的记忆")
+async def memory_restore(key: str = Path(..., pattern=_KEY_PATTERN)):
+    """把一条已失效的记忆恢复为活跃（C1 配套）。
+
+    与 DELETE 成对：DELETE 不再物理删，误删可以撤回。
+    """
+    mgr = get_memory_manager()
+    if not mgr.store.restore_fact(key):
+        exists = mgr.store.get_fact_raw(key) is not None
+        if not exists:
+            raise HTTPException(status_code=404, detail=f"记忆 '{key}' 不存在")
+        raise HTTPException(status_code=409, detail=f"记忆 '{key}' 未处于失效状态")
+    return {"status": "restored", "key": key}
 
 
 # ─── 内部工具 ───────────────────────────────────────────────

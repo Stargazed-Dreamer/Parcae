@@ -4,7 +4,7 @@
 禁止在代码中硬编码 "data/llm/keys.json" 等路径。
 
 设计：
-- 项目根通过 lib/secret/paths.py 自身位置定位（parents[2] = localAgent/）
+- 项目根通过 lib/secret/paths.py 自身位置定位（parents[2] = Parcae/）
 - get_llm_keys_path() 优先读 config.toml [llm_storage].unified_keys_file，回退默认 data/llm/keys.json
 - get_secrets_toml_path() 返回 data/secret/secrets.toml（非 LLM 密钥统一存储）
 - get_config_path() 返回 config.toml
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# 项目根：lib/secret/paths.py → parents[2] = localAgent/
+# 项目根：lib/secret/paths.py → parents[2] = Parcae/
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # 模块级默认值（config 读取失败时使用）。基于 __file__ 的绝对路径，不依赖 cwd。

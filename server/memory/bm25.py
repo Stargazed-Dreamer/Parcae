@@ -75,8 +75,13 @@ class BM25Index:
 
         return len(filtered)
 
-    def search(self, query: str, top_k: int = 10) -> list[dict]:
+    def search(self, query: str, top_k: int = 10,
+               exclude_sources: set[str] | None = None) -> list[dict]:
         """BM25 搜索
+
+        Args:
+            exclude_sources: 在 SQL 侧排除的消息来源（如 {"tool"}）。必须在排序前
+                排除，否则 91.7% 的工具日志会先占满 top_k。
 
         Returns:
             [{"message_id": int, "score": float, "content": str}, ...]
@@ -99,7 +104,7 @@ class BM25Index:
         doc_lengths: dict[int, int] = {}
 
         for term in set(filtered):
-            posting = self.store.get_bm25_posting(term)
+            posting = self.store.get_bm25_posting(term, exclude_sources=exclude_sources)
             if not posting:
                 continue
 

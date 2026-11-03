@@ -6,7 +6,7 @@ import logging
 
 from server.model_manager.types import ModelDriver
 
-logger = logging.getLogger("localagent.model_manager.registry")
+logger = logging.getLogger("parcae.model_manager.registry")
 
 
 class ModelRegistry:

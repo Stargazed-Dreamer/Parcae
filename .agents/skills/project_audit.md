@@ -9,7 +9,7 @@ task_type: system.project_audit
 
 # 项目全面复审 (project_audit)
 
-> 对 LocalAgent 项目进行多维度健康审计。**核心特征：先让用户选择审查方向，再按检查清单扫描**。
+> 对 Parcae 项目进行多维度健康审计。**核心特征：先让用户选择审查方向，再按检查清单扫描**。
 > 触发：用户说"项目复审"/"全面复审"/"项目体检"/"project audit" + 可选方向（默认全量）。
 
 ## 适用范围
@@ -59,7 +59,7 @@ task_type: system.project_audit
 ### Step 3: 上下文收集（按所选大类并行扫描）
 
 - 并行 Read 关键文件（不超过 5 个并行）：
-  - A/B/D：`server/main.py`、`server/core/`、`tests/conftest.py`、`server/mcp_whitelist.py`
+  - A/B/D：`server/main.py`、`server/core/`、`conftest.py`、`server/mcp_whitelist.py`
   - C：`AGENTS.md`、`.agents/skills/_index.md`、`docs/` 全目录
   - E：`config.example.toml`、`pyproject.toml`、`server/config.py`
   - F：`data/loops/tasks.json`、`config.toml [loops.*]`、`client/panels/monitoring.py`、`mcp_stats`
@@ -137,8 +137,8 @@ task_type: system.project_audit
 |------|----------|----------|
 | B1 测试覆盖率 | `uv run pytest --cov=server tests/` | 关键模块（command_guard/exec/screen）覆盖率 ≥ 70% |
 | B2 测试缺失 | 对比 `server/*.py` 与 `tests/test_*.py` | 每个 server 模块有对应测试（30+ 模块 vs 39 测试文件） |
-| B3 E2E 测试 | Read `tests/test_e2e.py` | 关键流程（启动→OCR→exec→关闭）有 E2E |
-| B4 测试质量 | Read `tests/conftest.py` + 部分测试 | 无大量 skip；fixture 复用；不依赖外部服务（除非显式 mock） |
+| B3 E2E 测试 | Read `tests/approval_screen/test_e2e_computer_use.py` | 关键流程（启动→OCR→exec→关闭）有 E2E |
+| B4 测试质量 | Read `conftest.py` + 部分测试 | 无大量 skip；fixture 复用；不依赖外部服务（除非显式 mock） |
 | B5 测试可运行 | `uv run python tools/run_tests_batched.py` | 全部批次 rc=0（或失败有明确原因） |
 
 ### C. 文档体系（5 子项）
@@ -156,7 +156,7 @@ task_type: system.project_audit
 | 子项 | 检查方法 | 期望状态 |
 |------|----------|----------|
 | D1 REST 端点冗余 | Grep `@app\.\(get\|post\|put\|delete\)` + 调 `/openapi.json` | 无零调用端点；功能重叠的端点合并 |
-| D2 MCP 工具膨胀 | Read `server/mcp_whitelist.py` + `localagent_list_tools()` | DIRECT_TOOLS ≤ 40；GATEWAY_EXCLUDE 维护；新增端点有归属决策 |
+| D2 MCP 工具膨胀 | Read `server/mcp_whitelist.py` + `parcae_list_tools()` | DIRECT_TOOLS ≤ 40；GATEWAY_EXCLUDE 维护；新增端点有归属决策 |
 | D3 零调用端点 | `mcp_stats` 调用统计 + 90 天 0 调用端点 | 零调用端点考虑移除或归入 GATEWAY_EXCLUDE |
 | D4 命名一致性 | Grep API 路径风格 | kebab-case 统一（`/screen/capture` vs `/screen/wait-for`）；无混用 |
 
@@ -271,7 +271,7 @@ task_type: system.project_audit
 | `neat-freak` | C（文档体系） | neat-freak 是会话后文档同步；project_audit 是周期性文档健康审计 |
 | `task_closure` | 收尾步骤 | project_audit 完成后调 task_closure 收尾 |
 
-## 项目特定关注点（LocalAgent）
+## 项目特定关注点（Parcae）
 
 ### 高频踩坑（来自 AGENTS.md 和 project_rules.md）
 - **相对路径**：`Path("data/xxx")` 在 cwd 错位时写错位置，应基于 `__file__`

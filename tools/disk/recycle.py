@@ -37,7 +37,7 @@
 --------
 历史上项目内存在多份等价实现：
 
-- `client/core/agent/builtin_tools/file_delete.py::_delete_to_recycle_bin`（产品代码）
+- `lib/agent_runtime/builtin_tools/file_delete.py::_delete_to_recycle_bin`（产品代码）
 - `workspace/disk_manager/scripts/cleanup.py::send_to_recycle`（工具脚本）
 
 `client/` 是打包分发的产品代码，不能依赖 `tools/`（开发工具不参与发布），

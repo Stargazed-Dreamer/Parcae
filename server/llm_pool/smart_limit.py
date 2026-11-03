@@ -20,7 +20,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-logger = logging.getLogger("localagent.smart_limit")
+logger = logging.getLogger("parcae.smart_limit")
 
 
 def _project_root() -> Path:

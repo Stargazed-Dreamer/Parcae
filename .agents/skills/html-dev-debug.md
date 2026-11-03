@@ -57,7 +57,7 @@ task_type: dev.html_debug
 是否静态 HTML？
  ├─ 是 → 直接 Read 文件识别选择器 → 写 Playwright 脚本
  └─ 否（动态）→ 后端是否已运行？
-     ├─ 否 → 启动后端（start.bat 或 uv run python -m server.main）
+     ├─ 否 → 启动后端（`.venv\Scripts\python.exe -m server.main`，非提权；不要用 `start.bat`）
      └─ 是 → Reconnaissance-Then-Action（上述 4 步）
 ```
 
@@ -74,10 +74,10 @@ task_type: dev.html_debug
 
 ```python
 # 使用 MCP 工具
-mcp_localagent_browser_open(urls=["http://127.0.0.1:8766/workspace/_shared/your_page.html"])
+mcp_parcae_browser_open(urls=["http://127.0.0.1:8766/workspace/_shared/your_page.html"])
 
 # 或用 Playwright（需要更多控制时）
-mcp_localagent_exec_python(code="""
+mcp_parcae_exec_python(code="""
 import asyncio
 from playwright.async_api import async_playwright
 
@@ -118,7 +118,7 @@ asyncio.run(open_page())
 await page.screenshot(path='temp/debug_screenshot.png', full_page=True)
 
 # 方式二：MCP 截图（只能截当前视口）
-mcp_localagent_capture_screen(format="info")  # 注意：绝不传 format="base64"
+mcp_parcae_capture_screen(format="info")  # 注意：绝不传 format="base64"
 ```
 
 **注意**：
@@ -129,7 +129,7 @@ mcp_localagent_capture_screen(format="info")  # 注意：绝不传 format="base6
 #### 5. OCR 识别截图内容
 
 ```python
-mcp_localagent_ocr_file(file="temp/debug_screenshot.png")
+mcp_parcae_ocr_file(file="temp/debug_screenshot.png")
 ```
 
 **OCR 的作用**：
@@ -345,9 +345,9 @@ async function loadData(url) {
 
 | 操作 | MCP 工具 | 说明 |
 |------|---------|------|
-| 打开页面 | `mcp_localagent_browser_open` | 在调试浏览器中打开 |
-| 截图 | `mcp_localagent_capture_screen` | format="info"，绝不传 base64 |
-| OCR 识别 | `mcp_localagent_ocr_file` | 识别截图中的文字 |
-| 执行 JS | `mcp_localagent_exec_python` | 运行 Playwright 脚本 |
-| 检查后端 | `mcp_localagent_exec_status` | 确认后端运行中 |
-| 检查浏览器 | `mcp_localagent_browser_status` | 确认调试浏览器可用 |
+| 打开页面 | `mcp_parcae_browser_open` | 在调试浏览器中打开 |
+| 截图 | `mcp_parcae_capture_screen` | format="info"，绝不传 base64 |
+| OCR 识别 | `mcp_parcae_ocr_file` | 识别截图中的文字 |
+| 执行 JS | `mcp_parcae_exec_python` | 运行 Playwright 脚本 |
+| 检查后端 | `mcp_parcae_exec_status` | 确认后端运行中 |
+| 检查浏览器 | `mcp_parcae_browser_status` | 确认调试浏览器可用 |

@@ -9,6 +9,6 @@
 """
 
 from server.todos.store import TodosStore
-from server.todos.router import router, wip_router, get_todos_store
+from server.todos.router import router, wip_router, tasks_router, get_todos_store
 
-__all__ = ["TodosStore", "router", "wip_router", "get_todos_store"]
+__all__ = ["TodosStore", "router", "wip_router", "tasks_router", "get_todos_store"]

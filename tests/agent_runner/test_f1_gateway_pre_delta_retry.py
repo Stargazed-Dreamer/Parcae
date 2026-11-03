@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from client.core.agent.llm_pool_gateway import (
+from lib.agent_runtime.llm_pool_gateway import (
     SSE_EVENT_CONTEXT_OVERFLOW,
     SSE_EVENT_DONE,
     SSE_EVENT_PROVIDER_ERROR,
@@ -54,7 +54,7 @@ def _sse_lines(*events: dict[str, Any]) -> list[str]:
 
 
 def _request() -> Any:
-    from client.core.agent.types import LLMRequest
+    from lib.agent_runtime.types import LLMRequest
 
     return LLMRequest(messages=[], model="")
 

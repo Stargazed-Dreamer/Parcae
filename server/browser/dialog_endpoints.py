@@ -22,7 +22,7 @@ from lib.schema import BaseSchema
 
 from .routes import router  # noqa: E402  （循环导入安全：routes.py 末尾才 import 本模块）
 
-logger = logging.getLogger("localagent.browser_dialog")
+logger = logging.getLogger("parcae.browser_dialog")
 
 
 # ========== 共享 helper（Ticket 03） ==========

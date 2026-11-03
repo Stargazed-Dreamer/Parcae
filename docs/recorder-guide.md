@@ -459,7 +459,7 @@ rec_YYYYMMDD_HHMMSS/
 | `audio_seconds` | float | 音频时长（秒） |
 | `sensors` | list[str] | 启用的传感器类名列表 |
 | `version` | str | 录制包格式版本（当前 `0.1.0`） |
-| `format` | str | 格式标识（`localagent.recorder.v1`） |
+| `format` | str | 格式标识（`parcae.recorder.v1`） |
 | `status` | str | 录制状态（v2 新增）：`recording` / `processing` / `saved` / `failed` |
 | `segments` | list | pause/resume 时间点（v2 新增）：`[{start_offset, end_offset}, ...]` |
 | `effective_duration` | float | 净录制时长（v2 新增，剔除暂停段后的有效时长） |

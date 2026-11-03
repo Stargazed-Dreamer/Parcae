@@ -23,8 +23,11 @@
 - **BM25 关键词**：jieba 中文分词 + Okapi BM25 评分
 - **混合召回**：alpha 加权融合（`hybrid_alpha=0.5`，0=纯BM25，1=纯向量）
 - **HONEST_EMPTY 下限**：纯向量命中的候选还要过一道绝对相似度下限 `hybrid_min_vector_similarity`（默认 0.30，`[memory]` 段可配），低于下限且 BM25 也没命中的直接丢弃——宁可返回空，不返回"看着像"的假命中。被丢条数由 `semantic.py` 的 `_last_honest_empty_dropped` 记录并写进日志
+- **工具日志默认排除**：`POST /memory/search` 不传 `source` 时排除 `source='tool'`（MCP 中间件自动记录的调用日志，占 `messages` 的绝大多数）；要定向查工具日志得显式传 `source="tool"`，传 `"manual"` / `"event"` 时不做排除。排除发生在 `top_k` 截断**之前**（`bm25.search` 在 SQL 层带 `exclude_sources`、`_vector_search` 在候选层过滤）——若放在截断之后，工具日志会先占满名额再把结果滤空
 - **降级模式**：嵌入模型不可用时自动降级为 BM25-only
 
+> **检索通道评测**：`tests/memory_eval/search_gold.jsonl`（40 条 golden query，gold = fact key）+ `tools/audit/search_eval.py`。只判 messages 的 BM25 与 facts 的词项覆盖率，不判 summaries 与端到端融合排序；方法与基线见 `workspace/local_butler/20_决策过程/20_记忆第二轮/10_检索通道golden_query基线.md`。
+>
 > **禁用语义检索**：在 `config.toml` 的 `[memory]` 段设置 `enable_semantic = false` 可完全跳过嵌入模型下载与加载。
 > - **不受影响**：KV 存储（`/memory/{key}`）、时间线查询（`/memory/timeline`）、Recent 滑动窗口、记忆压缩、自动记录、BM25 关键词检索
 > - **不可用**：向量语义搜索（`/memory/search` 退化为 BM25-only）、语义索引构建（`/memory/reindex` 跳过向量部分）
@@ -71,8 +74,8 @@
 | `/memory/stats` | GET | 详细记忆统计 |
 | `/memory/reindex` | POST | 重建语义索引 |
 | `/memory/cleanup/orphaned` | POST | 清理超过 orphan_cleanup_days 的已压缩消息 + 超过 summary_cleanup_days 的旧摘要 |
-| `/memory/maintain` | POST | 手动触发记忆维护（`force=true` 忽略时间检查；`force_revalidate=true` 先把所有已验证标签重置为 pending，见「验证器改版后重判存量」） |
-| `/memory/maintain/status` | GET | 记忆维护器状态（上次运行/stale数量/验证分布） |
+| `/memory/maintain` | POST | 手动触发记忆维护（`force=true` 忽略时间检查；2026-10-31 起不再接受 `force_revalidate`） |
+| `/memory/maintain/status` | GET | 记忆维护器状态（上次运行 / stale 数 / 已归档数 / `validator: "removed_2026-10-31"`） |
 | `/memory/projections` | GET | 列出上下文投影留痕（最近 N 条，按时间倒序） |
 | `/memory/projections/{id}` | GET | 单条投影留痕详情（含上屏顺序、被砍掉的 key、召回原序） |
 
@@ -88,14 +91,14 @@
 | `selected_keys` | 最终上屏的 key，**按上屏顺序** |
 | `dropped_keys` | 召回到了但被条数上限砍掉的 key |
 | `rank_before` / `rank_after` | 上游召回给出的顺序 vs 实际上屏顺序，两列并排存，排序偏离可回查 |
-| `validation_flags` | 每个 key 在写入时点的有效性状态快照（来自 `memory_meta`） |
+| `validation_flags` | 列名为历史命名；2026-10-31 起内容只剩老化告警（`staleness_warning`），不再含 LLM 验证判决 |
 | `injected_text_digest` / `injected_chars` | 实际注入文本的 sha256 与长度，用于比对"留痕说注入的"与"真注入的"是否同一份 |
 | `trace_id` | 有检索 trace 时回填；`agent_guide` 的 must_read 走 facts 定向召回、不产生 trace，此处为空 |
 
 当前写入方是 `agent_guide` 的【必读记忆】块（`server/agent_guide.py`），一个 surface 常量 `SURFACE_AGENT_GUIDE_MUST_READ = "agent_guide.must_read"`。GUI 侧在记忆面板的"检索过程"页切到"上下文投影"来源即可回放（`client/panels/memory/search_traces_page.py`）。
 
 消费时点的两个配套行为：
-- **有效性存疑不拦截、但降位 + 显式警告**：`validation_status` 为 `archive`/`update` 或带 staleness 警告的记忆，排在必读块最后，并附一条"引用前必须先验证"的可见警告（不做静默丢弃）。
+- **有效性存疑不拦截、但降位 + 显式警告**：带 staleness 警告（老化评分超阈值）的记忆排在必读块最后，并附一条"引用前必须先验证"的可见警告（不做静默丢弃）。LLM 验证判决那一路已于 2026-10-31 随验证器一起删除。
 - **摘要类证据不冒充有分**：`Evidence.scored=False` 表示来源本身不产生相似度（如摘要窗口命中），排序时一律压在有分证据之后（`server/memory/evidence.py`）。
 
 保留期由 `[memory] projection_retention_days`（默认 30）控制，维护器每轮调 `projection.cleanup_old()`，删除条数以 `projection_cleanup_deleted` 出现在维护结果里。
@@ -108,117 +111,49 @@
 
 - 查询 `facts` 表中 `updated_at` 早于 `now - [memory.maintain].stale_days` 的记忆
 - 每轮都更新 `memory_meta.stale_score`（距上次更新的天数，staleness 警告要用它）
-- **状态重置按时间门控（v5）**：只有 `validation_status='pending'`、或从未验证过
-  （`last_validated_at IS NULL`）、或距上次验证超过 `validate_revalidate_days` 的记忆，
-  才被重置回 `pending`。旧行为是每轮把 `keep`/`update` 一律重置回 `pending`，
-  等于对每条 stale 记忆每 6 小时重验一次（白烧 cheap 池配额）
-- **`archive` 也纳入可重验范围（v5）**：旧代码的 CASE 只翻转 `keep`/`update`，
-  `archive` 是**永久标签**——一次误判就永远留在账上，修好验证器也救不回来。
-  存量 archive 想尽快按新判据重判，用 `POST /memory/maintain {"force": true, "force_revalidate": true}`
-  （显式动作：会按 `batch_limit` 逐轮消耗 cheap 池并改写标签，所以不自动跑）
+- **只算分，不改标签**（2026-10-31 起）：旧实现每轮把 stale 记忆的 `validation_status`
+  重置回 `pending` 等 LLM 重判；验证器删除后这段翻转逻辑一并去掉，`run_aging` 现在只写 `stale_score`
+- `memory_meta` 的四个验证列（`validation_status` / `last_validated_at` / `validation_note` /
+  `validate_attempts`）**保留但冻结**（SQLite 删列代价大）：值是 v15 最后一批 LLM 判决，此后不再变化，
+  面板按「历史字段」显示，不参与任何排序或拦截
 
-> **存量标签已于 2026-10-04 全量重判（洗存量那一档，此前只修了机制）**。按重判前的库备份逐 key
-> 对照：旧 `archive` 72 → `keep` 69 / `update` 2 / 仍 `archive` 1（98.6% 翻案），旧 `keep` 53 全部
-> 维持；archive 占比从 0.46 降到 0.006。留下的那条 archive 是"截止日期已过"这类**内容本身**过期的，
-> 不是误判残留。两个操作坑：① `force_revalidate` 重置的是**所有非 pending 标签**（129 条，不止
-> archive），且**只能调一次**——再调会把已判完的重新打回 pending 重烧配额；② 要做前后对比必须
-> 先留一份重判前的备份并按 key 对照，**别只数最终条数**（WAL 库直接复制主文件会缺行，见上方注）。
+### ~~validate（LLM 验证）~~ 已于 2026-10-31 删除
 
-### validate（验证）
+原设计每 6 小时取 ≤25 条 `pending` 记忆让 cheap 模型判 keep/update/archive。删除依据是实测：
+162 次判定里 **157 keep / 4 update / 1 archive**，而唯一可执行的 archive **从不执行**——
+产出只有日志，成本却是每天最多 20 万输入 token。
 
-- 对 `validation_status='pending'` 的记忆调用 cheap 模型，单轮最多 `validate_batch_limit` 条
-  （按 `stale_score` 从旧到新取）
-- LLM 做选择题（不做摘要），返回 JSON：
+形态类问题（超长 / 超版 / 频繁改 / 坏 scope / 死链 / 孤儿）本来就是确定性查询，改由中枢 L7 巡检
+（九条 `G-*` 判据，见 `workspace/local_butler/30_架构与设计/20_现行设计/30_中枢模块_职责与执行链路_20261030.md` §1.6
+与 `28_数据与记忆_面板视图与召回整改_20261030.md` §2.6）和面板打开即算；内容真伪没有程序判得了，交给人看。
 
-```json
-{"is_accurate": true, "reason": "仍然准确", "suggested_action": "keep"}
-```
-
-- `suggested_action` 取值：`keep`（保留）/ `update`（需更新）/ `archive`（归档）
-- LLM 失败时记忆保持 `pending`，下个周期重试（不确定时保留）
-
-### 验证器喂给模型什么（v5 重写，`maintainer.build_validation_preview`）
-
-旧实现是 `value[:800]`。体检实测：多数 fact 超过 800 字符，且相当一部分的**前 800 字符
-就是写入时抄进正文的元数据信封**（`{"source": "manual", "updated_at": ...}` 这类），
-于是 cheap 模型给出的 archive 理由是"内容被截断/乱码/无实际语义/技术细节"——
-它看到的是信封，不是信。现在的规则：
-
-> **存量信封已于 2026-10-03 清洗**（67/155 条 fact 的顶层 6–11 个信封键，连同
-> `messages(source='manual')` 当前快照一起洗，并逐行 `reindex_message` 重建索引；
-> 备份 `data/memory/memory.db.bak_before_envelope_strip_220804_REPAIRED`；
-> ⚠️ 库在 WAL 模式，`shutil.copy2` 复制主文件会漏掉未 checkpoint 的行——快照要用
-> `sqlite3.Connection.backup()` 或先 `PRAGMA wal_checkpoint(TRUNCATE)`，并复验行数）。
-> 上面那条"剥信封"规则**不是历史包袱**，它现在服务两件事：① `fact_revisions` 里的历史副本
-> 仍带信封（114/185 行，属"当时正文长什么样"的存档，故意不洗）；② 防回归——万一写入侧
-> 再次把列抄进 value，验证器不受影响。
+> 历史沿革（代码已全删，别再照它改）：该验证器曾打过三轮补丁——① 原 `value[:800]` 常被元数据信封
+> 占满，改为剥信封 + 窗口放大到 2400 字符；② 超窗不采纳 archive，连续 3 次改判 update；
+> ③ 分 fact_type 判据、去项目中心偏见、拒绝「知识截止」类无效依据。2026-10-04 还做过一次存量重判
+> （旧 archive 72 → keep 69 / update 2 / 仍 archive 1）。细节见 `CHANGELOG.md` 与 git 历史。
 >
-> **②已经拿到真证据了（2026-10-04）**：洗完之后一直没写过 fact，所以"不会再长回来"当时
-> 只是推断。10-04 当天有 **18 条 fact 走线上 `POST /memory/{key}` 重写过**（改死链 + 改正文），
-> 其中 `approval_strictness_levels` / `release_phase2_gh_mirror_isolation` 两条此前**根本没有**
-> `messages(source='manual')` 快照行，是当天 00:37 新建的——正是"新写入会不会带信封"最干净的样本。
-> 按昨天那套三重守卫指纹（顶层信封键 + `source=="manual"` + `confidence==1.0`）复扫，
-> 全库与这 18 行**都命中 0**，新建那 2 条的顶层键里也没有 `source`。写入侧不复发，这下是实测不是推测。
-> 顺带扫出一个**当时故意没碰的轻形态**（2026-10-04 记录）：3 条 fact 顶层有 `source="manual"` 但没有 `confidence`
-> （`reference_agents_md_keywords_pollute_mock_llm_judge_call` 与
-> `reference_sqlite_wal_pragma_exclusive_lock_concurrent_init` 写在 2026-08-03，
-> `reference_memory_write_offline` 写在 2026-09-18，都在信封清洗之前），落在那道"宁可少洗"的窄判据之外。
-> **已补洗干净（2026-10-05）**：先核对这三条的信封值在 `facts` 列里都有同等值才剥（防止把路由元数据剥丢），
-> 走 `POST /memory/{key}` `merge=false` 整坨替换，落库后快照与 `facts.value` 逐字相等、`fact_revisions` 有当日行；
-> 复扫全库顶层 `source=="manual"` 命中 **0**。其中前两条的 `fact_type` 列本来是 NULL，
-> 按其自身 `type="reference"` 补成 `reference`——这属于"值里有明确类型"的那档，不是猜的。
-> 另有 4 条 fact 的顶层 `source` 是**正经业务键**（值是"用户口述复盘"这类出处，分别是
-> `oracle_vm_stage3_pitfalls_20260915` / `reference_guide_semantic_matching_baseline` /
-> `reference_chromium_occluded_rendering` / `project_gamejam_lessons`），补洗时逐条验证过没被误删；
-> 统计时按 shape 数会把它们误算成信封，**要按指纹数**（这条判据在洗完后依然成立）。
-
-1. **剥元数据信封**：`source/updated_at/created_at/access_count/confidence/mentioned_at/
-   fact_type/consumption_contexts/trigger_keywords/source_task/type/date` 一律不进 prompt；
-   其余业务键（正文、rules、problem/solution 等）全部保留，**不静默丢**——丢了就等于"看不全"。
-2. **窗口放大**到 `[memory.maintain].validate_preview_chars`。
-3. **超窗不采纳 archive**：正文仍超出窗口时，本轮不给死刑，留在 `pending` 并在
-   `validation_note` 写明"第 N 次未采纳"（计数在 `memory_meta.validate_attempts`）。
-   连续 `3` 次仍超窗 → 改判 `update`（"臃肿到无法判读"是**重写信号**，不是过时信号）。
-4. **判据分 fact_type**：状态类几天就变、偏好类几年不变，旧 prompt 用同一把尺子量五类记忆。
-   分档判据见 `server/memory/maintainer.py` 的 `_FACT_TYPE_GUIDANCE`。
-5. **去项目中心偏见**：旧 prompt 明文要求把"与当前项目无关的个人数据（如游戏抽卡记录、
-   非项目相关的个人统计）"判 archive。验证的问题被改成"这条记忆所说的内容**是否仍然成立**"，
-   并禁止以"属于个人生活域 / 与项目无关"为理由归档——生活事务恰恰是个人管家最需要长期记住的部分。
-6. 超窗时 prompt 末尾追加可见标记「（正文过长，已截断）」并明文禁止把它读成"内容不完整所以判死"。
-7. **拒绝"知识截止"类无效依据**（2026-10-03 重判存量时实测到，`is_invalid_archive_reason`）：
-   cheap 模型会把晚于自己训练截止时间的时间戳读成"未来未发生 ⇒ 内容无效"，据此判 archive。
-   这条偏见的杀伤面很专一——**优先杀最新写入的记忆**（实测中招的有某条同期上屏 283 次的高频记忆）。
-   处理与"超窗"同构：prompt 里把时间线钉在调用方给出的「今天」，并声明"你的知识截止与本库无关"；
-   命中该类理由的 archive **本轮不采纳**（`memory_meta` 计数 + note 写明"无效依据"），
-   连续 3 次只给这种理由则落 `keep`——反复只有无效依据，等于没有成立的失效证据。
-   计数出口区分两类：`deferred_invalid_reason`（依据不成立）与 `deferred_truncated`（没看全）。
 
 ### 触发机制
 
 - **定时循环**：`[loops.memory]` 注册为 Loop 定时任务（APScheduler `IntervalTrigger`），按 `maintain_interval` 周期直接调 `maintainer.run()`
 - **惰性兜底**：每次记忆 API 调用时检查 `schema_info['maintainer_last_run']`，距上次超过间隔则在后台 `_async_maintenance` 中触发
-- **手动**：`POST /memory/maintain`（`force=true` 忽略时间检查，`force_revalidate=true` 先重置全部已验证标签）
+- **手动**：`POST /memory/maintain`（`force=true` 忽略时间检查）
 
-`maintainer.run()` 的固定顺序：垃圾预过滤 → 老化 → 验证 → **指标日聚合** → 三张明细表的
-retention 清理。聚合必须排在清理之前，否则每天先删后算、指标永远是空表。
+`maintainer.run()` 的固定顺序：垃圾预过滤 → 老化评分 → **指标日聚合** → 三张明细表的
+retention 清理。聚合必须排在清理之前，否则每天先删后算、指标永远是空表。全程 **零 LLM 调用**。
 
 ### 配置
-
-`[memory.maintain]` 段的键名不带 `validate_` 前缀（与 dataclass 字段 `validate_*` 一一对应，
-映射在 `server/memory/config.py`）：
 
 ```toml
 [memory.maintain]
 interval_hours = 6              # 运行间隔（→ maintain_interval_hours）
 stale_days = 7                  # 过期阈值（→ maintain_stale_days）
-enable_validate = true          # 启用 LLM 验证（→ maintain_enable_validate）
-preview_chars = 2400            # 验证器可见正文字数上限（→ validate_preview_chars）
-batch_limit = 25                # 单轮最多验证条数（→ validate_batch_limit）
-revalidate_days = 30            # 同一条记忆两次验证的最小间隔（→ validate_revalidate_days）
 ```
 
-> `model_tier` 字段已移除；验证用 key 由 `USE_CASE_REGISTRY.memory_validate` 解析
-> （`memory_maintainer` 这个 use_case 在 v15 就废弃了）。
+> 2026-10-31 随验证器删除四个键：`enable_validate` / `preview_chars` / `batch_limit` / `revalidate_days`。
+> 旧配置文件里留着这四个键不会报错，但**不再被解析**（`server/memory/config.py` 已无对应字段），
+> 别以为写成 `enable_validate = true` 能把验证器开回来。`model_tier` 字段更早（v15）就已移除，
+> `USE_CASE_REGISTRY.memory_validate` 也一并从 18 个 use_case 里删掉了。
 
 ## 记忆指标日表（memory_metrics_daily，v5）
 
@@ -312,6 +247,14 @@ revalidate_days = 30            # 同一条记忆两次验证的最小间隔（�
 - 必读块里通配最多占 `_MUST_READ_WILDCARD_QUOTA` 个名额，其余让给具体命中项
 - **不拦阻**：具体命中项坐不满名额时仍用通配补位（宁少勿空），被让位的通配项进
   `context_projections.dropped_keys` 留痕，`note` 里写明"通配限槽让位 N 条"——事后可查是谁把它挤下去的
+
+### 静态钉 key 与必读块判卷（2026-10-21）
+
+`_MUST_READ_RANK`（`server/agent_guide.py`）决定必读块内的排序：`matched_by=None`（skill 条目静态声明的 `memory_key` / `related_memory_keys`）优先于 `context+keyword` → `keyword` → `context`。**要给某条记忆保底上屏，就在 `GUIDE_REGISTRY` 条目（或 workspace 的 `loop_actions.py` / `guide_entries.py`）里把它写进 `related_memory_keys`**——静态项排在动态命中之前，超限截断也先砍动态项。
+
+⛔ 不要反过来把 `context` 档整体提前：人工盲评显示，精确声明 `consumption_contexts` 的条目里同样有大量与任务无关的项，整体提权会把噪声一起拉上来。噪声侧的正确修法是**收窄 `consumption_contexts`**（去掉 `"*"` 或过宽的 `<scope>.*`），不是调排序。
+
+判卷集与评测器：人工盲评 gold 落 `tests/memory_eval/gold.jsonl`（追加写，同一 `(task_type, key)` 最后一行为准，撤销写 `unset`），`tools/audit/recall_eval.py` 据此算 A 通道（task_type → 必读块）的分档上屏率、逐 task_type 的漏召与噪声清单。⚠️ gold 由**定向抽样**产生（高特异但从未注入 / 高注入但通配低相关），**率不能外推成全库召回率**。方法与本轮结论见 `workspace/local_butler/20_决策过程/20_记忆第二轮/09_焦点20判卷与召回修复.md`。
 
 
 ## 记忆版本历史（fact_revisions，schema v6）
@@ -420,8 +363,8 @@ revalidate_days = 30            # 同一条记忆两次验证的最小间隔（�
 > 读到"可能已过时"时该核的是 ADR 而非这条记忆）。
 > 剩下越界的只有 `fact_type=NULL` **25** 条（`taxonomy_violations` 现=25）。
 > NULL 那 25 条是**写入方没传 `fact_type`**（validator 只在收到非法值时才落 NULL 并 warning），
-> 属消费侧问题：没有 fact_type 就进不了按类型的 staleness 判据与验证器分型判据；
-> 写入端已改为回显提醒（见上节），存量 25 条未动。
+> 属消费侧问题：没有 fact_type 就进不了按类型的 staleness 判据；
+> 写入端已改为回显提醒（见上节），存量 25 条未动。（此处数字是当时的实测，现查用 SQL。）
 
 ### 记忆消费闭环（核心约束）
 
@@ -441,7 +384,7 @@ revalidate_days = 30            # 同一条记忆两次验证的最小间隔（�
 
 `POST /memory/{key}` 写完会按**落库后的行**读一次：若 `fact_type` 仍为空，响应里多带一个
 `guidance` 字段，写明"这条按类型过滤不到它（`find_consumable_memories` 的 SQL、
-staleness 阈值表、验证器分型判据都不会命中）"。**写入照常成功**——这是提醒，不是拒绝。
+staleness 阈值表、中枢 L7 的形态巡检都不会命中）"。**写入照常成功**——这是提醒，不是拒绝。
 
 - 为什么按行读而不是按请求参数判断：`merge=true` 的更新往往不重复传 `fact_type`，
   旧行本来有类型；按参数猜会把正常的 merge 更新误报成"缺类型"。
@@ -495,6 +438,11 @@ staleness 阈值表、验证器分型判据都不会命中）"。**写入照常�
 
 **可以写入的**：debug 解决方案 / 坑点 / 最佳实践（experience 类）、用户偏好 / 身份（user 类）、用户反馈（feedback 类）。
 即使看似相关也不要保存上述禁清单内容（君子协议，后端不强制拒绝，但 prompt 强约束）。
+
+> **准入规矩真源（2026-10-14 起）**：`workspace/local_butler/40_盘点与证据/10_上下文供给/02_记忆准入规矩_什么该进记忆.md`
+> 本节只回答「**不写什么**」；「**写哪里**（L0 事件流 / L1 检索层 / L2 常驻层）+ 超配额怎么置换降级」在那份文件（§1 三层落点、§2 准入四问、§4 L2 准入、§5 配额与置换）。起因是两份注入层文件长期顶格（全局 3999/4000、项目 7998/8000），而 facts 检索层 161 条本就装得下——问题不在"记太多"，在"什么都往每会话注入的文件里塞"。
+> ⚠ **一处待收紧**：上面第 1 条把「文件路径」整类列为禁存，括注理由却是「代码本身可推导」——禁的其实是**仓库内**路径。**本机物理布局**（免安装软件区、模拟器安装位等）不进任何仓库、grep 不到、不因重构失效，属误伤，应落 `.agents/memory/machine/路径台账.md`。
+> ⚠ **一处分类缺口**：本机环境事实在 v6.1 五类 closed taxonomy 里没有对应类，硬派 `reference`（30 天）会让它挂上"可能已过时"，而物理布局不会过时；已提议新增 `fact_type=environment`（见那份文件 §8 待定第 4 条）。
 
 ### memory_generation vs maintainer
 
@@ -556,3 +504,40 @@ staleness 阈值表、验证器分型判据都不会命中）"。**写入照常�
 - `.agents/wip/*.json` → `wip_tasks` 表（完整字段，更新已有记录）
 
 > 旧 KV 记忆目录和 `.agents/wip/` 的 .json 文件已清理（备份在 `temp/memory_cleanup_backup_20260716/`，`.agents/wip/*.json` 迁移到 `temp/wip_migrated_backup/`）。所有数据以 SQLite 为唯一真源。
+## 记忆写入漏斗（v8 / DL3，2026-10-27）
+
+设计真源：`workspace/local_butler/30_架构与设计/30_施工与证据/17_DL1-DL5实施记录_20261027.md` §2
+
+**三个轴**（`facts` 表新列，全部可空）
+
+| 轴 | 取值 | 用途 |
+|---|---|---|
+| `scope` | `global` / `project:<id>` / `topic:<id>` | 全局规范 vs 分项目 |
+| `kind` | `norm` / `fact` / `pitfall` / `preference` / `procedure` / `reference` / `current_state` | 记忆种类 |
+| `origin` | `user_quote` / `agent_extracted` / `system` / `tool` | 谁说的（**与 `source` 的 auto/manual 不是一回事**） |
+
+配套列：`title` / `summary`（注入只看 summary）/ `evidence_refs` / `source_quote_ids` / `must_read` / `expires_at` / `dedup_hash`。
+`must_read=1` 只允许 `kind='norm'`；`kind='current_state'` 必须带 `expires_at`（否则会膨胀成永久 fact）。
+
+**两张新表**
+
+- `source_quotes`：用户原话，**原文永不 UPDATE**；`quote_hash` 唯一，同一句话只存一份；`speaker='agent_relay'` 表示「agent 转述」。
+- `memory_candidates`：每条候选的去向账（`accepted`/`merged`/`duplicate`/`rejected` + 原因码 + 原 payload）。**`rejected` 行就是面板的待审候选**。
+
+**唯一的收尾入口**：`POST /memory/wrapup`（服务端实现 `server/memory/wrapup.py::submit_wrapup`）
+
+```
+payload = {run_id, project_id, quotes:[...], candidates:[...]}
+  → 先落 quotes（去重靠 quote_hash）
+  → 逐条候选：必填校验 → dedup 查重 → 同 key 覆盖(merged) 或新建(accepted)
+  → 全部走 upsert_fact（唯一漏斗，修订史与写锁自动继承）
+  → 返回逐条去向
+```
+
+**幂等**：`dedup_hash = sha256(scope|kind|title 或 key|content)`，归一化只做「空白折叠 + 小写」。同一份 payload 连交两次，第二次全部 `duplicate`，`facts` 与 `source_quotes` 行数都不变。
+
+**拒收码**：`empty_content` / `over_limit`（单次 >10）/ `unknown_kind` / `must_read_not_norm` / `missing_expires_at` / `bad_scope` / `sensitivity_invalid`。
+被拒的候选同样进 `memory_candidates`（同内容 + 同原因只留一条，重试不刷屏）。
+
+**取上下文**：`MemoryStore.list_facts_for_context(scope=, kinds=, must_read_only=)`，
+排序 `must_read` → `kind='norm'` → `updated_at`。**老数据 `scope` 为 NULL，按 scope 查不到**——没人判过归属就不进上下文。

@@ -2,6 +2,8 @@
 
 本文档描述 server 端 todos（待办任务）和 WIP（Work In Progress，进行中工作）系统的架构、数据模型、生命周期、API 端点、与 task_closure 的整合机制。
 
+> **2026-10-27 T14 起**：`todos` 与 `wip_tasks` 已合并为 **`tasks` 单表**（超集 30 列），旧表冻结为只读 legacy。DB 写侧状态词统一为 `active / paused / blocked / completed / archived`；旧 `/todos`、`/wip` 端点仍把状态映射回旧词以兼容 GUI。统一动作入口：`POST /tasks/{scope}/{id}/action`。设计见 `temp/sdd/butler-v2/T14-task-merge.md`。
+
 ## 1. 概述
 
 todos 和 WIP 是两类不同的待办管理工具，**集成在同一模块** `server/todos/` 内（共享 memory.db，store 共享、router 同文件拆分为 wip_router）：
@@ -17,11 +19,11 @@ todos 和 WIP 是两类不同的待办管理工具，**集成在同一模块** `
 
 | 文件 | 类名/职责 |
 |------|-----------|
-| [__init__.py](file:///<project_root>/server/todos/__init__.py) | 模块导出 `TodosStore`、`router`、`wip_router`、`get_todos_store`。包含两类待办：Todos（周期性任务）和 WipTasks（一次性未完成工作），数据存于 memory.db 的 todos / wip_tasks 表 |
-| [models.py](file:///<project_root>/server/todos/models.py) | Pydantic 数据模型层。定义 `TodoFrequency`（daily/weekly/monthly/quarterly）、`TodoStatus`（pending/in_progress/done/blocked/skipped/archived）、`WipStatus`（active/paused/blocked/completed）三个枚举，以及 `TodoCreate`/`TodoUpdate`/`TodoDoneRequest`/`WipTaskCreate`/`WipTaskUpdate` 五个请求模型。`TodoCreate` 含 `validate_type_specific_fields` 校验器按 type 强制专属字段 |
-| [store.py](file:///<project_root>/server/todos/store.py) | SQLite 存储层 `TodosStore` 类（共享 memory.db）。负责 todos + wip_tasks 两张表的 CRUD，含 schema 定义（`TODOS_SCHEMA_SQL`）、幂等迁移（`_migrate_schema`）、JSON 字段序列化、到期计算（`_compute_next_due`）、触发检查（`check_trigger`）、统计（`get_stats`）。线程安全（`_write_lock`），WAL 模式 |
-| [router.py](file:///<project_root>/server/todos/router.py) | FastAPI 路由层。定义 `router`（prefix=/todos）和 `wip_router`（prefix=/wip）两个 APIRouter。含 `get_todos_store()` 单例工厂（懒加载）。所有端点用 `asyncio.to_thread` 包裹同步 store 调用 |
-| [migration.py](file:///<project_root>/server/todos/migration.py) | 从旧记忆系统迁移数据。`migrate_from_memory()` 幂等迁移 task_reminders→todos、wip_index + .agents/wip/*.json→wip_tasks（检查 schema_info 'todos_migrated' 标志） |
+| [__init__.py](file:///<project_root>/server/todos/__init__.py) | 模块导出 `TodosStore`、`router`、`wip_router`、`get_todos_store`。包含两类待办：Todos（周期性任务）和 WipTasks（一次性未完成工作），数据统一存于 memory.db 的 `tasks` 表（T14 起；旧 `todos` / `wip_tasks` 冻结） |
+| [models.py](file:///<project_root>/server/todos/models.py) | Pydantic 数据模型层。定义 `TodoFrequency`（daily/weekly/monthly/quarterly）、`TodoStatus`（旧 API 兼容词）、`WipStatus`（旧 API 兼容词）、`TaskActionRequest`（统一动作），以及 `TodoCreate`/`TodoUpdate`/`TodoDoneRequest`/`WipTaskCreate`/`WipTaskUpdate` 请求模型。`TodoCreate` 含 `validate_type_specific_fields` 校验器按 type 强制专属字段 |
+| [store.py](file:///<project_root>/server/todos/store.py) | SQLite 存储层 `TodosStore` 类（共享 memory.db）。负责 `tasks` 单表 CRUD（按 kind 分 todos/wip）、schema 定义（`TODOS_SCHEMA_SQL`）、影子迁移（`_migrate_tasks_v1`）、JSON 字段序列化、到期计算（`_compute_next_due`）、触发检查（`check_trigger`）、统一动作（`apply_task_action`）、统计（`get_stats`）。线程安全（`_conn_lock`），WAL 模式 |
+| [router.py](file:///<project_root>/server/todos/router.py) | FastAPI 路由层。定义 `router`（prefix=/todos）、`wip_router`（prefix=/wip）和 `tasks_router`（prefix=/tasks）。含 `get_todos_store()` 单例工厂（懒加载）。所有端点用 `asyncio.to_thread` 包裹同步 store 调用 |
+| [migration.py](file:///<project_root>/server/todos/migration.py) | 从旧记忆系统迁移数据。`migrate_from_memory()` 幂等迁移 task_reminders / wip_index / .agents/wip/*.json → `tasks`（检查 schema_info 'todos_migrated' 标志） |
 
 > **重要**：不存在独立的 `server/wip/` 目录，WIP 功能完全集成在 `server/todos/` 模块内。
 
@@ -81,10 +83,10 @@ active ──暂停──> paused
    │                │
    └──阻塞──> blocked
    │
-   └──完成──> completed ──wip_archive──> 物理删除（DELETE FROM wip_tasks）
+   └──完成──> completed ──wip_archive──> 物理删除（DELETE FROM tasks）
 ```
 
-**关键设计**：WIP **无 `archived` 状态**——归档 = 写入记忆系统 + 物理删除记录（`wip_delete`）。
+**关键设计**：旧 `wip_archive` 流程的“归档”= 写入记忆系统 + 物理删除记录（`wip_delete`）；**T14 起**另有统一动作 `tasks_action(archive)` = 软归档到 `tasks.archived`。两者不是一回事：前者是经验提炼后的删除，后者是状态位。面板/agent 的“归档”按钮走后者。
 
 ### 4.2 状态说明
 
@@ -93,11 +95,11 @@ active ──暂停──> paused
 | `active` | 进行中（默认初始状态） | create 时自动；paused/blocked 恢复 |
 | `paused` | 暂停 | active 暂停 |
 | `blocked` | 阻塞（配合 `blocked_reason` 字段） | active 遇阻 |
-| `completed` | 完成（progress 通常=100） | task_closure step_2 调 `wip_update(status=completed)` |
+| `completed` | 完成（progress 通常=100） | task_closure step_2 调 `tasks_action(complete)`（旧 `wip_update(status=completed)` 仍兼容） |
 
 ### 4.3 完整生命周期链路
 
-`wip_create`(active) → `wip_update`(active/paused/blocked 来回) → `wip_update(status=completed)` →（用户触发 wip_archive skill）→ `wip_get_many` 取回全文提炼经验 → `memory_set` 写入 → `wip_delete` 物理删除。
+`wip_create`(active) → `wip_update`/`tasks_action`(active/paused/blocked 来回) → `tasks_action(complete)` →（用户触发 wip_archive skill）→ `wip_get_many` 取回全文提炼经验 → `memory_set` 写入 → `wip_delete` 物理删除。
 
 ### 4.4 关键代码位置
 
@@ -175,7 +177,7 @@ task_type：`system.task_closure`（通过 `agent_guide(task_type='system.task_c
 
 高频查询走 MCP 直连免审批：
 - `todos_due` / `wip_list` / `wip_get` / `wip_get_many` 为直连 MCP 工具
-- `wip_create` / `wip_update` / `wip_delete` 走 `localagent_advanced_tool` 网关（见 [wip_archive.md](file:///<project_root>/.agents/skills/wip_archive.md)）
+- `wip_create` / `wip_update` / `wip_delete` 走 `parcae_advanced_tool` 网关（见 [wip_archive.md](file:///<project_root>/.agents/skills/wip_archive.md)）
 
 ## 7. 数据表 Schema
 
@@ -304,7 +306,7 @@ stateDiagram-v2
 - [ ] `_CATEGORY_PREFIXES` 是否添加新前缀（todos_, wip_）？
 - [ ] `/health` 是否返回 todos 状态？
 - [ ] `agent_guide.py` 中相关条目的 first_action / mcp_tools_priority 是否更新？
-- [ ] 涉及读详情/CRUD 的 task_type，first_action 是否提示用 `localagent_advanced_tool`（而非 exec_python 发 HTTP）？
+- [ ] 涉及读详情/CRUD 的 task_type，first_action 是否提示用 `parcae_advanced_tool`（而非 exec_python 发 HTTP）？
 - [ ] 启动时迁移逻辑是否幂等（检查 schema_info 标志）？
 
 ## 10. 相关文档

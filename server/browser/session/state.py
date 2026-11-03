@@ -53,6 +53,15 @@ class TabSession:
     # snapshot 时记录当时的 mutation 计数；action 用 node_id 时如果计数变化则返回 STALE_NODE
     last_snapshot_dom_version: int = 0  # snapshot 时的 dom 版本号
     _dom_version_probe: object = field(default=None, repr=False)  # MutationObserver 句柄（page.evaluate 返回的 handler dict）
+    # 2026-11-01：snapshot 时的**页级版本号**（server/browser/page_guard.py）。
+    # 上面两个 dom_version 字段从定义起没有任何代码使用（设计好的 MutationObserver
+    # 防线从未接上，2026-11-01 实测确认）。改为用页级版本戳做跨会话过期判定：
+    # snapshot 记下当时的 gen；action 用 node_id 时若 gen 变了且写者不是自己
+    # ⇒ 说明别的会话动过这个页面，css_path 可能已指向别的元素 ⇒ STALE_NODE。
+    # None = 本次会话尚未 snapshot（不参与判定）。⚠ 不能用 0 当哨兵：gen 的初始值
+    # 就是 0，页面上还没人操作过时快照记下的合法值也是 0，两者会混为一谈
+    # （2026-11-01 实测复现：新人接手后第一个 snapshot 永远判不出 STALE_NODE）。
+    last_snapshot_page_gen: int | None = None
     # P0-1 修复：dialog/popup/filechooser 持久事件监听器
     # Playwright expect_* context manager 跨 HTTP 请求时序不可靠（enter→exit 之间
     # 无法被另一个 HTTP 请求触发），改为在 session 创建时挂持久 page.on 监听器，

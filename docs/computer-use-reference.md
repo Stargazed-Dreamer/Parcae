@@ -186,8 +186,8 @@ POST /screen/uia/action
   "element_id": "12345:abcdef12:0",
   "snapshot_id": "snap_xxx",
   "action": "set_value",
-  "value": "LocalAgent 中文",
-  "expected": {"type": "uia_value_equals", "text": "LocalAgent 中文"}
+  "value": "Parcae 中文",
+  "expected": {"type": "uia_value_equals", "text": "Parcae 中文"}
 }
 # -> status="executed", postcondition_status="verified"
 ```
@@ -196,7 +196,7 @@ POST /screen/uia/action
 
 UIA 语义层与键鼠操作共用同一套安全机制。`screen_semantic_action` 的 invoke/select/toggle 等动作**不经过 SendInput**，但同样先过 `_enforce_session_permission()`：无授权直接 403（`takeover_confirm` 那层弹窗在生产路径弹不到，见上方"唯一授权入口"）。使用前应：
 
-1. **管理员权限启动后端**（`start.bat` 自动 UAC 提权），否则 `focus_window` 无法激活窗口
+1. **管理员权限启动后端**（由用户手动运行 `start.bat`，无权限时它会弹 UAC；agent 不得替用户点 UAC），否则 `focus_window` 无法激活窗口
 2. **先请求当前任务授权**（`screen_request_control`），用户在确认窗里点"允许接管"即授予 agent 请求的那一档模式（拒绝则什么也不改）
 3. **OCR 首次调用慢**（模型冷启动 15s+），预热后正常
 
@@ -457,9 +457,9 @@ UIA 语义层与键鼠操作共用同一套安全机制。`screen_semantic_actio
 - `engine=ocr`：返回 `details` 含 bbox，适合文字定位
 - `engine=vl`：返回 `text` 为 VL markdown，**`details` 永远为空**（remote_vl.ocr() 不返回 blocks），适合纯文本提取/版面理解，不适合坐标定位
 
-> **MCP 调用方式**：`screen_ocr` 不在直连 MCP 白名单中，必须经 `localagent_advanced_tool(tool="screen_ocr", params={...})` 网关调用。
+> **MCP 调用方式**：`screen_ocr` 不在直连 MCP 白名单中，必须经 `parcae_advanced_tool(tool="screen_ocr", params={...})` 网关调用。
 
-`details[].box` 是窗口截图内物理像素坐标。取文字四点中心后，加窗口 `bbox.left/top`，得到可传给 `execute_action` 的屏幕坐标。MCP 通过 `localagent_advanced_tool(tool="screen_ocr", params={...})` 调用。
+`details[].box` 是窗口截图内物理像素坐标。取文字四点中心后，加窗口 `bbox.left/top`，得到可传给 `execute_action` 的屏幕坐标。MCP 通过 `parcae_advanced_tool(tool="screen_ocr", params={...})` 调用。
 
 ### 窗口枚举（list_windows）
 
@@ -722,15 +722,31 @@ POST /screen/overlay {action:"hide"}
 
 ## 管理员权限
 
-**键鼠操控需要以管理员身份启动后端**，否则Windows UIPI会阻止鼠标操作（`SetCursorPos`静默失败）。
+**键鼠操控需要以管理员身份启动后端**，否则 Windows UIPI 会阻止鼠标操作（`SetCursorPos` 静默失败）。
 
 启动方式：
-```bash
-# 右键终端 -> "以管理员身份运行"，然后：
-uv run python -m server.main
-```
+- **用户手动启动**：运行根目录 `start.bat`（无权限时会弹 UAC），或在管理员终端里执行 `.venv\Scripts\python.exe -m server.main`。
+- **agent 自启动**：一律用非提权命令 `.venv\Scripts\python.exe -m server.main`，**不要运行 `start.bat`、不要替用户点 UAC**。非提权后端的截图、窗口枚举、OCR、浏览器正常，只有键鼠与 UIA 激活窗口受限；需要这些能力时请用户自己重启。
 
 `/screen/status` 的 `admin_privileges` 字段会指示当前是否具有管理员权限。非管理员时截图和窗口枚举正常，但键鼠操作会返回失败。
+
+### 未提权时的端点契约（2026-10-22 起）
+
+未提权 → 注入类端点**直接拒绝，不弹接管确认窗**。理由：非提权进程注入的键鼠事件会被 UIPI
+静默丢弃，先弹窗问用户「允许接管吗」、用户点允许、agent 再发现点击无效，是白问一次且误导用户
+（用户 2026-10-22 明确要求「不可用就该直接说未提权」）。
+
+| 端点（operation_id） | 未提权时的行为 |
+|---|---|
+| `screen_request_control`（`POST /screen/control/request`） | **不弹窗**，`success=false, status="not_elevated", admin_privileges=false`。带 `needs_input_injection=false` 时照常弹窗（本任务只用 UIA/窗口类能力） |
+| `execute_action` / `batch_actions` / `desktop_transaction` / `scroll_capture` / `focus_window` | 第一行返回 `status="not_elevated"`（`transport_status="not_sent"`），**早于** 403 授权引导与所有弹窗。⚠️ `dry_run=true` 也一样被拦——闸门是**端点**级前置条件，不按参数分支（对不能执行的后端做"预演"没有意义） |
+| `screen_semantic_action`（UIA 语义动作）、窗口生命周期、`capture_screen` / `screen_ocr` / `screen_snapshot` / `list_windows` | 不受影响（不发键鼠事件） |
+
+判据与文案统一由 `server/screen/routes.py` 的 `NOT_ELEVATED_STATUS` / `not_elevated_message()`
+产出。agent 侧铁律：见 `status="not_elevated"` **立即停**，报用户「后端未提权，请以管理员重启」，
+不要重试、不要改用别的键鼠端点、不要去请求授权（那条路在未提权时是死路）。
+例外：`execute_action(action="click", strategy="uia_only")` 走纯 UIA invoke，未提权也放行
+（融合未命中直接 `blocked`，绝不回退键鼠）。
 
 ## 历史经验留档（byr.pt 任务实测，2026-07-14）
 
@@ -787,7 +803,7 @@ PT 站点可能同时满足多个特殊条件，多重叠加时根因难以快�
 
 ## 附录：评估修复历史
 
-> 以下为评估文档（`docs/evaluations/2026-07-20-computer-use-vs-localagent.md`）驱动的多轮改造记录，仅供历史参考。正文已整合所有修复的技术结论，此处保留版本标注作为变更追溯。
+> 以下为评估文档（`docs/evaluations/2026-07-20-computer-use-vs-parcae.md`）驱动的多轮改造记录，仅供历史参考。正文已整合所有修复的技术结论，此处保留版本标注作为变更追溯。
 
 ### 焦点安全 P0 改造
 

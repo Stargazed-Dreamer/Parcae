@@ -1,13 +1,15 @@
-"""headless-agent-session: 后端自主启动 agent 会话的启动逻辑
+"""headless-agent-session: 后端自主启动 agent 会话的提交逻辑
 
 spec: temp/sdd/headless-agent-session/spec.md
 ticket: Ticket 02 (主 agent 启动) + Ticket 03 (judge agent)
 
-设计要点（spec Solution 节）：
-- 在后端 event loop 中 import client.core.agent，组装 RunnerDeps + RunnerConfig
-- 创建 headless session（mode="headless"），调 SessionFacade.start
-- 主 agent 跑完后从 EventStore 取最后 N 条 assistant 消息作为 judge 输入
-- 通过 HTTP 自环（base_url=http://127.0.0.1:8766）调后端 REST/MCP 工具
+butler-runtime T6 起：本模块**不再持有对话循环**。headless 会话提交给
+butler runtime（独立进程），这里只做 submit → 等终态 → 取消息/账本。
+后端进程挂掉不影响作业跑完；作业结果通过 runtime HTTP 读回。
+
+- 作业在 runtime 里以 mode="headless" / "headless_judge" 运行
+- 消息、执行账本（tool_call_outcome_summary）都从 runtime API 读
+- 中断由 runtime 按 session_id 处理（headless_endpoints 代理转发）
 
 资源限制默认值（spec 我替领导拍的板 + 用户反馈放宽）：
 - max_iterations: 100（chat 会话 50 翻倍，正常任务能跑完）
@@ -15,37 +17,29 @@ ticket: Ticket 02 (主 agent 启动) + Ticket 03 (judge agent)
 
 B2（spec D2/D3）：删 max_budget_usd 字段，本地无法准确算 cost（缓存比例不明），
 只记账 token 不控制预算。
-
-interrupt registry（Ticket 07 用）：
-- 模块级 _headless_sessions: dict[session_id, asyncio.Event]
-- run_main_agent / run_judge_agent 启动时注册，结束时清理
-- REST 端点调 _headless_sessions[sid].set() 触发中断
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid as _uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-# session_id 前缀约定（spec Implementation Decisions 节）
-# unknown-outcome-evidence T05：前缀真源改挂 client.core.agent.types——reconciler
-# 必须按同一份前缀跳过无人值守会话，而 client 不许 import server（C4），所以真源
-# 只能放在被两边看到的地方。server→client 方向是本文件白名单内的既有用法。
-from client.core.agent.types import (
+from lib.agent_runtime.runtime_client import (
+    DEFAULT_WAIT_TIMEOUT,
+    RuntimeClient,
+)
+from lib.agent_runtime.types import (
     HEADLESS_JUDGE_SESSION_PREFIX,
     HEADLESS_SESSION_PREFIX,
 )
 
-logger = logging.getLogger("localagent.headless_runner")
+logger = logging.getLogger("parcae.headless_runner")
 
 # ============================================================================
 # 常量与默认值（spec 我替领导拍的板）
 # ============================================================================
-
-DEFAULT_BASE_URL = "http://127.0.0.1:8766"
 
 # 主 agent 资源限制默认值（spec 我替领导拍的板 + 用户反馈放宽）
 DEFAULT_MAX_ITERATIONS = 100
@@ -60,46 +54,6 @@ DEFAULT_JUDGE_MAIN_OUTPUT_MESSAGES = 20
 
 HEADLESS_MAIN_PREFIX = HEADLESS_SESSION_PREFIX
 HEADLESS_JUDGE_PREFIX = HEADLESS_JUDGE_SESSION_PREFIX
-
-
-# ============================================================================
-# interrupt registry（Ticket 07 用，Ticket 02 提前留接口）
-# ============================================================================
-
-# 模块级 registry：session_id → asyncio.Event
-# 后端 event loop 中创建的 asyncio.Event，供 REST 端点跨请求访问
-_headless_sessions: dict[str, asyncio.Event] = {}
-
-
-def register_interrupt_event(session_id: str, event: asyncio.Event) -> None:
-    """注册 session 的 interrupt_event（run_main_agent / run_judge_agent 启动时调）。"""
-    _headless_sessions[session_id] = event
-    logger.debug("Registered interrupt event for session %s", session_id)
-
-
-def unregister_interrupt_event(session_id: str) -> None:
-    """清理 session 的 interrupt_event（run_main_agent / run_judge_agent 结束时调）。"""
-    _headless_sessions.pop(session_id, None)
-    logger.debug("Unregistered interrupt event for session %s", session_id)
-
-
-def get_interrupt_event(session_id: str) -> asyncio.Event | None:
-    """查询 session 的 interrupt_event（REST 端点用）。"""
-    return _headless_sessions.get(session_id)
-
-
-def interrupt_session(session_id: str) -> bool:
-    """触发 session 中断（REST 端点调）。
-
-    Returns:
-        True 如果 session 存在且已触发中断，False 如果 session 不存在
-    """
-    ev = _headless_sessions.get(session_id)
-    if ev is None:
-        return False
-    ev.set()
-    logger.info("Interrupted headless session %s", session_id)
-    return True
 
 
 # ============================================================================
@@ -129,16 +83,15 @@ class HeadlessConfig:
     # B2（spec D2/D3）：删 judge_max_budget_usd，本地无法准确算 cost
     judge_wall_clock_budget_secs: int = DEFAULT_JUDGE_WALL_CLOCK_BUDGET_SECS
 
-    # 其他
-    base_url: str = DEFAULT_BASE_URL
-    db_path: str = ""  # 留空用 EventStore 默认路径
+    # runtime 地址；留空按运行时声明文件解析（data/runtime/butler_runtime.json）
+    runtime_url: str = ""
 
 
 @dataclass
 class MainAgentResult:
     """run_main_agent 的返回值。"""
     session_id: str
-    outcome: Any  # RunOutcome（用 Any 避免 import cycle）
+    outcome: Any  # RuntimeOutcome（用 Any 避免 import cycle）
     last_assistant_messages: list[str] = field(default_factory=list)
     # T13：主 agent 的执行账本（终态计数 + 非成功项），judge 的判定材料之一。
     # 此前 judge 只能读主 agent 说了什么——"说完成了"就算完成。
@@ -227,8 +180,20 @@ VALID_VERDICTS = {"success", "failed", "uncertain"}
 
 
 # ============================================================================
-# 主 agent 启动逻辑
+# runtime 客户端
 # ============================================================================
+
+
+def _make_runtime_client(config: HeadlessConfig) -> RuntimeClient:
+    """构造 runtime 客户端；测试可 monkeypatch 本函数注入替身。"""
+    return RuntimeClient(base_url=config.runtime_url or None)
+
+
+def _wait_timeout(wall_clock_budget_secs: int) -> float:
+    """等终态的超时：runtime 自己会在墙上时间到点时收尾，这里只多给收尾余量。"""
+    if wall_clock_budget_secs and wall_clock_budget_secs > 0:
+        return float(wall_clock_budget_secs) + 120.0
+    return DEFAULT_WAIT_TIMEOUT
 
 
 def _generate_main_session_id() -> str:
@@ -241,99 +206,58 @@ def _generate_judge_session_id() -> str:
     return f"{HEADLESS_JUDGE_PREFIX}{_uuid.uuid4().hex[:12]}"
 
 
+# ============================================================================
+# 主 agent 启动逻辑
+# ============================================================================
+
+
 async def run_main_agent(
     trigger_text: str,
     config: HeadlessConfig,
     *,
     session_id: str | None = None,
-    interrupt_event: asyncio.Event | None = None,
+    client: RuntimeClient | None = None,
 ) -> MainAgentResult:
-    """启动主 agent 会话（mode="headless"）。
-
-    在后端 event loop 中 import client.core.agent 组装 deps + config，
-    调 SessionFacade.start 跑完主 agent，取最后 N 条 assistant 消息作为 judge 输入。
+    """把主 agent 会话（mode="headless"）提交给 runtime 并等它跑完。
 
     Args:
         trigger_text: 触发任务文本（如 "查 dmca-backup 最近一次 run 的日志"）
-        config: HeadlessConfig（资源限制 + base_url + db_path）
+        config: HeadlessConfig（资源限制 + runtime_url）
         session_id: 可选 session_id（留空自动生成 headless-{uuid}）
-        interrupt_event: 可选中断事件（留空自动创建；Ticket 07 REST 端点用）
+        client: 可选 runtime 客户端（测试注入；留空按 config.runtime_url 构造）
 
     Returns:
         MainAgentResult：含 session_id + outcome + last_assistant_messages
         失败时 outcome 可能是 None，error 字段含错误信息
     """
-    # 延迟 import 避免 server 启动时强依赖 client.core.agent
-    from client.core.agent import (
-        EventStore,
-        HttpClientToolExecutor,
-        LLMPoolGateway,
-        RunnerConfig,
-        RunnerDeps,
-        SessionFacade,
-        ToolRegistry,
-    )
-
     sid = session_id or _generate_main_session_id()
-    own_interrupt_event = interrupt_event is None
-    if own_interrupt_event:
-        interrupt_event = asyncio.Event()
+    client = client or _make_runtime_client(config)
 
-    # 注册到 interrupt registry（Ticket 07 REST 端点用）
-    register_interrupt_event(sid, interrupt_event)
-
-    store: EventStore | None = None
     try:
-        # 组装 EventStore（共享 data/client/agent.db，WAL 模式）
-        store = EventStore(db_path=config.db_path) if config.db_path else EventStore()
-        store.init()
-
-        # 组装 deps（HTTP 自环调后端）
-        gateway = LLMPoolGateway(base_url=config.base_url)
-        registry = ToolRegistry(base_url=config.base_url)
-        try:
-            registry.refresh()
-        except Exception as e:
-            logger.warning("ToolRegistry refresh failed (will run without tools): %s", e)
-        executor = HttpClientToolExecutor(registry=registry, base_url=config.base_url)
-
-        deps = RunnerDeps(
-            llm_gateway=gateway,
-            event_store=store,
-            tool_executor=executor,
-            tool_registry=registry,
-            interrupt_event=interrupt_event,
-        )
-
-        # 组装 config（RunnerConfig 是 frozen dataclass）
-        runner_config = RunnerConfig(
-            session_id=sid,
-            model=config.model,
-            max_iterations=config.max_iterations,
-            # B2（spec D2/D3）：删 max_budget_usd 传参
-            wall_clock_budget_secs=config.wall_clock_budget_secs,
-        )
-
-        # 调 SessionFacade.start（mode="headless"）
-        facade = SessionFacade(deps=deps, config=runner_config)
         logger.info(
-            "headless main agent start: session=%s trigger_len=%d max_iter=%d wall=%ds",
+            "headless main agent submit: session=%s trigger_len=%d max_iter=%d wall=%ds",
             sid, len(trigger_text), config.max_iterations, config.wall_clock_budget_secs,
         )
-        outcome = await facade.start(
-            sid, trigger_text, mode="headless",
+        await client.submit(
+            sid,
+            trigger_text,
+            mode="headless",
+            model_override=config.model,
+            max_iterations=config.max_iterations,
+            wall_clock_budget_secs=config.wall_clock_budget_secs,
         )
+        outcome = await client.outcome(sid, timeout=_wait_timeout(config.wall_clock_budget_secs))
 
-        # 取最后 N 条 assistant 消息作为 judge 输入
-        last_msgs = await _extract_last_assistant_messages(
-            store, sid, DEFAULT_JUDGE_MAIN_OUTPUT_MESSAGES
+        messages = await client.messages(sid)
+        last_msgs = _extract_last_assistant_messages(
+            messages, DEFAULT_JUDGE_MAIN_OUTPUT_MESSAGES
         )
 
         # T13：同时取执行账本。judge 不能只听主 agent 自述，必须看到
         # 这一轮工具调用里有多少 completed / failed / interrupted / unknown。
         evidence: dict = {}
         try:
-            evidence = await store.tool_call_outcome_summary(sid)
+            evidence = await client.tool_call_summary(sid)
         except Exception as e:
             logger.warning("读取执行账本失败 (session=%s): %s", sid, e)
 
@@ -351,48 +275,36 @@ async def run_main_agent(
             outcome=None,
             error=f"{type(e).__name__}: {e}",
         )
-    finally:
-        if store is not None:
-            try:
-                store.close()
-            except Exception:
-                pass
-        # 清理 interrupt registry
-        unregister_interrupt_event(sid)
 
 
-async def _extract_last_assistant_messages(
-    store, session_id: str, count: int
+def _extract_last_assistant_messages(
+    messages: list, count: int
 ) -> list[str]:
-    """从 EventStore 取最后 N 条 assistant 消息的 content 文本。
+    """取最后 N 条 assistant 消息的 content 文本。
 
     Args:
-        store: EventStore 实例
-        session_id: 会话 ID
-        count: 取最后 N 条（不足则全取）
+        messages: runtime `/sessions/{sid}/messages` 返回的消息 dict 列表
+            （也接受带 role/content 属性的对象，便于旧调用点/测试复用）
+        count: 取最后 N 条（不足则全取；<=0 取全部）
 
     Returns:
         list[str]：每条 assistant 消息的 content 文本（按时间顺序，最老的在前）
     """
-    try:
-        messages = await store.load_messages(session_id)
-    except Exception as e:
-        logger.warning("load_messages failed (session=%s): %s", session_id, e)
-        return []
+    def _field(m: Any, name: str, default: Any = "") -> Any:
+        if isinstance(m, dict):
+            return m.get(name, default)
+        return getattr(m, name, default)
 
-    # 过滤 assistant 消息
-    assistant_msgs = [m for m in messages if m.role == "assistant"]
-    # 取最后 N 条
+    assistant_msgs = [m for m in messages if _field(m, "role") == "assistant"]
     last_n = assistant_msgs[-count:] if count > 0 else assistant_msgs
 
-    # 提取 content 文本（content 是 list[dict] OpenAI 格式，提取 text 部分）
     result: list[str] = []
     for m in last_n:
-        content = m.content
+        content = _field(m, "content")
         if isinstance(content, str):
             result.append(content)
         elif isinstance(content, list):
-            # OpenAI 格式：[{"type": "text", "text": "..."}, ...]
+            # OpenAI content blocks: [{"type": "text", "text": "..."}, ...]
             text_parts = [
                 p.get("text", "") for p in content
                 if isinstance(p, dict) and p.get("type") == "text"
@@ -439,8 +351,7 @@ def parse_headless_config(config_dict: dict) -> HeadlessConfig:
         judge_wall_clock_budget_secs=config_dict.get(
             "judge_wall_clock_budget_secs", DEFAULT_JUDGE_WALL_CLOCK_BUDGET_SECS
         ),
-        base_url=config_dict.get("base_url", DEFAULT_BASE_URL),
-        db_path=config_dict.get("db_path", ""),
+        runtime_url=config_dict.get("runtime_url", ""),
     )
 
 
@@ -499,17 +410,16 @@ async def run_judge_agent(
     config: HeadlessConfig,
     *,
     session_id: str | None = None,
-    interrupt_event: asyncio.Event | None = None,
     execution_evidence: dict | None = None,
+    client: RuntimeClient | None = None,
 ) -> JudgeResult:
-    """启动 judge agent 会话（mode="headless_judge"）判定主 agent 任务成败。
+    """把 judge 会话（mode="headless_judge"）提交给 runtime 并解析判定结果。
 
     流程（spec Solution 节阶段 2）：
-    1. 创建 judge session（mode="headless_judge"）
-    2. judge prompt = JUDGE_PROMPT_TEMPLATE.format(task=trigger_text, main_output=...)
-    3. 调 facade.start(judge_session_id, judge_prompt, model_override=judge_model)
-    4. 解析 judge 最后一条 assistant 消息 JSON
-    5. 降级规则：
+    1. judge prompt = JUDGE_PROMPT_TEMPLATE.format(task=trigger_text, main_output=...)
+    2. 提交 judge session，等终态
+    3. 解析 judge 最后一条 assistant 消息 JSON
+    4. 降级规则：
        - JSON 解析失败 → verdict="uncertain"
        - judge session 自身失败（outcome.status != completed）→ verdict="uncertain"
        - judge 超过 max_iterations → verdict="uncertain"
@@ -519,60 +429,18 @@ async def run_judge_agent(
         trigger_text: 主 agent 的触发任务文本（判定时对照任务描述）
         config: HeadlessConfig（judge_model / judge_max_iterations 等字段用）
         session_id: 可选 judge session_id（留空自动生成 headless-judge-{uuid}）
-        interrupt_event: 可选中断事件（Ticket 07 REST 端点用）
         execution_evidence: 主 agent 的执行账本（EventStore.tool_call_outcome_summary
             的形状）。T13：判定材料不再只有对话文本；缺省时 prompt 里如实标注
             "拿不到账本"，规则会倾向 uncertain 而不是勉强判成功。
+        client: 可选 runtime 客户端（测试注入；留空按 config.runtime_url 构造）
 
     Returns:
         JudgeResult：含 verdict + reason + session_id + raw_output
     """
-    from client.core.agent import (
-        EventStore,
-        HttpClientToolExecutor,
-        LLMPoolGateway,
-        RunnerConfig,
-        RunnerDeps,
-        SessionFacade,
-        ToolRegistry,
-    )
-
     sid = session_id or _generate_judge_session_id()
-    own_interrupt_event = interrupt_event is None
-    if own_interrupt_event:
-        interrupt_event = asyncio.Event()
+    client = client or _make_runtime_client(config)
 
-    register_interrupt_event(sid, interrupt_event)
-
-    store: EventStore | None = None
     try:
-        store = EventStore(db_path=config.db_path) if config.db_path else EventStore()
-        store.init()
-
-        gateway = LLMPoolGateway(base_url=config.base_url)
-        registry = ToolRegistry(base_url=config.base_url)
-        try:
-            registry.refresh()
-        except Exception as e:
-            logger.warning("judge ToolRegistry refresh failed: %s", e)
-        executor = HttpClientToolExecutor(registry=registry, base_url=config.base_url)
-
-        deps = RunnerDeps(
-            llm_gateway=gateway,
-            event_store=store,
-            tool_executor=executor,
-            tool_registry=registry,
-            interrupt_event=interrupt_event,
-        )
-
-        runner_config = RunnerConfig(
-            session_id=sid,
-            model=config.judge_model,
-            max_iterations=config.judge_max_iterations,
-            # B2（spec D2/D3）：删 judge_max_budget_usd 传参
-            wall_clock_budget_secs=config.judge_wall_clock_budget_secs,
-        )
-
         # 组装 judge prompt
         main_output_text = "\n---\n".join(main_output) if main_output else "(无主 agent 输出)"
         judge_prompt = JUDGE_PROMPT_TEMPLATE.format(
@@ -582,17 +450,25 @@ async def run_judge_agent(
             execution_evidence=format_execution_evidence(execution_evidence),
         )
 
-        facade = SessionFacade(deps=deps, config=runner_config)
         logger.info(
-            "headless judge agent start: session=%s judge_model=%s max_iter=%d",
+            "headless judge agent submit: session=%s judge_model=%s max_iter=%d",
             sid, config.judge_model or "(default)", config.judge_max_iterations,
         )
-        outcome = await facade.start(
-            sid, judge_prompt, mode="headless_judge",
+        await client.submit(
+            sid,
+            judge_prompt,
+            mode="headless_judge",
+            model_override=config.judge_model,
+            max_iterations=config.judge_max_iterations,
+            wall_clock_budget_secs=config.judge_wall_clock_budget_secs,
+        )
+        outcome = await client.outcome(
+            sid, timeout=_wait_timeout(config.judge_wall_clock_budget_secs)
         )
 
         # 取 judge 最后一条 assistant 消息
-        judge_msgs = await _extract_last_assistant_messages(store, sid, 1)
+        messages = await client.messages(sid)
+        judge_msgs = _extract_last_assistant_messages(messages, 1)
         raw_output = judge_msgs[-1] if judge_msgs else ""
 
         # 降级规则 1：judge session 自身失败
@@ -651,10 +527,3 @@ async def run_judge_agent(
             session_id=sid,
             error=f"{type(e).__name__}: {e}",
         )
-    finally:
-        if store is not None:
-            try:
-                store.close()
-            except Exception:
-                pass
-        unregister_interrupt_event(sid)

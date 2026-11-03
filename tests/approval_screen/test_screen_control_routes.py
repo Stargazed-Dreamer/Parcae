@@ -27,6 +27,19 @@ from server.screen.session.manager import reset_session_manager
 
 
 @pytest.fixture(autouse=True)
+def elevated_backend(monkeypatch):
+    """声明"后端已提权"（真实运行前提是 start.bat 提权启动）。
+
+    2026-10-22 提权闸门：未提权时 `POST /screen/control/request` 直接返回
+    status="not_elevated"、**不弹窗**（键鼠注入必被 UIPI 丢弃）。本文件测的是授权状态机，
+    所以必须从"已提权"这个前提开始，否则 request 一律被闸门挡在弹窗外。
+    """
+    from server.screen import routes
+
+    monkeypatch.setattr(routes, "_ADMIN_STATUS", True)
+
+
+@pytest.fixture(autouse=True)
 def clean_state():
     """每个测试前清空 user_message + 重置 SessionManager + overlay 状态。
 

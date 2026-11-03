@@ -34,7 +34,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import EventStore, Message  # noqa: E402
+from lib.agent_runtime import EventStore, Message  # noqa: E402
 
 # ============================================================================
 # 1. asyncio 并发写（同进程多 EventStore 实例，模拟主会话 + judge 会话同时写）

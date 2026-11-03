@@ -301,7 +301,7 @@ task_type: adhoc.deep_research
 
 - **office_pdf**：本 skill 不自带 PDF 脚本，生成 PDF 时复用 `office_pdf` skill 的方法论（参考其 references/basic.md 用 reportlab 现场实现）
 - **web_archive**：研究过程中遇到的关键网页（官方博客、深度报道）可用 web_archive 存档，避免链接失效
-- **mindforge**：若研究对象有大量 PDF/文档资料，可先用 mindforge 转换并建索引，再用语义搜索辅助
+- **mindforge**：若研究对象有大量 PDF/文档资料，可先用 mindforge 转换并建索引，再用语义搜索辅助（⚠ 2026-10-27 起 `mindforge_*` 已从 MCP 网关整组摘除，agent 无工具入口；需 REST + 审批，或请用户手动触发）
 - **task_closure**：长篇研究（>1 万字）跨会话中断时，用 wip_tracker 留档，恢复时读 wip_get
 
 ## 关键约束

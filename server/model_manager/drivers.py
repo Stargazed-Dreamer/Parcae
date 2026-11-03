@@ -17,7 +17,7 @@ from typing import Literal
 
 from server.model_manager.types import LoadFailureError
 
-logger = logging.getLogger("localagent.model_manager.drivers")
+logger = logging.getLogger("parcae.model_manager.drivers")
 
 
 class OcrDriver:
@@ -67,6 +67,15 @@ class OcrDriver:
 
     def loaded_at(self) -> float | None:
         return self._models()._loaded_at
+
+    def last_active_at(self) -> float | None:
+        """最近一次被请求/推理的时间戳（time.time() 基准）——空闲回收判据。
+
+        与 loaded_at 的区别：loaded_at 只在加载完成时写一次（"在内存里多久"），
+        last_active_at 每次请求都刷新（"多久没人用"）。空闲回收用后者，否则
+        "加载后一直有请求"的模型会被误判为空闲。
+        """
+        return self._models().last_used_at
 
     def load_duration_ms(self) -> int | None:
         return self._models()._load_elapsed_ms

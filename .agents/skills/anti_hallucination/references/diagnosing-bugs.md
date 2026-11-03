@@ -114,7 +114,7 @@ Correct seam 是 test 能以 call site 中真实发生的方式触发 **real bug
 
 如果存在 correct seam：
 
-1. 把 minimised repro 变成该 seam 上的 failing test。项目用 `tests/test_<module>.py`，遵循已有 `tests/conftest.py` 约定。
+1. 把 minimised repro 变成该 seam 上的 failing test。项目用 `tests/test_<module>.py`，遵循已有 `conftest.py` 约定。
 2. 看它 fail。
 3. 应用 fix。
 4. 看它 pass。

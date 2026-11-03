@@ -390,8 +390,9 @@ class SystemToolsPanel(PanelBase):
 
         # 提示
         hint = QLabel(
-            "关闭常驻会立即释放 PaddleOCR 显存（打游戏更流畅），下次 OCR 调用会冷启动 10–30s；"
-            "开启会重新预热，恢复秒级响应。"
+            "关闭常驻会立即释放 PaddleOCR 显存，并且之后每次用完空闲超时（默认 10s）无请求"
+            "会自动卸载，下次 OCR 调用冷启动 10–30s；开启常驻则不参与自动回收，加载一次长期驻留。"
+            "显式的「加载/卸载」按钮在「模型池 → OCR」子面板。"
         )
         set_text_role(hint, "tertiary")
         hint.setWordWrap(True)

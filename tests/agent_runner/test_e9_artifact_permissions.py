@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent.l0_artifact_store import L0ArtifactStore  # noqa: E402
+from lib.agent_runtime.l0_artifact_store import L0ArtifactStore  # noqa: E402
 
 # ============================================================================
 # Mock-based 测试（跨平台，Win + Linux 都跑）

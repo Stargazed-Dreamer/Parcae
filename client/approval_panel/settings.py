@@ -1,13 +1,13 @@
 """QSettings 读写：show_in_tray + window_geometry。
 
 独立面板进程自己的配置，不写入 config.toml（决策 8）。
-注册表位置：HKEY_CURRENT_USER\\Software\\LocalAgent\\ApprovalPanel
+注册表位置：HKEY_CURRENT_USER\\Software\\Parcae\\ApprovalPanel
 """
 from __future__ import annotations
 
 from PySide6.QtCore import QByteArray, QSettings
 
-_SETTINGS_ORG = "LocalAgent"
+_SETTINGS_ORG = "Parcae"
 _SETTINGS_APP = "ApprovalPanel"
 
 # 默认值
@@ -15,7 +15,7 @@ DEFAULT_SHOW_IN_TRAY = True
 
 
 def get_settings() -> QSettings:
-    """获取 QSettings 实例（HKCU\\Software\\LocalAgent\\ApprovalPanel）。"""
+    """获取 QSettings 实例（HKCU\\Software\\Parcae\\ApprovalPanel）。"""
     return QSettings(QSettings.Scope.UserScope, _SETTINGS_ORG, _SETTINGS_APP)
 
 

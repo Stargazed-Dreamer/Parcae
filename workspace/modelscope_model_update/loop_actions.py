@@ -20,6 +20,7 @@ GUIDE_REGISTRY_ENTRIES = {
         "keywords": ["更新modelscope", "更新魔搭模型", "modelscope模型", "前沿模型清单", "项目缺什么模型", "扫描魔搭", "魔搭社区", "魔搭"],
         "description": "扫描ModelScope前沿模型+榜单评估+更新keys.json",
         "memory_key": "modelscope_model_update",
+        "related_memory_keys": ["modelscope_keys_json_write"],
         "first_action": "读取 memory_get('modelscope_model_update')；读取 data/llm/keys.json 按 scope 聚合当前模型；AskUserQuestion 问用户本次更新哪些方向（LLM/VL/aigc_image/aigc_video 可写入；TTS/ASR 仅记录）",
         "workflow_summary": "1.读keys.json 2.问方向 3.CDP扫描ModelScope 4.验证魔搭社区API源 5.榜单评估 6.推荐报告(TTS/ASR标注仅记录) 7.用户确认(仅4个可写入方向) 8.写keys.json",
         "mcp_tools_priority": [

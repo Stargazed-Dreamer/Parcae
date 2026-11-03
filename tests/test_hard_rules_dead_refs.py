@@ -47,6 +47,88 @@ class TestExemptions:
         )
         assert hr.find_dead_doc_refs(text, "docs/x.md", _nothing_exists) == []
 
+    def test_third_party_surfaces_are_not_scanned_at_all(self):
+        """上游 toolkit 存档 / 外部项目踩坑记录：里面的 `scripts/`、`tests/` 指的是
+        **蓝图用户自己项目**和 maa 仓库的路径，不是本仓的，按仓库根判必然误报。"""
+        for md in ("workspace/dev_toolkit/team_playbook.md",
+                   "workspace/maa-patch/LESSONS.md",
+                   "workspace/dev_toolkit/.agents/skills/spec/SKILL.md"):
+            assert hr.find_dead_doc_refs(
+                "见 `docs/gamejam-lessons.md`。", md, _nothing_exists
+            ) == [], md
+
+    def test_third_party_exemption_is_not_a_free_pass(self):
+        """地板：同一句话放在**本仓**文档里必须判死——否则上一条是恒绿，等于全库免检。"""
+        assert hr.find_dead_doc_refs(
+            "见 `docs/gamejam-lessons.md`。", "docs/somewhere.md", _nothing_exists
+        ) == [(1, "docs/gamejam-lessons.md")]
+
+    def test_evidence_raw_surface_is_not_scanned_at_all(self):
+        """66 事务盘点的**原始抓取件**：卡片正文是从用户其它项目的会话里逐字导出的，
+        里面的 `tools/check_arch.py`、`tests/conftest.py` 是被调研现场的路径。
+        改它们等于改证据 ⇒ 整棵不扫（2026-11-03 补 local_butler 入库时实测 4923 条）。"""
+        raw = ("workspace/local_butler/40_盘点与证据/20_事务盘点/"
+               "20_分源产出/07_ai/01_cards/workbuddy/fac77/card.md")
+        assert hr.find_dead_doc_refs(
+            "改动涉及 `tools/check_arch.py` 与 `tests/conftest.py`。", raw, _nothing_exists
+        ) == []
+
+    def test_evidence_exemption_stops_at_the_raw_layer(self):
+        """豁免只到 `20_分源产出/` 为止：同一盘点的设计文档与汇总仍受管。
+
+        两处兄弟路径各钉一条，免得把整棵 `40_盘点与证据/` 或整个 `local_butler/`
+        一刀切成免检区（那样这一层的设计文档出事就没人报了）。"""
+        for md in ("workspace/local_butler/40_盘点与证据/20_事务盘点/00_调查设计.md",
+                   "workspace/local_butler/40_盘点与证据/20_事务盘点/30_汇总/H6_汇总.md",
+                   "workspace/local_butler/30_架构与设计/10_边界与契约/DD-流转契约.md"):
+            assert hr.find_dead_doc_refs(
+                "见 `tools/check_arch.py`。", md, _nothing_exists
+            ) == [(1, "tools/check_arch.py")], md
+
+    def test_evidence_raw_surface_is_exempt_from_c5_too(self, monkeypatch, tmp_path):
+        """C5 与 C6 共用同一个豁免面：卡片里的 `mcp__localagent__X` 是被调研现场的
+        调用名（实测 701 条），不该按本仓的第一层直连表去判。"""
+        raw_rel = ("workspace/local_butler/40_盘点与证据/20_事务盘点/"
+                   "20_分源产出/07_ai/01_cards/codex/card.md")
+        body = "调 `mcp__localagent__exec_terminal_spawn` 起终端\n"
+        for rel in (raw_rel, "docs/borrowed.md"):
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body, encoding="utf-8")
+        monkeypatch.setattr(hr, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(hr, "_load_direct_tools", lambda: set())
+        assert hr.check_mcp_tool_refs([raw_rel]) == []
+        # 地板：同一句话写在 docs/ 下必须照旧判红
+        assert len(hr.check_mcp_tool_refs(["docs/borrowed.md"])) == 1
+
+    def test_history_line_exempts_that_ref_anywhere_in_the_file(self):
+        """同一路径只要在**某一行**带沿革动词，全文件都放行。
+
+        实测原型 ADR 0011：`server/gui_process.py` 在 L20 是平铺直叙"根因是它"，
+        L28 才写"重命名为 overlay_client.py"。只按行豁免会把 L20 判死，逼作者去改
+        一句本来正确的叙述。
+        """
+        text = (
+            "根因：`GUIClient`（`server/gui_process.py`，1053 行）单类一身五职。\n"
+            "——文件从 `server/gui_process.py` 重命名为 `server/overlay_client.py`。\n"
+        )
+        assert hr.find_dead_doc_refs(text, "docs/adr/0011-x.md", _nothing_exists) == []
+
+    def test_data_migration_wording_does_not_exempt_file_paths(self):
+        """地板：`迁移到` 讲的是**数据**迁移（密钥 config→secrets、格式 v8→v9），
+        不能顺带把文件路径也豁免掉——钉住 `(?<!迁)移到` 那个子串坑。"""
+        # ⛔ 这句**不能**写"历史迁移"——那是真沿革（一次性迁移脚本跑完就删），
+        # 是被有意豁免的；这里要测的是纯数据迁移措辞不豁免。
+        text = "逐级迁移到当前版本（其中一步需手动跑 `tools/migrate_x.py`）\n"
+        assert hr.find_dead_doc_refs(text, "docs/llm-pool.md", _nothing_exists) == [
+            (1, "tools/migrate_x.py")
+        ]
+
+    def test_example_line_exempts_placeholder_filenames(self):
+        """`x.md`/`yyy.py` 这类占位名不是真路径，举例子时不该判死。"""
+        text = "替换必须幂等：`docs/x.md` 是子串\n| 配套脚本 | scripts/yyy.py | ... |\n"
+        assert hr.find_dead_doc_refs(text, "docs/a.md", _nothing_exists) == []
+
     def test_ref_resolving_at_repo_root_is_ok(self):
         assert hr.find_dead_doc_refs(
             "见 `server/vl/remote_vl.py`。", "docs/y.md", _only_root("server/vl/remote_vl.py")
@@ -75,14 +157,19 @@ class TestExemptions:
 
 class TestBaselineIsNotARubberStamp:
     def test_entry_outside_baseline_blocks_the_commit(self, monkeypatch):
-        """把一条已知存量从基线里摘掉 → 必须立刻判红，证明闸门真的在看这份文件。"""
-        assert hr.DEAD_DOC_PATH_BASELINE, "基线为空则本用例测的是空气"
-        pair = sorted(hr.DEAD_DOC_PATH_BASELINE)[0]
-        monkeypatch.setattr(hr, "DEAD_DOC_PATH_BASELINE",
-                            set(hr.DEAD_DOC_PATH_BASELINE) - {pair})
-        violations = hr.check_dead_doc_paths([pair[0]])
-        hits = [v for v in violations if v.startswith("C6 死链") and pair[1] in v]
-        assert len(hits) >= 1, violations
+        """基线外的死链必须判红——证明闸门真的在看这些引用，不是摆设。
+
+        ⚠️ 2026-10-08 存量已全部修完（`DEAD_DOC_PATH_BASELINE` 清零），所以**不能再从
+        名单里挑一条来测**（名单空了这条会退化成跳过）。改成把 `_path_exists` 换成
+        「什么都不存在」，让 README.md 里真实存在的路径引用**全部**变成死链——基线是空的，
+        于是每一条都得判红。这样测的还是同一条代码路径，且不依赖"仓库里留着坏引用"。
+        """
+        monkeypatch.setattr(hr, "_path_exists", _nothing_exists)
+        violations = hr.check_dead_doc_paths(["README.md"])
+        hits = [v for v in violations if v.startswith("C6 死链")]
+        assert hits, (
+            "基线为空 + 路径全部判不存在，却一条 C6 死链都没报 ⇒ 闸门失效（或豁免吃光了）"
+        )
 
     def test_every_baseline_entry_is_still_real(self):
         """基线里每条现在都必须仍构成死链——修好了就删行，别让名单比现实宽松。"""
@@ -117,8 +204,12 @@ class TestCorpusInvariants:
 
         光断言"ALL_CHECKS 里有这个函数"挡不住函数内部提前 return/异常吞掉；
         这条要求死链**经由 run_checks**冒出来，才是端到端可达。
+
+        ⚠️ 存量清零后语料里已经没有真死链了，所以把 `_path_exists` 换成「什么都不存在」
+        造出死链，否则这条会退化成恒绿（同 test_entry_outside_baseline_blocks_the_commit）。
         """
         monkeypatch.setattr(hr, "DEAD_DOC_PATH_BASELINE", set())
+        monkeypatch.setattr(hr, "_path_exists", _nothing_exists)
         violations = hr.run_checks(staged=False)
         assert any(v.startswith("C6 死链") for v in violations), (
             "run_checks 没走到 C6 ⇒ 注册或调用链断了，基线外的新死链会静默放行"
@@ -129,14 +220,12 @@ class TestCorpusInvariants:
         tracked = hr._tracked_files()
         mds = [f for f in tracked if f.endswith(".md")]
         assert len(mds) > 300, len(mds)
-        dead = 0
-        for f in mds:
-            p = hr.PROJECT_ROOT / f
-            if not p.is_file():
-                continue
-            text = p.read_text(encoding="utf-8", errors="replace")
-            dead += len(hr.find_dead_doc_refs(text, f, hr._path_exists))
-        assert dead > 0, "在用面一条死链都扫不出来 ⇒ 正则或豁免失效，闸门在测空气"
+        # ⚠️ 地板原来是 `dead > 0`（语料里必须扫得出死链），2026-10-08 存量修完之后它不再
+        # 成立——继续要求它等于逼着"故意留一条死链不修"来养地板。这条地板真正要看的是
+        # **扫描器还没坏**（正则没失效、豁免没把什么都吃掉），用合成样例判即可。
+        assert hr.find_dead_doc_refs(
+            "看 `server/definitely_gone.py` 的实现。", "docs/synthetic.md", _nothing_exists
+        ) == [(1, "server/definitely_gone.py")], "扫描器判不出死链 ⇒ 正则或豁免失效"
         # 存量都在基线里：扫出的死链数 == 基线条数（按 (file, ref) 去重）
         pairs = {(f, r) for f in mds if (hr.PROJECT_ROOT / f).is_file()
                  for _ln, r in hr.find_dead_doc_refs(

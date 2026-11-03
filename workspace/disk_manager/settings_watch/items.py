@@ -98,6 +98,17 @@ class FileAssocItem(WatchItem):
     @staticmethod
     def _make_op(ext: str, want: str, now: Any) -> RestoreOp:
         def run() -> tuple[bool, str]:
+            # 前置 1：目标程序还在不在？（2026-10-11 实测：残余 17 个全是目标已被卸载/挪走）
+            alive, why = C.progid_alive(want)
+            if not alive:
+                return False, f"跳过 {ext}：{why}（属软件已不在，关联修好也打不开）"
+            # 前置 2：有没有类别竞争？video/audio/image 被 Windows 的类别默认 AppX 盯着，
+            #         UserChoice 一删就 +15s 被补位，写注册表注定失败——别假装成功。
+            if C.is_contended(ext):
+                return False, (
+                    f"{ext} 属 {C.perceived_type(ext)} 类，Windows 有默认 AppX 会接管，注册表改不动；"
+                    f"请让目标程序自己关联一次（如爱奇艺万能联播：设置 → 文件关联 → 全选 → 确定）"
+                )
             # 哈希无关两步：设每用户经典层 -> 删带哈希的 UserChoice 覆盖
             rc1, out1 = run_reg(
                 "add", f"HKCU\\Software\\Classes\\{ext}",
@@ -107,11 +118,11 @@ class FileAssocItem(WatchItem):
                 return False, f"设置经典层失败: {out1}"
             uc = C.get_userchoice(ext)
             if uc["progid"] is not None or uc["hash_present"]:
-                rc2, out2 = run_reg(
-                    "delete", f"HKCU\\{C.FILEEXTS_SUBKEY}\\{ext}\\UserChoice", "/f"
-                )
-                if rc2 != 0 and "not found" not in out2.lower() and "找不到" not in out2:
-                    return True, f"经典层已设，但删 UserChoice 返回: {out2}"
+                # ⛔ 必须走 winreg：reg.exe 删这些键会被 ACL 拒（2026-10-07 实测 103/247 删不动）
+                ok, why2 = C.delete_userchoice_key(ext)
+                if not ok:
+                    # UserChoice 残留 = 带哈希的那层仍然压着经典层，等于没修好，如实报 False
+                    return False, f"经典层已设，但删 UserChoice 失败: {why2}（多为 Adobe 类保护 ACL）"
             return True, f"{ext}: {now} -> {want}"
 
         return RestoreOp(desc=f"关联 {ext} -> {want}（当前 {now}）", run=run)
@@ -678,3 +689,137 @@ class WinlogonItem(WatchItem):
         verb = "删除（回到未设置）" if want is None else f"改回 {want!r}"
         return RestoreOp(desc=f"[USER] {name} 当前 {now!r} -> {verb}", run=run)
 
+
+
+# ============================ TCP 动态端口范围 ============================
+
+# 为什么值得纳管：后端固定端口（如 8766）被 Windows 端口保留区顶掉时，
+# 表面现象是「昨天能起、今天一启动就关」，真实根因常常是**动态端口范围被改到低位**
+# （WinNAT 只能从低位划保留块，正好盖住常用端口）。而改这个值的往往不是我们：
+# 「网络优化」「游戏加速器」「系统精简脚本」都会顺手写 MaxUserPort / dynamicport。
+# 所以这里把注册表原值纳入快照 —— 被改回去时能 diff 出来、也能按基线改回。
+_TCPIP_PARAMS = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+_TCPIP_REG_PATH = "HKLM\\" + _TCPIP_PARAMS
+
+
+def _tcp_port_values() -> dict[str, tuple[Any, int]]:
+    """枚举 Tcpip\\Parameters 下我们关心的端口参数 -> {name: (value, regtype)}。"""
+    wanted = {
+        "DynamicPortRangeStartPort",
+        "DynamicPortRangeNumberOfPorts",
+        "MaxUserPort",
+        "ReservedPorts",
+        "PersistentPortExclusions",
+    }
+    out: dict[str, tuple[Any, int]] = {}
+    try:
+        k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _TCPIP_PARAMS, 0, winreg.KEY_READ)
+    except OSError:
+        return out
+    try:
+        i = 0
+        while True:
+            try:
+                name, val, typ = winreg.EnumValue(k, i)
+            except OSError:
+                break
+            if name in wanted:
+                out[name] = (val, typ)
+            i += 1
+    finally:
+        winreg.CloseKey(k)
+    return out
+
+
+@register
+class TcpPortRangeItem(WatchItem):
+    id = "tcp_port_range"
+    name = "TCP 动态端口范围 / 保留段（端口被顶走的根因）"
+    kind = "network"
+    supports_restore = True
+    restore_requires_admin = True
+
+    _NAMES = (
+        "DynamicPortRangeStartPort",
+        "DynamicPortRangeNumberOfPorts",
+        "MaxUserPort",
+        "ReservedPorts",
+        "PersistentPortExclusions",
+    )
+
+    def collect(self) -> list[dict[str, Any]]:
+        vals = _tcp_port_values()
+        recs: list[dict[str, Any]] = []
+        for name in self._NAMES:
+            present = name in vals
+            value, typ = vals[name] if present else (None, 0)
+            recs.append(
+                {
+                    "key": name,
+                    "present": present,
+                    "value": value,
+                    "regtype": typ,
+                    "regpath": _TCPIP_REG_PATH,
+                }
+            )
+        return recs
+
+    def label(self, rec: dict[str, Any]) -> str:
+        return f"TCP 参数 {rec.get('key')}"
+
+    def describe_change(self, ch: Any) -> str:
+        b, a = ch.before or {}, ch.after or {}
+        if ch.kind == "added":
+            return f"[+] {ch.label} 出现：{a.get('value')!r}"
+        if ch.kind == "removed":
+            return f"[-] {ch.label} 消失（原 {b.get('value')!r}）"
+        return f"[~] {ch.label}: {b.get('value')!r} -> {a.get('value')!r}"
+
+    def restore_ops(
+        self, target: list[dict[str, Any]], current: list[dict[str, Any]]
+    ) -> list[RestoreOp]:
+        cur_by = _by_key(current)
+        ops: list[RestoreOp] = []
+        for t in target:
+            name = str(t["key"])
+            c = cur_by.get(name)
+            if c is not None and self.change_sig(t) == self.change_sig(c):
+                continue
+            ops.append(self._make_op(name, t, c))
+        return ops
+
+    @staticmethod
+    def _make_op(name: str, want_rec: dict[str, Any], now_rec: dict[str, Any] | None) -> RestoreOp:
+        present = bool(want_rec.get("present"))
+        want = want_rec.get("value")
+        typ = int(want_rec.get("regtype") or 0)
+        now = now_rec.get("value") if now_rec else "(缺失)"
+
+        if present and typ == winreg.REG_MULTI_SZ:
+            # reg add 对 REG_MULTI_SZ 的分隔符处理很别扭，宁可让用户手工改，不冒险
+            return RestoreOp(
+                desc=f"[MACHINE] {name} 当前 {now!r} != 基线 {want!r}（多字符串值需手工改）",
+                run=lambda: (False, "REG_MULTI_SZ 未自动写"),
+                manual=True,
+            )
+
+        def run() -> tuple[bool, str]:
+            if not present:
+                rc, out = run_reg("delete", _TCPIP_REG_PATH, "/v", name, "/f")
+                if rc != 0 and "找不到" not in out and "not found" not in out.lower():
+                    return False, f"删除 {name} 失败: {out}"
+                return True, f"{name} 已删除（回到基线未设置态）"
+            if typ == winreg.REG_DWORD:
+                rc, out = run_reg(
+                    "add", _TCPIP_REG_PATH, "/v", name, "/t", "REG_DWORD", "/d", str(int(want)), "/f"
+                )
+            else:
+                rc, out = run_reg(
+                    "add", _TCPIP_REG_PATH, "/v", name, "/t", "REG_SZ", "/d", str(want), "/f"
+                )
+            if rc != 0:
+                return False, f"写 {name} 失败: {out}"
+            return True, f"{name}: {now!r} -> {want!r}"
+
+        verb = "删除（回到未设置）" if not present else f"改回 {want!r}"
+        return RestoreOp(desc=f"[MACHINE] {name} 当前 {now!r} -> {verb}", run=run)

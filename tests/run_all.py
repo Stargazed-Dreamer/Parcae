@@ -27,17 +27,22 @@ from pathlib import Path
 # 共享运行器（在 tools/ 下，tests/ 需补路径）
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 from test_runner import (  # noqa: E402  # type: ignore[reportMissingImports]
+    IHAVEREAD_FLAG,
     LOG_FILE,
     PROJECT_ROOT,
     QUICK_MARKERS,
     REPORT_FILE,
     XML_FILE,
     build_pytest_cmd,
+    require_ihaveread,
     run_and_report,
 )
 
 
 def main() -> int:
+    gate = require_ihaveread(sys.argv[1:])
+    if gate is not None:
+        return gate
     # 解析参数
     mode = "--quick"
     tb_mode = "line"
@@ -45,6 +50,8 @@ def main() -> int:
     args = sys.argv[1:]
     filtered = []
     for a in args:
+        if a == IHAVEREAD_FLAG:
+            continue  # 闸门标记，不下传给 pytest
         if a in ("--quick", "--full"):
             mode = a
         elif a == "--no-list":
@@ -89,3 +96,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

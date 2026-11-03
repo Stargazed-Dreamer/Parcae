@@ -21,6 +21,8 @@ import json
 import sys
 from pathlib import Path
 
+from tests.client_ui._local_store import local_store_factory as _local_store_factory
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -52,8 +54,8 @@ class TestFormatSessionMarkdown:
 
     def test_user_message_rendered(self):
         """user 消息应渲染为 ## user + 内容。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _format_session_as_markdown
+        from lib.agent_runtime.types import Message
 
         msg = Message(role="user", content="hello world", source="user", seq=1)
         md = _format_session_as_markdown({}, [msg], [])
@@ -62,8 +64,8 @@ class TestFormatSessionMarkdown:
 
     def test_assistant_message_with_text(self):
         """assistant 消息文本应渲染。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _format_session_as_markdown
+        from lib.agent_runtime.types import Message
 
         msg = Message(role="assistant", content="hi back", source="assistant", seq=2)
         md = _format_session_as_markdown({}, [msg], [])
@@ -72,8 +74,8 @@ class TestFormatSessionMarkdown:
 
     def test_assistant_message_with_thinking_quote(self):
         """assistant thinking 应渲染为引用块 > [thinking]。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _format_session_as_markdown
+        from lib.agent_runtime.types import Message
 
         msg = Message(
             role="assistant", content="answer", source="assistant",
@@ -85,8 +87,8 @@ class TestFormatSessionMarkdown:
 
     def test_assistant_message_with_tool_calls_quote(self):
         """assistant tool_calls 应渲染为引用块 > [tool_call]。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _format_session_as_markdown
+        from lib.agent_runtime.types import Message
 
         msg = Message(
             role="assistant", content="done", source="assistant", seq=2,
@@ -102,8 +104,8 @@ class TestFormatSessionMarkdown:
 
     def test_tool_result_rendered_as_quote(self):
         """role=tool 消息应渲染为 > [tool_result] 引用块。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _format_session_as_markdown
+        from lib.agent_runtime.types import Message
 
         msg = Message(
             role="tool", content='{"temp": 20}', source="tool_result",
@@ -115,8 +117,8 @@ class TestFormatSessionMarkdown:
 
     def test_invisible_messages_skipped(self):
         """visible=False 的消息应被跳过（D32：不导出 invisible）。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _format_session_as_markdown
+        from lib.agent_runtime.types import Message
 
         msg_visible = Message(role="user", content="visible", source="user", seq=1, visible=True)
         msg_invisible = Message(
@@ -128,8 +130,8 @@ class TestFormatSessionMarkdown:
 
     def test_model_marked_for_assistant(self):
         """assistant 消息带 model 字段时应显示 *model: name*。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _format_session_as_markdown
+        from lib.agent_runtime.types import Message
 
         msg = Message(
             role="assistant", content="hi", source="assistant",
@@ -140,8 +142,8 @@ class TestFormatSessionMarkdown:
 
     def test_session_object_supported(self):
         """session 也可以是 Session 对象（不只 dict）。"""
-        from client.core.agent.types import Session
         from client.panels.chat import _format_session_as_markdown
+        from lib.agent_runtime.types import Session
 
         session = Session(id="test", title="对象会话", mode="dialogue", status="idle")
         md = _format_session_as_markdown(session, [], [])
@@ -171,8 +173,8 @@ class TestFormatSessionJson:
 
     def test_json_messages_serialized(self):
         """Message 对象应通过 to_db 序列化进 messages 字段。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _format_session_as_json
+        from lib.agent_runtime.types import Message
 
         msg = Message(role="user", content="hi", source="user", seq=1, id="m1")
         result = _format_session_as_json({}, [msg], [], [])
@@ -183,8 +185,8 @@ class TestFormatSessionJson:
 
     def test_json_tool_calls_serialized(self):
         """ToolCall 对象应通过 to_db 序列化进 tool_calls 字段。"""
-        from client.core.agent.types import ToolCall
         from client.panels.chat import _format_session_as_json
+        from lib.agent_runtime.types import ToolCall
 
         tc = ToolCall(id="tc1", name="get_weather", args={"city": "SF"})
         result = _format_session_as_json({}, [], [tc], [])
@@ -194,8 +196,8 @@ class TestFormatSessionJson:
 
     def test_json_events_serialized(self):
         """Event 对象应序列化进 events 字段。"""
-        from client.core.agent.types import Event
         from client.panels.chat import _format_session_as_json
+        from lib.agent_runtime.types import Event
 
         ev = Event(seq=1, session_id="s1", type="test_event", payload={"k": "v"})
         result = _format_session_as_json({}, [], [], [ev])
@@ -225,7 +227,7 @@ def _make_chat_panel(monkeypatch, tmp_path):
     from client.panels.chat import ChatPanel
 
     db_path = str(tmp_path / "export_test.db")
-    monkeypatch.setattr(chat_module, "DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(chat_module, "_make_read_store", _local_store_factory(db_path))
     return ChatPanel()
 
 
@@ -246,7 +248,7 @@ def _make_store_with_session(tmp_path, session_id="s1", title="测试会话"):
     """构造 EventStore 并写入测试会话 + 消息。"""
     import asyncio
 
-    from client.core.agent import EventStore, Message
+    from lib.agent_runtime import EventStore, Message
 
     db_path = str(tmp_path / "export_integ.db")
     store = EventStore(db_path=db_path)

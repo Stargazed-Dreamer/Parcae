@@ -495,7 +495,7 @@ class TestAdvancedRunEndpoint:
         assert resp.status_code == 404
         detail = resp.json()["detail"]
         assert "nonexistent_tool" in detail
-        assert "localagent_list_tools" in detail
+        assert "parcae_list_tools" in detail
 
     def test_run_get_with_query_params(self, client, monkeypatch):
         """GET 请求 + query 参数路由"""

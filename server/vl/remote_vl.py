@@ -34,7 +34,7 @@ from typing import Any
 
 from PIL import Image
 
-logger = logging.getLogger("localagent.remote_vl")
+logger = logging.getLogger("parcae.remote_vl")
 
 # 默认值：可通过 config.toml [vision] 段覆盖
 # 图片编码参数（全局，与 provider 无关）
@@ -157,7 +157,21 @@ class RemoteVLClient:
         # 为它烧第二趟退避，00:00 由 _check_daily_exhausted_reset 解除，给它一次重新证明
         # 的机会。与 _provider_exhausted（key 级、额度/429 语义）是两回事，不要合并。
         self._dead_models_today: dict[str, set[str]] = {}
+        # (key_id, model) -> 判死原因摘要（Ticket 06/07 可见性）：与 _dead_models_today
+        # 同生共死（同一次换血、同一次清空），只是把"为什么"留下来给面板/告警用。
+        # 单独一张表是为了不动 _dead_models_today 的 set 形状（它在 failover 里被直接
+        # 当 exclude 集合用，另有 4 处消费者）。
+        self._dead_model_reasons: dict[str, dict[str, str]] = {}
         self._dead_models_date: str = ""
+        # Ticket 07：告警去重/限频（同一天同一件事只吵一次，别让 loop 刷屏）。
+        # _degraded_today 按 (key_id, model) 去重、_all_dead_alerted_date 按天去重；
+        # 收件箱侧还有 dedupe_key 唯一索引做结构性兜底（进程重启也不会重发）。
+        self._degraded_today: set[tuple[str, str]] = set()
+        self._degraded_today_date: str = ""
+        self._all_dead_alerted_date: str = ""
+        # 收件箱投递出口：测试注入 fake 用。None = 走生产 store（但测试替身
+        # ——见 _log_dir——默认静默，避免单测往生产收件箱写垃圾）。
+        self._inbox_sink = None
         # Provider 级耗尽配置（从 [vision] 段读取）
         self._provider_exhausted_cooldown_seconds: int = 3600  # 单 provider 耗尽冷却时长（1 小时）
         self._provider_exhausted_max_consecutive: int = 3      # 连续耗尽上限，达此值当日不再试
@@ -230,19 +244,122 @@ class RemoteVLClient:
                 today,
             )
             self._dead_models_today = {}
+            self._dead_model_reasons = {}
+            self._degraded_today = set()
+            self._degraded_today_date = ""
+            self._all_dead_alerted_date = ""
             self._dead_models_date = ""
 
-    def _mark_model_dead_today(self, key_id: str, model: str) -> None:
+    def _mark_model_dead_today(self, key_id: str, model: str, reason: str = "") -> None:
         """登记 (key_id, model) 今日永久失效；同日重复登记幂等。
 
         标记只在**当天**有效：次日由 _check_daily_exhausted_reset 整表解除。
+
+        reason：判死成因摘要（HTTP 码 + 上游响应体摘要）。仅作可见性用途——
+        选路只认 _dead_models_today 这个集合，reason 缺失不影响判死。
+        同日重复登记时**保留首个非空 reason**，因为第一次才是真正的病因。
         """
         today = time.strftime("%Y%m%d")
         if self._dead_models_date != today:
             # 日期与表必须同时换血，否则昨天的集合会顶着今天的日期继续排除候选
             self._dead_models_today = {}
+            self._dead_model_reasons = {}
             self._dead_models_date = today
         self._dead_models_today.setdefault(key_id, set()).add(model)
+        if reason:
+            by_model = self._dead_model_reasons.setdefault(key_id, {})
+            by_model.setdefault(model, reason[:200])
+
+    def model_dead_reason(self, key_id: str, model: str) -> str:
+        """读 (key_id, model) 的判死原因摘要（无记录返回 ""）。"""
+        return (self._dead_model_reasons.get(key_id) or {}).get(model, "")
+
+    # ---------- Ticket 07：可见告警（这两件事发生时人被动就知道） ----------
+
+    def _push_inbox(self, item: dict) -> None:
+        """把一条告警投进收件箱。
+
+        投递失败绝不阻断选路（告警是旁路），但必须留一行日志——否则"告警没发出去"
+        本身又会变成第五天没人知道的事故。
+        """
+        sink = getattr(self, "_inbox_sink", None)
+        if sink is not None:
+            try:
+                sink(item)
+            except Exception:
+                logger.warning("VL 告警投递到测试出口失败", exc_info=True)
+            return
+        if self._log_dir is not None:
+            # 测试替身（_log_dir 是测试注入标记）默认不碰生产收件箱。
+            # 要验证投递请注入 self._inbox_sink。
+            return
+        try:
+            from server.inbox import get_store
+            get_store().create(item)
+        except Exception:
+            logger.warning("VL 告警写收件箱失败（不影响选路）: %s", item.get("title", ""),
+                           exc_info=True)
+
+    def _alert_model_degraded(self, key_id: str, model: str, reason: str,
+                              label: str = "") -> None:
+        """一次调用内发生过模型降级 ⇒ 落一条可追溯记录（Ticket 07）。
+
+        去重粒度 = (当天, key_id, model)：坏模型会被 loop 反复撞到，一天吵一次即可。
+        复位（reset_daily_state）会清掉去重标记，于是"复了又坏"能再报一次。
+        """
+        today = time.strftime("%Y%m%d")
+        if self._degraded_today_date != today:
+            self._degraded_today = set()
+            self._degraded_today_date = today
+        pair = (key_id, model)
+        if pair in self._degraded_today:
+            return
+        self._degraded_today.add(pair)
+        who = f"{label or key_id}/{model}"
+        self._push_inbox({
+            "source": "vl",
+            "category": "vl_model_degraded",
+            "title": f"VL 模型降级：{who} 被跳过",
+            "description": (
+                f"一次 VL 调用中，候选模型 {who} 被上游判定永久不可用，已自动降级到下一候选。\n"
+                f"原因：{reason or '（未记录）'}\n"
+                f"今日该 (key, model) 不会再被选中；次日 00:00 自动重新证明，"
+                f"或点模型池 VL 面板的复位按钮立即恢复。"
+            ),
+            "payload": {
+                "key_id": key_id, "model": model, "reason": reason,
+                "kind": "model_degraded", "date": today,
+            },
+            # 收件箱唯一索引兜底：进程重启也不会把同一天的同一件事再报一次
+            "dedupe_key": f"vl_model_degraded:{today}:{key_id}:{model}",
+        })
+
+    def _alert_all_candidates_dead(self, reason: str) -> None:
+        """全部 (key, model) 候选被标死 ⇒ 更高优先级告警（Ticket 07）。
+
+        与聚合 `daily_exhausted` 同一个触发点（`_mark_daily_exhausted` 的
+        kind=model_unavailable），所以不会出现"面板说全停、告警说还好"两套真相。
+        """
+        today = time.strftime("%Y%m%d")
+        if self._all_dead_alerted_date == today:
+            return
+        self._all_dead_alerted_date = today
+        dead_pairs = sum(len(v) for v in self._dead_models_today.values())
+        self._push_inbox({
+            "source": "vl",
+            "category": "vl_all_models_dead",
+            "title": "【VL 全线不可用】今日全部候选模型被标死",
+            "description": (
+                f"VL 今日所有 (key, model) 候选都已被上游判定不可用（共 {dead_pairs} 条），"
+                f"远程 VL 调用将直接落 OCR/本地兜底。\n原因：{reason or '（未记录）'}\n"
+                f"处置：换模型 ID，或在模型池 VL 面板点复位（POST /vision/reset）后重试。"
+            ),
+            "payload": {
+                "kind": "all_models_dead", "date": today,
+                "dead_pairs": dead_pairs, "reason": reason,
+            },
+            "dedupe_key": f"vl_all_models_dead:{today}",
+        })
 
     def is_daily_exhausted(self) -> bool:
         """今日 VL 是否整体停用（聚合标记；成因见 _mark_daily_exhausted 的 kind）"""
@@ -270,6 +387,10 @@ class RemoteVLClient:
         self._daily_exhausted_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         self._daily_exhausted_reason = reason[:300]
         logger.warning("VL 今日额度已耗尽 (kind=%s, source=%s): %s", kind, source, reason)
+        # Ticket 07：全候选判死是"四级事故"里最该被动知道的那一档——本次事故的病灶
+        # 正是"坏了四天、五千次调用、零人知晓"。与聚合标记同一个触发点，保证语义一致。
+        if kind == "model_unavailable":
+            self._alert_all_candidates_dead(reason)
         # 同步给 VL 配额管理器（让 /health 和监控面板可见）
         try:
             if self._vl_quota_override is not None:
@@ -387,7 +508,12 @@ class RemoteVLClient:
             exhausted_keys = list(self._provider_exhausted)
             was_daily = self._daily_exhausted
             self._dead_models_today = {}
+            self._dead_model_reasons = {}
             self._dead_models_date = ""
+            # 复位 = "再给一次机会"：告警去重标记也一并清，于是复了又坏能再报一次
+            self._degraded_today = set()
+            self._degraded_today_date = ""
+            self._all_dead_alerted_date = ""
             self._provider_exhausted = {}
             self._daily_exhausted = False
             self._daily_exhausted_date = ""
@@ -552,13 +678,17 @@ class RemoteVLClient:
             return (rk, state)
         return None
 
-    def _all_vl_candidates(self) -> list:
+    def _all_vl_candidates(self, use_case: str | None = None) -> list:
         """获取所有 VL 候选 key（用于 status / cooldown 聚合，不过滤 cooldown/active_count）
 
-        使用 vl_ocr use_case（resolve_keys 会过滤 privacy_warning，但 status 想显示全部）。
-        为显示全部，直接从 key_store.load_keys() 过滤 vl scope。
+        不传 use_case ⇒ 升序（便宜优先），与改造前逐字一致，兼容既有调用方与测试。
+        传 use_case ⇒ 遍历方向按 Ticket 03 的策略（vl_vision 降序=质量优先），
+        于是 models[0] 就是"这次真会用的那个"，修掉"状态口 current ≠ 真实选路"的缺口。
+
+        直接从 key_store.load_keys() 过滤 vl scope（resolve_keys 会过滤 privacy_warning，
+        但 status 想显示全部）。
         """
-        from server.llm_pool.key_store import load_keys
+        from server.llm_pool.key_store import load_keys, model_order_for_use_case
         records = load_keys()
         candidates = []
         for rec in records:
@@ -566,7 +696,7 @@ class RemoteVLClient:
                 continue
             if rec.status.get("works") is False:
                 continue
-            # 检查是否含 vl scope model
+            # 检查是否含 vl scope model（enabled 的进候选链）
             vl_models = [m for m in rec.models
                          if m.get("enabled", True) and "vl" in m.get("scope", [])]
             if not vl_models:
@@ -574,15 +704,30 @@ class RemoteVLClient:
             # 构造类似 ResolvedKey 的简化视图（用于 status 显示）
             # 3-12: 走 key_store 公有包装，不再依赖私有 _to_resolved_key
             from server.llm_pool.key_store import resolved_key_from_record
-            # 选第一个 vl model（按 tier 升序）
-            vl_models.sort(key=lambda m: int(m.get("tier", 3)))
+            # Ticket 03/06：方向由 use_case 定（不传 ⇒ 升序）
+            desc = model_order_for_use_case(use_case) == "desc"
+            vl_models.sort(key=lambda m: int(m.get("tier", 3)), reverse=desc)
             chosen_model = vl_models[0]["name"]
             rk = resolved_key_from_record(rec, chosen_model)
             # 展示视图按 model 展开（Ticket 04）：_to_resolved_key 给的 models[] 是该 key
-            # 全部启用模型（含非 vl scope），这里覆盖成 vl scope 子集并按 tier 升序排，
+            # 全部启用模型（含非 vl scope），这里覆盖成 vl scope 子集并按上面的方向排，
             # 于是 models[0] 恒等于 chosen_model——选路顺序和展示顺序同一份真源。
             # 覆盖后 consumers 只有 status() 与聚合判据，两者要的都是 VL 可候选集。
             rk.models = [m["name"] for m in vl_models]
+            # Ticket 06：面板要显示"未启用"的角色，但未启用模型不能进候选链
+            # （进了会让 _all_models_dead_today 与聚合判据多算）。所以只把展示用的
+            # 元信息挂在 rk 上，selection 仍只认 rk.models。测试用替身没有这个属性，
+            # status() 会退化成"全部启用、无 tier"——不改变既有断言。
+            rk._vl_models_meta = [  # type: ignore[attr-defined]
+                {
+                    "name": m["name"],
+                    "tier": int(m.get("tier", 3)),
+                    # 未启用的 vl 模型：展示用，不进候选链
+                    "enabled": bool(m.get("enabled", True)),
+                }
+                for m in rec.models
+                if "vl" in m.get("scope", [])
+            ]
             candidates.append(rk)
         return candidates
 
@@ -733,7 +878,10 @@ class RemoteVLClient:
                         # 重试同一个模型 ID 不会变好，正确动作是把它排除后换下一个候选
                         # （同一 key 的其它模型，或其它 key）。
                         failed_models.setdefault(rk.key_id, set()).add(rk.model)
-                        self._mark_model_dead_today(rk.key_id, rk.model)
+                        _reason = f"HTTP {err_code or '?'}: {err_body or msg}"
+                        self._mark_model_dead_today(rk.key_id, rk.model, reason=_reason)
+                        # Ticket 07：降级发生过 ⇒ 落一条可追溯告警（按天+pair 去重）
+                        self._alert_model_degraded(rk.key_id, rk.model, _reason, label=rk.label)
                         state.last_error = msg
                         last_detail = f"[permanent {err_code or '?'}] {rk.key_id}/{rk.model}: {msg}"
                         logger.warning(
@@ -1086,7 +1234,7 @@ class RemoteVLClient:
             "description": description,
         }
 
-    def status(self) -> dict:
+    def status(self, use_case: str | None = None) -> dict:
         """Return a status dict for /health and /ocr/status / /vision/status.
 
         v9: provider 信息从 key_store.load_keys() 过滤 vl scope + _runtime_state 组合。
@@ -1095,10 +1243,17 @@ class RemoteVLClient:
         Ticket 04 起的两级视图：providers[] 一行一个 key（key 级冷却/并发字段），
         其下 models[] 一行一个 VL 模型（当日判死标记 + current）。判死是 (key_id, model)
         粒度、冷却是 key 粒度（ADR 0044），只看其中一级都会读错现状。
+
+        Ticket 06：`use_case` 决定 models[] 的**顺序**（即降级链顺序）与 current 落点。
+        不传 ⇒ tier 升序 + current=升序首个未判死（与改造前逐字一致，/health 与
+        既有测试都走这条）。传 vl_vision ⇒ 降序（质量优先），此时 current 才是
+        "定位这条真会用的模型"——这就是"状态口 current ≠ 真实选路"缺口的收口。
         """
         self._ensure_loaded()
         # 获取所有 VL 候选 key（不过滤 cooldown/active_count，用于展示）
-        candidates = self._all_vl_candidates()
+        # use_case=None 时保持零参调用，兼容既有替身（tests/llm_vision 用 lambda 打桩）
+        candidates = (self._all_vl_candidates() if use_case is None
+                      else self._all_vl_candidates(use_case))
         providers_info = []
         for rk in candidates:
             state = self._get_runtime_state(rk.key_id)
@@ -1113,17 +1268,10 @@ class RemoteVLClient:
                 # _all_models_dead_today（与聚合 daily_exhausted 同一个谓词），
                 # 别让面板说"可用"而选路已经取不到候选。
                 available = False
-            # 展示的代表模型：优先取当日没判死的那个，全死才退回 tier 首。
-            # 直接报 rk.model（tier 最低）会把已下架的 ID 指成"当前在用"。
+            # 展示的代表模型：取候选链里第一个没判死的（顺序=上面的遍历方向）。
+            # 直接报 rk.model 会把已下架的 ID 指成"当前在用"。
             shown_model = next((m for m in rk.models if m not in dead), rk.model)
-            models_info = [
-                {
-                    "name": name,
-                    "current": name == shown_model,
-                    "dead_today": name in dead,
-                }
-                for name in rk.models
-            ]
+            models_info = self._build_models_info(rk, dead, shown_model)
             providers_info.append({
                 "key_id": rk.key_id,
                 "label": rk.label,
@@ -1184,7 +1332,57 @@ class RemoteVLClient:
             "daily_exhausted_at": self._daily_exhausted_at,
             "daily_exhausted_reason": self._daily_exhausted_reason,
             "provider_exhausted": provider_exhausted,
+            # Ticket 06：判死是"今日"语义（次日 00:00 整表解除），面板要显示解冻倒计时。
+            # 倒计时只在服务端算一次，避免客户端各自推算时区/整点口径。
+            "dead_reset_in_s": self._dead_reset_in_s(),
         }
+
+    def _dead_reset_in_s(self) -> int:
+        """距下次本地 00:00（判死标记整表解除）还有多少秒。"""
+        lt = time.localtime()
+        secs_today = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
+        return max(0, 86400 - secs_today)
+
+    def _build_models_info(self, rk, dead: set, shown_model: str) -> list[dict]:
+        """构造 providers[].models[]（Ticket 04 展开 + Ticket 06 角色/原因/顺序）。
+
+        每个模型项：
+          - name / current / dead_today：Ticket 04 既有字段，语义不变
+          - tier：成本/质量档（面板显示 T1..T5）
+          - enabled：False ⇒ 该模型未启用（不进候选链，面板显示"未启用"）
+          - dead_reason：判死原因摘要（无则 ""）
+
+        顺序：候选链顺序（= rk.models，方向已按 use_case 定）在前，未启用的 vl 模型
+        按 tier 升序追加在后。未启用模型**不进候选链**——它们只是给人看的"这条 key
+        还有哪些 VL 模型被关掉了"。
+        """
+        meta = {m["name"]: m for m in (getattr(rk, "_vl_models_meta", None) or [])}
+        out: list[dict] = []
+        for name in rk.models:
+            m = meta.get(name) or {}
+            out.append({
+                "name": name,
+                "current": name == shown_model,
+                "dead_today": name in dead,
+                "tier": m.get("tier"),
+                "enabled": True,
+                "dead_reason": self.model_dead_reason(rk.key_id, name),
+            })
+        seen = set(rk.models)
+        disabled = sorted(
+            (m for m in meta.values() if not m.get("enabled", True) and m["name"] not in seen),
+            key=lambda m: m.get("tier") or 3,
+        )
+        for m in disabled:
+            out.append({
+                "name": m["name"],
+                "current": False,
+                "dead_today": False,
+                "tier": m.get("tier"),
+                "enabled": False,
+                "dead_reason": "",
+            })
+        return out
 
 
 # Global singleton (mirrors old qwen_vl_bridge singleton pattern).

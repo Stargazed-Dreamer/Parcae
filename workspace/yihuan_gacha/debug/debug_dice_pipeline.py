@@ -35,7 +35,18 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, str(Path("workspace/yihuan_gacha").resolve()))
 import yihuan_gacha as yg
 
-API = "http://127.0.0.1:8766"
+# ---- 后端地址动态解析：端口可能被 Windows 保留区顶走而顺延（docs/environment-constraints.md）
+import sys as _sys
+from pathlib import Path as _Path
+
+for _p in _Path(__file__).resolve().parents:
+    if (_p / "lib" / "runtime_endpoint.py").exists():
+        _sys.path.insert(0, str(_p))
+        break
+
+from lib.runtime_endpoint import resolve_base_url as _resolve_base_url  # noqa: E402
+
+API = _resolve_base_url(probe_health=False)
 SAMPLES_DIR = Path("workspace/yihuan_gacha/test_samples")
 DEBUG_DIR = SAMPLES_DIR / "debug"
 

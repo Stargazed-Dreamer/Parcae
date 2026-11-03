@@ -1,6 +1,6 @@
 # webapp_testing - Web 应用测试
 
-> 整合自 anthropics/skills 的 webapp-testing + LocalAgent 项目 Reconnaissance-Then-Action 实战经验。
+> 整合自 anthropics/skills 的 webapp-testing + Parcae 项目 Reconnaissance-Then-Action 实战经验。
 > 适用于新项目用 Playwright + LLM 自动化测试 Web 应用的场景。
 
 ## 1. 概述
@@ -24,7 +24,7 @@
 
 ## 2. Reconnaissance-Then-Action 模式
 
-来自 anthropics/skills webapp-testing + LocalAgent 强化。
+来自 anthropics/skills webapp-testing + Parcae 强化。
 
 ### 2.1 核心原则：先侦察再行动
 
@@ -140,7 +140,7 @@ for browser_type in browsers:
 
 ### 3.3 连接已运行的 Chrome（CDP）
 
-来自 LocalAgent 实战（调试 Chrome 实例）：
+来自 Parcae 实战（调试 Chrome 实例）：
 
 ```python
 # 连接已运行的 Chrome（端口 9222）
@@ -158,7 +158,7 @@ page.close()
 **何时用 CDP**：
 - 复用登录态（已登录的 Chrome 实例）
 - 调试已运行实例
-- LocalAgent 项目场景：用户有独立调试 Chrome，不影响工作浏览器
+- Parcae 项目场景：用户有独立调试 Chrome，不影响工作浏览器
 
 ### 3.4 启动参数常用配置
 
@@ -241,7 +241,7 @@ page.locator('li', has=page.locator('.active')).click()
 
 ## 5. JS 错误捕获套件
 
-来自 LocalAgent 项目强化。
+来自 Parcae 项目强化。
 
 ### 5.1 三类错误监听
 
@@ -355,7 +355,7 @@ page.screenshot(path='viewport.png')
 
 ### 6.2 OCR 检查文字内容
 
-来自 LocalAgent 项目（用 `screen_ocr` MCP 工具）：
+来自 Parcae 项目（用 `screen_ocr` MCP 工具）：
 
 ```python
 # 用 LLM 检查截图
@@ -756,6 +756,6 @@ def test_everything(page):
 - **Playwright 官方文档**：`https://playwright.dev/python/`
 - **pytest-playwright**：`https://github.com/microsoft/playwright-python`
 - **anthropics/skills webapp-testing**：`https://github.com/anthropics/skills/blob/main/skills/webapp-testing/SKILL.md`
-- **LocalAgent html-dev-debug skill**：`<project_root>\.agents\skills\html-dev-debug.md`
-- **LocalAgent Chrome 调试实例启动**：`<project_root>\tools\browser\start_debug_chrome.py`
+- **Parcae html-dev-debug skill**：`<project_root>\.agents\skills\html-dev-debug.md`
+- **Parcae Chrome 调试实例启动**：`<project_root>\tools\browser\start_debug_chrome.py`
 - **环境兼容性约束（Playwright / Chrome）**：`<project_root>\docs\environment-constraints.md`

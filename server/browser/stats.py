@@ -33,7 +33,7 @@ from urllib.parse import urlparse
 
 from lib.schema import BaseSchema
 
-logger = logging.getLogger("localagent.browser_stats")
+logger = logging.getLogger("parcae.browser_stats")
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS browser_selector_stats (

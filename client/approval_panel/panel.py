@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from client.approval_panel import settings as panel_settings
 from client.approval_panel.card import ApprovalCard
-from client.core.constants import SERVER_URL  # 8-9: 端口单一真源
+from client.core.constants import get_server_url  # 8-9: 端口单一真源（运行时解析，支持端口顺延）
 from lib.ui import tokens as T
 
 
@@ -37,7 +37,7 @@ class ApprovalPanel(QMainWindow):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setWindowTitle("LocalAgent 审批面板")
+        self.setWindowTitle("Parcae 审批面板")
         self.setMinimumSize(480, 320)
         # 不抢焦点（不在启动时激活窗口，任务栏出现即可）
         self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
@@ -147,7 +147,7 @@ class ApprovalPanel(QMainWindow):
                 import requests as req
 
                 req.post(
-                    f"{SERVER_URL}/approvals/{approval_id}/activity",
+                    f"{get_server_url()}/approvals/{approval_id}/activity",
                     timeout=3.0,
                 )
             except req.RequestException:

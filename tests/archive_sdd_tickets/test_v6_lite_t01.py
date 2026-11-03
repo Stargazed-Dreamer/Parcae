@@ -1,7 +1,7 @@
 """v6-lite T01 验收测试：单轮文本对话端到端
 
 覆盖 T01 acceptance（temp/sdd/v6-lite/tickets.md）：
-- [x] `client/core/agent/` 库可被外部测试导入，不依赖 Qt
+- [x] `lib/agent_runtime/` 库可被外部测试导入，不依赖 Qt
 - [x] MockLLM 单轮文本对话：build → llm → append → finalize 全链路通过
 - [x] sessions/messages/events 三表正确写入
 - [x] deps/config 拆分：MockLLM 可注入，不硬编码
@@ -28,7 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
+from lib.agent_runtime import (  # noqa: E402
     EventStore,
     LLMGateway,
     Message,
@@ -73,8 +73,8 @@ async def _create_session_with_user_message(
 def test_library_imports_without_qt():
     """T01 acceptance: 库可被外部测试导入，不依赖 Qt。"""
     # 如果 import 链中任何模块 import PySide6/PyQt，本测试会因 conftest 的 mock_overlay_client
-    # 而不报错，但 sys.modules 会含 PySide6。这里直接断言 client.core.agent 不引 PySide6。
-    import client.core.agent as pkg
+    # 而不报错，但 sys.modules 会含 PySide6。这里直接断言 lib.agent_runtime 不引 PySide6。
+    import lib.agent_runtime as pkg
     assert pkg.SessionRunner is SessionRunner
     assert pkg.MockLLM is MockLLM
     assert pkg.EventStore is EventStore
@@ -346,7 +346,7 @@ def test_max_iterations_guard(store):
     """
     async def run():
         await _create_session_with_user_message(store, "loop", session_id="s-maxit")
-        from client.core.agent.types import LLMResponse
+        from lib.agent_runtime.types import LLMResponse
         # LLM 每轮都返回 tool_calls，永不终止
         mock = MockLLM(callable=lambda req: LLMResponse(
             content="继续调工具",
@@ -380,7 +380,7 @@ def test_budget_exceeded_guard_removed(store):
     """
     async def run():
         await _create_session_with_user_message(store, "expensive", session_id="s-budget")
-        from client.core.agent.types import LLMResponse
+        from lib.agent_runtime.types import LLMResponse
         mock = MockLLM(script=[
             LLMResponse(content="costly", usage={"total_tokens": 100, "prompt_tokens": 60, "completion_tokens": 40}),
         ])

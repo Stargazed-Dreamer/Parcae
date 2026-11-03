@@ -174,7 +174,11 @@ class TestOrganizeEvidence:
             assert 0.0 <= e["retrieval_score"] <= 1.0
 
     def test_matched_by_detection(self, ledger):
-        """根据 bm25_score/vector_score 字段判断 matched_by"""
+        """根据 bm25_score/vector_score 判断 matched_by
+
+        生产里检索层对未命中的一路填 0 值而不是缺字段，必须按 >0 判；
+        否则混合检索结果会永远报 both（2026-10-21 修）。
+        """
         messages = [
             {"message_id": 1, "score": 0.8, "content": "x", "timestamp": 1000.0,
              "source": "manual", "bm25_score": 0.7, "vector_score": 0.9},
@@ -182,12 +186,19 @@ class TestOrganizeEvidence:
              "source": "manual", "bm25_score": 0.7},
             {"message_id": 3, "score": 0.8, "content": "z", "timestamp": 1000.0,
              "source": "manual", "vector_score": 0.9},
+            {"message_id": 4, "score": 0.8, "content": "w", "timestamp": 1000.0,
+             "source": "manual", "bm25_score": 0.0, "vector_score": 0.0},
+            {"message_id": 5, "score": 0.8, "content": "v", "timestamp": 1000.0,
+             "source": "manual", "bm25_score": 0.0, "vector_score": 0.9},
+            {"message_id": 6, "score": 0.8, "content": "u", "timestamp": 1000.0,
+             "source": "manual", "bm25_score": 0.7, "vector_score": 0.0},
         ]
         result = ledger.organize_evidence(query="x", message_results=messages)
         matched_by_set = {e["matched_by"] for e in result}
         assert "both" in matched_by_set
         assert "bm25" in matched_by_set
         assert "vector" in matched_by_set
+        assert "" in matched_by_set  # 两路都是 0：不是 both
 
 
 # ==================== 佐证计数 ====================

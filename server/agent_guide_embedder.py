@@ -1,26 +1,24 @@
-"""Agent Guide 语义嵌入器 — 向量化补强关键词匹配
+"""Agent Guide 语义嵌入器 — 按 skill 使用场景做语义召回
 
 复用 server.memory.embeddings.EmbeddingEngine 本地 ONNX/ST 引擎（BAAI/bge-small-zh-v1.5，
-512 维，免费无需 API key），对 GUIDE_REGISTRY 所有 task_type 摘要做语义嵌入并缓存，
-提供 match(question) 接口返回按余弦相似度排序的 task_type 列表。
+512 维，免费无需 API key），对 GUIDE_REGISTRY 每个 task_type 的「任务名 + 使用场景
+(description) + 首步」做语义嵌入并缓存，提供 match(question) 接口返回按余弦相似度排序的
+task_type 列表。
+
+2026-10-28：摘要**不再拼接触发关键词**（用户 2026-10-25 拍：skill 不设计触发词，
+改写成使用场景，让 embedding 做语义召回；原话归档
+`workspace/local_butler/50_原话归档/10_B1B2B3决策_20261025/`）。事务管家的 guide 页
+（`server/butler/bundles.py::_guide_text`）已改为只用本模块做语义匹配；全局
+`agent_guide.match_task_candidates` 的关键词路由是另一条线，未在本轮改动。
 
 设计原则（仿 wisdom_embedder.py）：
 - 容错：embedding 引擎不可用 / cache 读取失败 / numpy 未安装 等场景，全部返回空列表，
-  让调用方（agent_guide.match_task_candidates）走关键词 fallback，**绝不抛异常**
+  调用方自行决定降级，**绝不抛异常**
 - 幂等：cache 文件存在且 registry hash 未变 → 跳过重建
 - 单例：同一进程内复用实例，避免重复加载
 - 轻量：直接 new EmbeddingEngine，不走 MemoryManager（避免触发 SQLite/Recent 全套初始化）
 - 动态：build_index 时实时读取 GUIDE_REGISTRY（含 workspace 可选组件运行时合并的条目），
   不在模块加载时一次性固化
-
-集成点（agent_guide.match_task_candidates）：
-- 关键词匹配完成后，若 top-1 是弱匹配（score < WEAK_MATCH_THRESHOLD 或 not strong_match）
-  → 调本模块 match() 拿语义分数
-  → semantic_bonus = cosine * 20（cosine 0.5 → +10，0.7 → +14）
-  → cosine > 0.6 → 设 strong_match=True
-  → matched_reasons 加 "semantic:{cosine:.2f}"
-
-强匹配场景不触发本模块（性能优化 + 不影响现有测试）。
 """
 from __future__ import annotations
 
@@ -31,7 +29,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("localagent.agent_guide_embedder")
+logger = logging.getLogger("parcae.agent_guide_embedder")
 
 # === 路径 ===
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -52,15 +50,15 @@ SEMANTIC_STRONG_THRESHOLD = 0.6
 class AgentGuideEmbedder:
     """Agent Guide 语义嵌入器（单例）
 
-    通过 EmbeddingEngine 对 GUIDE_REGISTRY 所有 task_type 摘要做嵌入并缓存，
-    提供 match(question) 接口返回按余弦相似度排序的 task_type 列表。
+    通过 EmbeddingEngine 对 GUIDE_REGISTRY 每个 task_type 的「任务名 + 使用场景 +
+    首步」做嵌入并缓存，提供 match(question) 接口返回按余弦相似度排序的 task_type 列表。
 
-    失败容忍：所有异常捕获并返回空列表，绝不抛异常（让调用方走关键词 fallback）。
+    失败容忍：所有异常捕获并返回空列表，绝不抛异常（调用方自行决定降级）。
 
     用法：
         embedder = AgentGuideEmbedder()
         results = embedder.match("我今天都干了啥，帮我捋一下时间线")
-        # 失败时 results == []，调用方走关键词匹配
+        # 失败时 results == []，调用方自行降级
     """
 
     _instance: AgentGuideEmbedder | None = None
@@ -93,8 +91,10 @@ class AgentGuideEmbedder:
     def _load_registry_summaries(self) -> list[dict]:
         """从 GUIDE_REGISTRY 提取每个 task_type 的摘要文本。
 
-        摘要构成：name + 触发关键词 + description + first_action
-        （first_action 含丰富语义，如 daily_summary 的"确定今天日期、读 hourly、写 daily"）
+        摘要构成：name + description（使用场景）+ first_action。
+        **不含触发关键词**（2026-10-25 用户拍：skill 不设计触发词，改写成
+        使用场景，让 embedding 做语义召回；见
+        `workspace/local_butler/50_原话归档/10_B1B2B3决策_20261025/`）。
 
         运行时动态读取 GUIDE_REGISTRY（含 workspace 可选组件合并的条目），
         不在模块加载时固化。
@@ -109,16 +109,13 @@ class AgentGuideEmbedder:
         entries: list[dict] = []
         for task_type, entry in GUIDE_REGISTRY.items():
             name = entry.get("name", task_type)
-            keywords = entry.get("keywords", [])
             description = entry.get("description", "")
             first_action = entry.get("first_action", "")
 
-            # 摘要文本：name + keywords + description + first_action
-            kw_str = "、".join(keywords) if keywords else ""
+            # 摘要文本：任务名 + 使用场景 + 首步（不含触发关键词）
             summary = (
                 f"任务名：{name}\n"
-                f"触发关键词：{kw_str}\n"
-                f"描述：{description}\n"
+                f"使用场景：{description}\n"
                 f"首步：{first_action}"
             )
             # 截断到模型 max_length 内

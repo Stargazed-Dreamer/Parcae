@@ -17,6 +17,7 @@ import logging
 import time
 
 from server.model_manager.config import (
+    get_idle_unload_sec,
     get_model_cooldown,
     get_model_manager_config,
     is_model_evictable,
@@ -31,7 +32,7 @@ from server.model_manager.types import (
     PressureState,
 )
 
-logger = logging.getLogger("localagent.model_manager")
+logger = logging.getLogger("parcae.model_manager")
 
 # 连续加载失败达到该次数 → 标记 reload_degraded（design §7，继承 ocr-vram-guard §5.6）
 _RELOAD_DEGRADED_THRESHOLD = 3
@@ -71,6 +72,7 @@ class ModelLifecycleManager:
         self._evict_lock = asyncio.Lock()
         self._evict_busy = False
         self._loop_task: asyncio.Task | None = None
+        self._idle_task: asyncio.Task | None = None
         self._stopped = False
 
     # ========== 生命周期 ==========
@@ -89,6 +91,8 @@ class ModelLifecycleManager:
             await self._refresh(monitor)
         self._stopped = False
         self._loop_task = asyncio.create_task(self._run_loop())
+        # 空闲回收独立循环：与 5s 压力采样解耦，保证"空闲 N 秒后卸载"的判定精度
+        self._idle_task = asyncio.create_task(self._run_idle_loop())
         logger.info(
             f"ModelLifecycleManager 已启动: 注册模型={len(self.registry)}, "
             f"gpu={self.monitors['gpu'].state.value}, cpu={self.monitors['cpu'].state.value}"
@@ -113,13 +117,15 @@ class ModelLifecycleManager:
 
     async def stop(self) -> None:
         self._stopped = True
-        if self._loop_task is not None:
-            self._loop_task.cancel()
-            try:
-                await self._loop_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._loop_task = None
+        for task_attr in ("_loop_task", "_idle_task"):
+            task = getattr(self, task_attr)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                setattr(self, task_attr, None)
 
     async def _run_loop(self) -> None:
         interval = float(self.cfg.get("poll_interval_sec", 5.0))
@@ -129,6 +135,20 @@ class ModelLifecycleManager:
                 await self._tick()
             except Exception as e:
                 logger.warning(f"ModelLifecycleManager 采样周期异常: {e}", exc_info=True)
+
+    async def _run_idle_loop(self) -> None:
+        """空闲回收循环（默认 1s 一次）：只做"有没有模型闲置太久"，不采样不逐出。
+
+        独立于主循环的原因：主循环周期是 5s（压力采样粒度），拿它当空闲判定周期
+        会把 10s 阈值拖成"10~15s"随机生效；空闲判定本身只读几个 dict，1s 一次零成本。
+        """
+        tick = float(self.cfg.get("idle_tick_sec", 1.0) or 1.0)
+        while not self._stopped:
+            await asyncio.sleep(tick)
+            try:
+                await self._idle_sweep()
+            except Exception as e:
+                logger.warning(f"空闲回收周期异常: {e}", exc_info=True)
 
     async def _tick(self) -> None:
         for monitor in self.monitors.values():
@@ -317,6 +337,65 @@ class ModelLifecycleManager:
         finally:
             self._evict_busy = False
 
+    # ========== 空闲回收（keep_models 的反向边：使用 → 释放） ==========
+
+    async def _idle_sweep(self) -> None:
+        """遍历已注册模型，把"常驻关闭 + 空闲超阈值"的卸载掉。
+
+        四条前置条件（任一不满足就跳过）：
+        1. `idle_unload_sec > 0`（per-model 覆盖全局，0=禁用）；
+        2. **keep_models=False**（常驻开启 ⇒ 永不回收，这是唯一门闸）；
+        3. 已加载且 `in_flight == 0`（不打断在途推理）；
+        4. 距 `last_active_at`（无此接口则回退 loaded_at）已超阈值。
+
+        设计取舍：`keep_models` 复用 restore_preload 的读出口，而不是新增一个
+        "auto_unload" 布尔 —— GUI 上只有一个"常驻"开关，两个开关的默认组合
+        （keep=true 但 auto_unload=true）没有意义，只会让用户配出互相矛盾的组合。
+        """
+        if not self.enabled or self._stopped:
+            return
+        now = time.time()
+        for driver in self.registry.all():
+            idle_sec = get_idle_unload_sec(self.cfg, driver.model_id)
+            if idle_sec <= 0:
+                continue
+            if self.keep_models(driver.model_id):
+                continue                      # 常驻开启：不回收
+            try:
+                if not driver.is_loaded() or driver.in_flight() > 0:
+                    continue
+            except Exception:
+                continue
+            if self._in_cooldown(driver.model_id):
+                continue
+            last = _safe_last_active(driver) or self.effective_loaded_at(driver.model_id)
+            if last is None:
+                continue
+            idle_for = now - last
+            if idle_for < idle_sec:
+                continue
+            await self._idle_reclaim(driver, idle_for, idle_sec)
+
+    async def _idle_reclaim(self, driver: ModelDriver, idle_for: float, idle_sec: float) -> None:
+        """执行一次空闲回收：与逐出共用串行锁，锁内复查（防"刚被请求复活又被卸"）"""
+        async with self._evict_lock:
+            if self.keep_models(driver.model_id):
+                return                        # 期间用户又打开了常驻
+            try:
+                if not driver.is_loaded() or driver.in_flight() > 0:
+                    return
+            except Exception:
+                return
+            logger.info(
+                f"空闲回收 {driver.model_id}: 已空闲 {idle_for:.1f}s ≥ {idle_sec:.0f}s"
+                f"（常驻关闭），卸载释放（下次请求冷加载）"
+            )
+            result = await self.manual_unload(driver.model_id)
+            if result.get("status") != "ok":
+                logger.warning(
+                    f"空闲回收卸载失败 {driver.model_id}: {result.get('detail')}"
+                )
+
     # ========== 手动控制（端点 T5 接入） ==========
 
     async def manual_load(self, model_id: str) -> dict:
@@ -404,6 +483,8 @@ class ModelLifecycleManager:
                 "evictable": self.is_evictable(driver),
                 "in_flight": in_flight,
                 "loaded_at": self.effective_loaded_at(driver.model_id),
+                "last_active_at": _safe_last_active(driver),
+                "idle_unload_sec": get_idle_unload_sec(self.cfg, driver.model_id) or None,
                 "last_load_ms": driver.load_duration_ms(),
                 "reload_degraded": driver.model_id in self._reload_degraded,
                 "cooldown_remaining_sec": max(
@@ -471,3 +552,15 @@ def _safe_is_loaded(driver: ModelDriver) -> bool:
         return driver.is_loaded()
     except Exception:
         return False
+
+
+def _safe_last_active(driver: ModelDriver) -> float | None:
+    """最近活跃时间（协议可选方法：无此接口的驱动返回 None，由调用方回退 loaded_at）"""
+    fn = getattr(driver, "last_active_at", None)
+    if not callable(fn):
+        return None
+    try:
+        value = fn()
+    except Exception:
+        return None
+    return float(value) if isinstance(value, (int, float)) else None

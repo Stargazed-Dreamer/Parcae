@@ -13,13 +13,10 @@
 - [x] 验证 wip 记录含 status（success→completed）
 - [x] 测试用例 2：验证 client 进程不在线时后端仍能跑（action 不依赖 client 进程）
 
-E2E 策略：
-- MockLLM（callable 模式）：根据 request.messages 判断是 main agent 还是 judge agent 调用
-  - main agent 调用：返回 "headless test ok"
-  - judge agent 调用：返回 JSON verdict {"verdict": "success", "reason": "..."}
-- Mock ToolRegistry / HttpClientToolExecutor（不真实调 HTTP）
-- 真实 SessionFacade + EventStore（temp DB）
-- 真实 HeadlessSessionAction.execute()（完整流程）
+E2E 策略（butler-runtime T6 起）：
+- scripted runtime client：main/judge 的终态与 assistant 消息由替身给出
+- 真实 HeadlessSessionAction.execute()（完整编排：主 → judge → memory/wip）
+- 断言提交载荷（mode / session_id）与编排结果，不依赖 8766 进程内的对话循环
 - Mock memory manager + todos store（捕获写入，不真实写 memory.db）
 - 直接调 action.execute()，不经 LoopManager 调度（避免等 cron 触发）
 """
@@ -39,15 +36,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
-    EventStore,
-    MockLLM,
-    MockToolExecutor,
-)
-from client.core.agent.types import LLMRequest, LLMResponse  # noqa: E402
-from server.activity_tracker.headless_runner import (  # noqa: E402
-    DEFAULT_BASE_URL,
-)
+from fake_runtime import FakeRuntimeClient, assistant  # noqa: E402
+
+from server.activity_tracker import headless_runner as hr  # noqa: E402
 from server.activity_tracker.loop_actions import HeadlessSessionAction  # noqa: E402
 
 pytestmark = pytest.mark.e2e  # E2E：依赖真实环境（CDP/后端/GUI），quick 层排除
@@ -57,82 +48,18 @@ pytestmark = pytest.mark.e2e  # E2E：依赖真实环境（CDP/后端/GUI），q
 # ============================================================================
 
 
-
-def _make_mock_llm() -> MockLLM:
-    """构造 MockLLM：根据 request 全文判断是 main agent 还是 judge agent。
-
-    - main agent 调用（system+user 不含 "判定"/"verdict"）：返回 "headless test ok"
-    - judge agent 调用（user message 含 JUDGE_PROMPT_TEMPLATE 的 "判定"/"verdict"）：返回 JSON verdict success
-
-    关键：JUDGE_PROMPT_TEMPLATE 是作为 user message 传给 facade.start，
-    不在 LLMRequest.system 字段（system 是 stable prefix + ephemeral context）。
-    所以判断时必须检查 user message 内容，不能只看 system。
-    """
-    def _extract_full_text(request: LLMRequest) -> str:
-        """提取 request 中所有可见文本（system + 所有 messages）。"""
-        parts: list[str] = [request.system or ""]
-        for msg in request.messages:
-            content = msg.content
-            if isinstance(content, str):
-                parts.append(content)
-            elif isinstance(content, list):
-                for p in content:
-                    if isinstance(p, dict) and p.get("type") == "text":
-                        parts.append(p.get("text", ""))
-        return "\n".join(parts)
-
-    def generate(request: LLMRequest) -> LLMResponse:
-        full_text = _extract_full_text(request)
-
-        if "你是任务成功判定" in full_text or "【判定规则】" in full_text:
-            # judge agent 调用（JUDGE_PROMPT_TEMPLATE 唯一标记，
-            # 不用 '判定'/'verdict' 关键词，避免 AGENTS.md 污染 system prompt 误判）
-            return LLMResponse(
-                content='{"verdict": "success", "reason": "主 agent 输出含 headless test ok，任务完成"}',
-                model="mock-judge",
-                usage={"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70},
-                stop_reason="end_turn",
-            )
-        else:
-            # main agent 调用
-            return LLMResponse(
-                content="headless test ok",
-                model="mock-main",
-                usage={"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40},
-                stop_reason="end_turn",
-            )
-
-    return MockLLM(callable=generate)
-
-
-def _patch_agent_components(monkeypatch, mock_llm: MockLLM):
-    """patch client.core.agent 的 LLMPoolGateway / ToolRegistry / HttpClientToolExecutor。
-
-    让 headless_runner 函数内 import 的组件使用 mock 版本。
-    """
-    class MockLLMPoolGateway:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        async def call(self, request):
-            return await mock_llm.call(request)
-        async def stream(self, request):
-            async for ev in mock_llm.stream(request):
-                yield ev
-
-    class MockToolRegistry:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        def refresh(self, *, timeout: float = 10.0) -> int:
-            return 0
-
-    class MockHttpClientToolExecutor(MockToolExecutor):
-        def __init__(self, registry=None, base_url=DEFAULT_BASE_URL, **kwargs):
-            super().__init__(**kwargs)
-
-    import client.core.agent as agent_pkg
-    monkeypatch.setattr(agent_pkg, "LLMPoolGateway", MockLLMPoolGateway)
-    monkeypatch.setattr(agent_pkg, "ToolRegistry", MockToolRegistry)
-    monkeypatch.setattr(agent_pkg, "HttpClientToolExecutor", MockHttpClientToolExecutor)
+def _patch_runtime(
+    monkeypatch,
+    *,
+    main_text: str = "headless test ok",
+    judge_text: str = '{"verdict": "success", "reason": "主 agent 输出含 headless test ok，任务完成"}',
+) -> FakeRuntimeClient:
+    """给主/judge 会话脚本化终态，替换 headless_runner 的 runtime 客户端。"""
+    fake = FakeRuntimeClient()
+    fake.on("headless", messages=[assistant(main_text)])
+    fake.on("headless_judge", messages=[assistant(judge_text)])
+    monkeypatch.setattr(hr, "_make_runtime_client", lambda config: fake)
+    return fake
 
 
 def _patch_memory_and_wip(monkeypatch, capture: dict):
@@ -187,8 +114,7 @@ def test_e2e_one_shot_success_full_flow(tmp_db_path, monkeypatch):
        - wip 记录含 status=completed
        - one_shot=True 时调 pause_task
     """
-    mock_llm = _make_mock_llm()
-    _patch_agent_components(monkeypatch, mock_llm)
+    fake = _patch_runtime(monkeypatch)
 
     capture: dict = {}
     _patch_memory_and_wip(monkeypatch, capture)
@@ -228,54 +154,28 @@ def test_e2e_one_shot_success_full_flow(tmp_db_path, monkeypatch):
     assert judge_session_id.startswith("headless-judge-")
     assert main_session_id != judge_session_id
 
-    # ===== 验证 sessions 表（mode 字段）=====
-    verify_store = EventStore(db_path=tmp_db_path)
-    verify_store.init()
-    try:
-        async def verify():
-            # 主会话 mode="headless"
-            main_session = await verify_store.get_session(main_session_id)
-            assert main_session is not None, f"主会话 {main_session_id} 不存在"
-            assert main_session.mode == "headless", f"主会话 mode={main_session.mode}"
+    # ===== 验证提交（主会话 / judge 会话各一次，mode 正确）=====
+    assert len(fake.submits) == 2
+    main_submit, judge_submit = fake.submits
+    assert main_submit["session_id"] == main_session_id
+    assert main_submit["mode"] == "headless"
+    assert "headless test ok" in main_submit["text"]
+    assert judge_submit["session_id"] == judge_session_id
+    assert judge_submit["mode"] == "headless_judge"
 
-            # judge 会话 mode="headless_judge"
-            judge_session = await verify_store.get_session(judge_session_id)
-            assert judge_session is not None, f"judge 会话 {judge_session_id} 不存在"
-            assert judge_session.mode == "headless_judge", f"judge 会话 mode={judge_session.mode}"
+    # ===== 验证主会话 assistant 消息含 "headless test ok" =====
+    main_messages = fake.sessions[main_session_id].messages
+    main_assistant_msgs = [m for m in main_messages if m["role"] == "assistant"]
+    assert len(main_assistant_msgs) >= 1, "主会话无 assistant 消息"
+    assert "headless test ok" in main_assistant_msgs[-1]["content"]
 
-            # ===== 验证主会话 assistant 消息含 "headless test ok" =====
-            main_messages = await verify_store.load_messages(main_session_id)
-            main_assistant_msgs = [m for m in main_messages if m.role == "assistant"]
-            assert len(main_assistant_msgs) >= 1, "主会话无 assistant 消息"
-            main_last_assistant = main_assistant_msgs[-1]
-            main_content = main_last_assistant.content
-            if isinstance(main_content, list):
-                main_content = " ".join(
-                    p.get("text", "") for p in main_content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
-            assert "headless test ok" in main_content, \
-                f"主会话 assistant 消息不含 'headless test ok': {main_content!r}"
-
-            # ===== 验证 judge 会话最后一条 assistant 消息含 JSON verdict =====
-            judge_messages = await verify_store.load_messages(judge_session_id)
-            judge_assistant_msgs = [m for m in judge_messages if m.role == "assistant"]
-            assert len(judge_assistant_msgs) >= 1, "judge 会话无 assistant 消息"
-            judge_last_assistant = judge_assistant_msgs[-1]
-            judge_content = judge_last_assistant.content
-            if isinstance(judge_content, list):
-                judge_content = " ".join(
-                    p.get("text", "") for p in judge_content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
-            # 解析 JSON verdict
-            judge_data = json.loads(judge_content)
-            assert judge_data["verdict"] == "success"
-            assert "reason" in judge_data
-
-        asyncio.run(verify())
-    finally:
-        verify_store.close()
+    # ===== 验证 judge 会话最后一条 assistant 消息含 JSON verdict =====
+    judge_messages = fake.sessions[judge_session_id].messages
+    judge_assistant_msgs = [m for m in judge_messages if m["role"] == "assistant"]
+    assert len(judge_assistant_msgs) >= 1, "judge 会话无 assistant 消息"
+    judge_data = json.loads(judge_assistant_msgs[-1]["content"])
+    assert judge_data["verdict"] == "success"
+    assert "reason" in judge_data
 
     # ===== 验证 memory 记录 =====
     assert capture["memory_set"].call_count == 1
@@ -312,20 +212,11 @@ def test_e2e_runs_without_client_process(tmp_db_path, monkeypatch):
 
     验证点：
     - HeadlessSessionAction.execute() 不依赖任何 client 进程
-    - 所有 LLM 调用通过 MockLLM（模拟后端 LLM Pool）
-    - 所有工具调用通过 MockToolExecutor（模拟后端工具）
-    - EventStore 写入 temp DB（后端进程内）
+    - 会话提交给独立 runtime（scripted 替身模拟 runtime 端跑完）
     - memory + wip 写入通过 mock（后端进程内）
-    - 全程无 client 进程交互
-
-    本测试 inherent 验证 client 不在线：
-    - 不启动 client GUI
-    - 不连接 client 进程
-    - 不依赖 client 端任何组件
-    - action.execute() 在后端 event loop 中跑完
+    - 8766 后端进程中不组装 deps、不起对话循环
     """
-    mock_llm = _make_mock_llm()
-    _patch_agent_components(monkeypatch, mock_llm)
+    fake = _patch_runtime(monkeypatch)
 
     capture: dict = {}
     _patch_memory_and_wip(monkeypatch, capture)
@@ -355,11 +246,12 @@ def test_e2e_runs_without_client_process(tmp_db_path, monkeypatch):
     assert result["success"] is True, f"client 不在线时执行失败: {result}"
     assert result["judge_verdict"] == "success"
 
-    # 验证主会话 + judge 会话都创建（后端自主完成）
+    # 验证主会话 + judge 会话都提交给 runtime
     main_session_id = result["main_session_id"]
     judge_session_id = result["judge_session_id"]
     assert main_session_id.startswith("headless-")
     assert judge_session_id.startswith("headless-judge-")
+    assert [s["mode"] for s in fake.submits] == ["headless", "headless_judge"]
 
     # 验证 one_shot=False 时不调 pause_task（周期性任务继续）
     assert capture["pause_task"].call_count == 0
@@ -382,40 +274,11 @@ def test_e2e_judge_failed_overall_failed(tmp_db_path, monkeypatch):
     - main agent 返回 "我无法完成这个任务"
     - judge agent 返回 {"verdict": "failed", "reason": "..."}
     """
-    def _extract_full_text(request: LLMRequest) -> str:
-        """提取 request 中所有可见文本（system + 所有 messages）。"""
-        parts: list[str] = [request.system or ""]
-        for msg in request.messages:
-            content = msg.content
-            if isinstance(content, str):
-                parts.append(content)
-            elif isinstance(content, list):
-                for p in content:
-                    if isinstance(p, dict) and p.get("type") == "text":
-                        parts.append(p.get("text", ""))
-        return "\n".join(parts)
-
-    def generate(request: LLMRequest) -> LLMResponse:
-        full_text = _extract_full_text(request)
-
-        if "你是任务成功判定" in full_text or "【判定规则】" in full_text:
-            # judge agent 调用（JUDGE_PROMPT_TEMPLATE 唯一标记）
-            return LLMResponse(
-                content='{"verdict": "failed", "reason": "主 agent 明确报告无法完成"}',
-                model="mock-judge",
-                usage={"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70},
-                stop_reason="end_turn",
-            )
-        else:
-            return LLMResponse(
-                content="我无法完成这个任务",
-                model="mock-main",
-                usage={"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40},
-                stop_reason="end_turn",
-            )
-
-    mock_llm = MockLLM(callable=generate)
-    _patch_agent_components(monkeypatch, mock_llm)
+    _patch_runtime(
+        monkeypatch,
+        main_text="我无法完成这个任务",
+        judge_text='{"verdict": "failed", "reason": "主 agent 明确报告无法完成"}',
+    )
 
     capture: dict = {}
     _patch_memory_and_wip(monkeypatch, capture)

@@ -3,7 +3,7 @@
 提供 Windows UIA 树快照与语义动作接口，让 agent 像 Browser Use 一样从结构化
 accessibility tree 中找元素、直接 invoke/toggle/set_value，而不是依赖坐标点击。
 
-评估文档（docs/evaluations/2026-07-20-computer-use-vs-localagent.md）第 9 节：
+评估文档（docs/evaluations/2026-07-20-computer-use-vs-parcae.md）第 9 节：
 - 新增 `screen_accessibility_snapshot`：role/control_type、name、value、enabled、
   checked、selected、bounds、automation_id、element_id
 - 新增 `screen_semantic_action`：invoke、select、toggle、set_value、
@@ -11,7 +11,7 @@ accessibility tree 中找元素、直接 invoke/toggle/set_value，而不是依�
 - element id 绑定 window token + snapshot version，过期返回 STALE_ELEMENT
 - UIA 不可用时回退 OCR/视觉，明确 `fallback_reason`
 
-第二轮评估（docs/evaluations/2026-07-20-computer-use-vs-localagent-rerun2.md）P0：
+第二轮评估（docs/evaluations/2026-07-20-computer-use-vs-parcae-rerun2.md）P0：
 - 所有 UIA 入口线程显式 CoInitialize（避免 WinError -2147221008 "尚未调用 CoInitialize"）
 - 失败时返回可操作 fallback（UIA_NOT_AVAILABLE），不返回空 elements
 
@@ -30,7 +30,7 @@ import time
 import uuid
 from collections import deque
 
-logger = logging.getLogger("localagent.screen.uia")
+logger = logging.getLogger("parcae.screen.uia")
 
 # 非 Windows 平台直接禁用
 _PLATFORM_WIN = sys.platform == "win32"

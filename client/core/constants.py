@@ -7,16 +7,28 @@ from pathlib import Path
 from lib.config_reader import load_config
 from lib.secret import get_config_path, get_llm_keys_path
 
-# 项目根目录：client/core/constants.py → parents[2] = localAgent/
+# 项目根目录：client/core/constants.py → parents[2] = Parcae/
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _derive_server_url() -> str:
-    """从 config.toml [server] port 派生后端 URL（8-9：端口收敛单一真源）。
+    """解析后端 URL：**运行时声明优先**，回退 config.toml [server] port。
 
-    用户改 config.toml 端口后主客户端与审批面板不再静默失联；
-    读取失败/缺省回退 8766。
+    两个真源的分工：
+    - `data/runtime/server_port.json`（后端启动时写）：端口被 Windows 保留区占用
+      而顺延（8766 → 8767）时，这里才有正确值；
+    - `config.toml [server] port`：用户配置的**首选**端口，后端未运行时用它兜底。
+
+    ⛔ 不要在这里自己拼 8766：端口可能因 WinError 10013 被顺延。
     """
+    try:
+        from lib.runtime_endpoint import resolve_base_url
+
+        # probe_health=False：客户端有自己的 /health 轮询（BACKEND_POLL_INTERVAL_MS），
+        # 这里不该每次构造 URL 都多发一次 HTTP；只需读声明文件（~几十微秒）。
+        return resolve_base_url(probe_health=False)
+    except Exception:
+        pass
     try:
         port = int(load_config().get("server", {}).get("port", 8766))
     except Exception:
@@ -24,7 +36,16 @@ def _derive_server_url() -> str:
     return f"http://127.0.0.1:{port}"
 
 
-# 服务端 URL
+def get_server_url() -> str:
+    """当前后端 URL（每次调用重新解析）。
+
+    ⛔ 新代码一律用它，不要用下面的 ``SERVER_URL`` 常量：常量是**模块加载时**的
+    快照，后端在客户端运行期间顺延端口（或恢复端口）后它就过期了。
+    """
+    return _derive_server_url()
+
+
+# 服务端 URL（向后兼容快照；仅老代码/非热路径使用）
 SERVER_URL = _derive_server_url()
 SERVER_HEALTH_PATH = "/health"
 

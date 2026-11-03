@@ -25,10 +25,10 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     "core": [
         # 入口 + 审批 + 文档（高频核心）
         "agent_guide",                       # 61 次
-        "localagent_list_tools",             # 46 次
-        "localagent_advanced_tool",          # 165 次（万能网关）
-        "localagent_tool_docs",              # 工具语义文档（7 段说明，MCP-only agent 补全）
-        "localagent_get_docs",              # 项目文档（AGENTS.md/tools-guide 等，MCP-only agent 补全）
+        "parcae_list_tools",             # 46 次
+        "parcae_advanced_tool",          # 165 次（万能网关）
+        "parcae_tool_docs",              # 工具语义文档（7 段说明，MCP-only agent 补全）
+        "parcae_get_docs",              # 项目文档（AGENTS.md/tools-guide 等，MCP-only agent 补全）
         "command_guard_request_approval",    # 43 次（审批请求）
     ],
     "state": [
@@ -42,6 +42,11 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
         "wip_get",                           # 20 次
         "wip_get_many",                      # 批量取详情（wip_list 默认轻量后的配套入口）
         "exec_status",                       # 89 次（执行状态查询）
+        # DL4 会话协议（本期只实现 4 个动作；入口名固定，action 作参数）
+        "butler_session",                    # open
+        "butler_context",                    # next
+        "butler_wrapup",                     # submit
+        "butler_memory",                     # write（= C11 记忆层）
     ],
     "exec": [
         # 代码执行 + 终端会话（spawn+input+kill 核心组合）
@@ -74,6 +79,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
         "understand_image",                  # 41 次（VL 视觉理解）
         "vision_locate",                     # 17 次（视觉定位）
         "vision_status",                     # 22 次（v3 升入：VL 状态查询）
+        "video_frame",                       # 课程视频按秒取帧（内存直读 ImageContent，不落盘）
         "screen_accessibility_snapshot",     # UIA 语义快照（P0-5，0 次但核心）
         "screen_semantic_action",            # UIA 语义操作（P0-5，0 次但核心）
         # 软件经验闭环（方法论自更新）：读 + 写（与 browser_match_site/browser_write_lesson 对齐）
@@ -116,17 +122,39 @@ TOOL_TO_CATEGORY: dict[str, str] = {
     tool: cat for cat, tools in TOOL_CATEGORIES.items() for tool in tools
 }
 
-# DIRECT_TOOLS 是 TOOL_CATEGORIES 按 CATEGORY_ORDER 展开的派生字段
-# 向后兼容：外部模块仍可 `from server.mcp_whitelist import DIRECT_TOOLS`
+# DIRECT_TOOLS 是 MCP 对外的直连面（P5 T8，2026-10-27）：
+# 常驻 core + browser + 记忆/会话协议 + 高频执行/感知工具；其余 state / exec /
+# perception / llm 工具仍然可调，但必须经 parcae_advanced_tool 网关。
+# 注意：TOOL_CATEGORIES 仍保留全量分组，供 list_tools/文档展示。
+DIRECT_CATEGORIES: list[str] = ["core", "browser"]
+DIRECT_STATE_TOOLS: list[str] = [
+    "memory_get", "memory_set", "memory_list", "memory_status",
+    "butler_session", "butler_context", "butler_wrapup", "butler_memory",
+]
+# 高调用频次工具走直连（2026-10-27 用户裁决回调）：
+# 判据是调用计数（data/mcp_stats.json，窗口与明细见
+# temp/tool_usage_audit_20261027/端点收敛清单.md），不是主观“常用”。
+DIRECT_HIGH_FREQ_TOOLS: list[str] = [
+    "exec_python",              # 全项目最高频
+    "exec_cmd",
+    "exec_inspect",
+    "exec_terminal_detail",
+    "exec_status",
+    "capture_screen",
+    "execute_action",
+    "video_frame",              # 零调用，按用户“先观察”的裁定保留直连
+]
 DIRECT_TOOLS: list[str] = []
-for _cat in CATEGORY_ORDER:
+for _cat in DIRECT_CATEGORIES:
     DIRECT_TOOLS.extend(TOOL_CATEGORIES[_cat])
+DIRECT_TOOLS.extend(DIRECT_STATE_TOOLS)
+DIRECT_TOOLS.extend(DIRECT_HIGH_FREQ_TOOLS)
 del _cat
 
 
 GATEWAY_EXCLUDE: set[str] = {
-    "localagent_list_tools", "localagent_advanced_tool",
-    "localagent_list_templates", "localagent_template_tool",
+    "parcae_list_tools", "parcae_advanced_tool",
+    "parcae_list_templates", "parcae_template_tool",
     # REST-only form endpoints (file upload).
     # ocr_base64/vl_base64 JSON 版已删除（零调用）；Form 版 ocr_base64_form 保留供脚本调用。
     "vl_file_form",
@@ -192,6 +220,34 @@ GATEWAY_EXCLUDE: set[str] = {
     "inbound_keys_list", "inbound_keys_create",
     "inbound_keys_update", "inbound_keys_delete",
     "inbound_calls_list", "inbound_stats",
+
+    # === 2026-10-27 零调用二轮（审计窗口 2026-06-16→10-27 / 11,529 次调用） ===
+    # 数据与判定过程：temp/tool_usage_audit_20261027/端点收敛清单.md
+    # 判据＝MCP 零调用 **且** 全仓库无调用方（GUI/脚本走 REST 的 59 个不算死，未收）。
+    # ⛔ 只摘 agent 工具面，REST 路由全部保留：GUI 面板、工作区脚本、外部 harness 仍可调。
+
+    # 模型手动加载：被 MLM 自动装载（驱动 load）+ /ocr/models/preload/json +
+    # /mindforge/preload 覆盖，agent 不需要手动装模型。
+    # ⚠ models_unload / models_pause / models_resume **刻意保留**：前者的
+    # memory_embedding/guide_embedding 是钉住（evictable=False）的，只有手动卸这一个
+    # 出口；后两个是压力守护的唯一手动超驰（PAUSED），无任何等价端点。
+    "models_load",
+
+    # Key 测试：GUI 实际走 /apikey/keys/{id}/test（apikey_test_key，有调用）与
+    # /keys/health-check-all；/apikey/test 是「免入库试一次」，/history 只记录它
+    # （4.4 个月两边都零调用，且 history 必然为空）。
+    "apikey_test", "apikey_history",
+
+    # 文档查看器：agent 读文件走 Read / exec_python（win32com、python-docx 等），
+    # 客户端只用 /docviewer/status（已在上面排除）。
+    "docviewer_read", "docviewer_read_file",
+
+    # MindForge 整组（2026-10-27 用户裁决「没人用」= 4.4 个月零调用）。
+    # 引擎本身仍由 MLM 按需自动装载/逐出（mindforge_searcher priority=30 evictable=True），
+    # 前端 <external_project_root>\MindForge 与全部 REST 路由原样保留；需要恢复 agent 能力时整组删掉即可。
+    "mindforge_status", "mindforge_search", "mindforge_preload", "mindforge_unload",
+    "mindforge_build_index", "mindforge_pipeline", "mindforge_pipeline_status",
+    "mindforge_convert", "mindforge_daemon_status", "mindforge_daemon_stop",
 }
 
 
@@ -211,10 +267,10 @@ GATEWAY_EXCLUDE: set[str] = {
 TOOL_ANNOTATIONS: dict[str, dict[str, bool]] = {
     # === core ===
     "agent_guide":               {"readOnlyHint": True,  "idempotentHint": True},
-    "localagent_list_tools":     {"readOnlyHint": True,  "idempotentHint": True},
-    "localagent_advanced_tool":  {"openWorldHint": True},
-    "localagent_tool_docs":      {"readOnlyHint": True,  "idempotentHint": True},
-    "localagent_get_docs":       {"readOnlyHint": True,  "idempotentHint": True},
+    "parcae_list_tools":     {"readOnlyHint": True,  "idempotentHint": True},
+    "parcae_advanced_tool":  {"openWorldHint": True},
+    "parcae_tool_docs":      {"readOnlyHint": True,  "idempotentHint": True},
+    "parcae_get_docs":       {"readOnlyHint": True,  "idempotentHint": True},
     "command_guard_request_approval": {"openWorldHint": True},
 
     # === state ===
@@ -256,6 +312,7 @@ TOOL_ANNOTATIONS: dict[str, dict[str, bool]] = {
     "understand_image":          {"readOnlyHint": True,  "openWorldHint": True},
     "vision_locate":             {"readOnlyHint": True,  "openWorldHint": True},
     "vision_status":             {"readOnlyHint": True,  "idempotentHint": True},
+    "video_frame":               {"readOnlyHint": True,  "idempotentHint": True},
     "screen_accessibility_snapshot": {"readOnlyHint": True,  "idempotentHint": True},
     "screen_semantic_action":    {"openWorldHint": True},
     # ZCode 对齐新增（网关层工具的注解；直连升级按调用频次另行决策）

@@ -38,8 +38,8 @@ class TestUserBubbleVisualRules:
 
     def test_user_bubble_right_aligned_with_accent_wash(self, qapp):
         """user 消息：右对齐 + ACCENT_WASH bubble。"""
-        from client.core.agent import Message
         from client.panels.chat import _UserBubble
+        from lib.agent_runtime import Message
         from lib.ui import tokens
 
         msg = Message(role="user", content="hello", source="user")
@@ -63,8 +63,8 @@ class TestUserBubbleVisualRules:
         """steer 消息：显示'用户引导'标签（D37）。"""
         from PySide6.QtWidgets import QLabel
 
-        from client.core.agent import Message
         from client.panels.chat import _UserBubble
+        from lib.agent_runtime import Message
 
         msg = Message(role="user", content="steer text", source="steer")
         bubble = _UserBubble(msg)
@@ -341,8 +341,8 @@ class TestToolCallBlockVisualRules:
 
     def test_tool_call_block_attach_result(self, qapp):
         """attach_tool_result 更新状态为 completed。"""
-        from client.core.agent import Message
         from client.panels.chat import TOOL_STATUS_COMPLETED, _ToolCallBlock
+        from lib.agent_runtime import Message
 
         tc_dict = {"id": "tc-1", "function": {"name": "exec_python", "arguments": "{}"}}
         block = _ToolCallBlock(tool_call_dict=tc_dict, status="running")
@@ -361,8 +361,8 @@ class TestSystemBlockVisualRules:
 
     def test_system_block_default_collapsed(self, qapp):
         """system 块默认折叠。"""
-        from client.core.agent import Message
         from client.panels.chat import _SystemBlock
+        from lib.agent_runtime import Message
 
         msg = Message(role="system", content="system msg")
         block = _SystemBlock(msg)
@@ -376,8 +376,8 @@ class TestSystemBlockVisualRules:
 
     def test_system_reminder_block_label(self, qapp):
         """system_reminder 块显示'系统提醒'标签。"""
-        from client.core.agent import Message
         from client.panels.chat import _SystemBlock
+        from lib.agent_runtime import Message
 
         msg = Message(role="system_reminder", content="reminder")
         block = _SystemBlock(msg)
@@ -389,8 +389,8 @@ class TestSystemBlockVisualRules:
 
     def test_summary_block_label(self, qapp):
         """summary 块显示'L2 摘要'标签。"""
-        from client.core.agent import Message
         from client.panels.chat import _SystemBlock
+        from lib.agent_runtime import Message
 
         msg = Message(role="summary", content="summary content")
         block = _SystemBlock(msg)
@@ -402,8 +402,8 @@ class TestSystemBlockVisualRules:
 
     def test_system_block_toggle(self, qapp):
         """toggle 展开/折叠 system 内容。"""
-        from client.core.agent import Message
         from client.panels.chat import _SystemBlock
+        from lib.agent_runtime import Message
 
         msg = Message(role="system", content="system content")
         block = _SystemBlock(msg)
@@ -429,8 +429,8 @@ class TestMessageTimelineBehavior:
 
     def test_timeline_append_user_block(self, qapp):
         """append_user_block 追加 _UserBubble。"""
-        from client.core.agent import Message
         from client.panels.chat import _MessageTimeline
+        from lib.agent_runtime import Message
 
         tl = _MessageTimeline()
         try:
@@ -445,13 +445,13 @@ class TestMessageTimelineBehavior:
 
     def test_timeline_append_assistant_blocks(self, qapp):
         """append_assistant_blocks 追加 thinking + tool_calls + text 块。"""
-        from client.core.agent import Message
         from client.panels.chat import (
             _AssistantTextBlock,
             _MessageTimeline,
             _ThinkingBlock,
             _ToolCallBlock,
         )
+        from lib.agent_runtime import Message
 
         tl = _MessageTimeline()
         try:
@@ -475,8 +475,8 @@ class TestMessageTimelineBehavior:
 
     def test_timeline_append_tool_result_attaches_to_existing(self, qapp):
         """append_tool_result 附加到匹配的 _ToolCallBlock。"""
-        from client.core.agent import Message
         from client.panels.chat import TOOL_STATUS_COMPLETED, _MessageTimeline
+        from lib.agent_runtime import Message
 
         tl = _MessageTimeline()
         try:
@@ -495,8 +495,8 @@ class TestMessageTimelineBehavior:
 
     def test_timeline_append_tool_result_creates_standalone(self, qapp):
         """无匹配 tool_call 时创建独立块。"""
-        from client.core.agent import Message
         from client.panels.chat import _MessageTimeline
+        from lib.agent_runtime import Message
 
         tl = _MessageTimeline()
         try:
@@ -509,8 +509,8 @@ class TestMessageTimelineBehavior:
 
     def test_timeline_append_system_block(self, qapp):
         """append_system_block 追加 _SystemBlock。"""
-        from client.core.agent import Message
         from client.panels.chat import _MessageTimeline
+        from lib.agent_runtime import Message
 
         tl = _MessageTimeline()
         try:
@@ -523,8 +523,8 @@ class TestMessageTimelineBehavior:
 
     def test_timeline_clear(self, qapp):
         """clear 清空所有块。"""
-        from client.core.agent import Message
         from client.panels.chat import _MessageTimeline
+        from lib.agent_runtime import Message
 
         tl = _MessageTimeline()
         try:
@@ -540,8 +540,8 @@ class TestMessageTimelineBehavior:
 
     def test_timeline_update_tool_call_status(self, qapp):
         """update_tool_call_status 更新对应块状态。"""
-        from client.core.agent import Message
         from client.panels.chat import TOOL_STATUS_COMPLETED, _MessageTimeline
+        from lib.agent_runtime import Message
 
         tl = _MessageTimeline()
         try:
@@ -710,12 +710,9 @@ class TestChatPanelTimelineIntegration:
 
     def test_chat_panel_append_message_dispatches(self, qapp, tmp_path, monkeypatch):
         """_append_message 按 role 派发到 timeline。"""
-        import client.panels.chat as chat_module
-        from client.core.agent import Message
         from client.panels.chat import ChatPanel
+        from lib.agent_runtime import Message
 
-        db_path = str(tmp_path / "test_timeline.db")
-        monkeypatch.setattr(chat_module, "DEFAULT_DB_PATH", db_path)
         panel = ChatPanel()
         try:
             # user 消息
@@ -740,12 +737,9 @@ class TestChatPanelTimelineIntegration:
 
     def test_chat_panel_clear_messages(self, qapp, tmp_path, monkeypatch):
         """_clear_messages 清空 timeline。"""
-        import client.panels.chat as chat_module
-        from client.core.agent import Message
         from client.panels.chat import ChatPanel
+        from lib.agent_runtime import Message
 
-        db_path = str(tmp_path / "test_clear.db")
-        monkeypatch.setattr(chat_module, "DEFAULT_DB_PATH", db_path)
         panel = ChatPanel()
         try:
             panel._append_message(Message(role="user", content="hi", source="user"), {})

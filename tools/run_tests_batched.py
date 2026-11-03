@@ -17,6 +17,9 @@
     <batch>.log / <batch>.xml   每批原始输出与 JUnit XML。rc=0 的批次解析完 XML 后自删，
                                 所以全绿的一轮跑完这里只剩 SUMMARY.md + mem_min.log；
                                 非零批次的两份保留（SUMMARY.md 的明细行直接链到 .log）。
+                                非零批次还会把**日志末尾 + 最后停在的测试**直接写进
+                                SUMMARY.md 和控制台——批次硬崩（0xC0000409 等）时 XML
+                                根本不存在，不摊现场的话报告里只剩一个裸退出码。
                                 上一轮遗留、本轮已无对应批次的产物（测试目录改名/删除）起跑时送回收站。
     mem_min.log                 每 5s 采样的可用内存新低（含并行重叠期），边跑边写
     SUMMARY.md                  批次表 + 合并后的失败清单 + 内存谷值与总耗时
@@ -39,7 +42,13 @@ from pathlib import Path
 import psutil
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_runner import QUICK_MARKERS, classify_exit, parse_junit_xml  # noqa: E402
+from test_runner import (  # noqa: E402
+    QUICK_MARKERS,
+    classify_exit,
+    last_test_line,
+    parse_junit_xml,
+    tail_lines,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = PROJECT_ROOT / "temp" / "batch_tests"
@@ -66,11 +75,10 @@ EXCLUDED_BATCHES = ("workspace/recorder/tests",)
 # 旧策略只并行 4 个慢批里的 2 个，20 多个小批全串行——14GB 可用内存却只跑 1-2 路，慢在这。
 # 现每个批按预估峰值记账，启动前要求 (可用 - 在飞承诺) >= 余量 + 本批成本，内存富余时自然
 # 多开（这是"智能分配"），紧张时退化成 1 路。
-MEM_RESERVE_GB = 4.0      # 系统余量红线：低于它不再启新批
+MEM_RESERVE_GB = 4.0      # 系统余量参考线：低于它只告警不阻塞（判据见 _acquire_slot）
 COST_GB_SLOW = 2.5        # 重 GUI / 真连浏览器的批，峰值预估
 COST_GB_NORMAL = 1.0      # 纯逻辑批
 MAX_IN_FLIGHT_DEFAULT = 6
-WAIT_LIMIT_S = 900        # 等内存上限：等过头强放行，绝不把整个发版卡死
 
 MEM_LOG = OUT_DIR / "mem_min.log"
 _IN_FLIGHT = 0   # 只在飞时用于给采样行标注"当时几路在跑"，诊断用途不要求精确
@@ -134,12 +142,20 @@ def _cost_gb_for(label: str) -> float:
     return COST_GB_SLOW if label in SLOW_BATCHES else COST_GB_NORMAL
 
 
-def _acquire_slot(cost_gb: float) -> float:
-    """等内存槽位，返回实际等待秒数。
+def _acquire_slot(cost_gb: float, label: str) -> tuple[float, str | None]:
+    """取并发槽位，返回 (等待秒数, 低内存告警文案或 None)。
 
     判据用 (可用 - 在飞承诺)，不是只看可用：可用是实时值，十个批同时看到 14GB 会一起放行、
     一起把内存吃穿；把"已承诺但尚未体现在可用里"的部分扣掉才是保守下界。
-    等满 WAIT_LIMIT_S 强放行——宁可冒一次内存风险，也不能把整个发版卡死。
+
+    ⛔ 不做定时等待（2026-10-24 用户裁决：「拦住等一会就是搞笑」）。旧版是
+    `waited >= WAIT_LIMIT_S` 强放行，等于「先拦 900s 再放」——既没拦住也没真放行；
+    可用内存低于余量线时这个判据永远不会满足，每批白等 15 分钟，32 批能拖成 8 小时。
+    现在只有三种处置，语义各自清楚：
+      ① 余量够 → 放行。
+      ② 余量不够、但有别的批在飞 → 等在飞批释放（这期间有真实进展，不是空耗）。
+      ③ 余量不够、且没有批在飞 → **直接放行 + 告警**。系统内存本身紧，再等也不会变；
+         要不要先腾内存、要不要加 --serial，交给跑测试的人自己判断。
 
     ⚠️ 独占批（SOLO_BATCHES）的"跟谁都不并行"由调用方保证（它们先串行跑完），
     这个函数只管预算，不管互斥。
@@ -149,14 +165,21 @@ def _acquire_slot(cost_gb: float) -> float:
     while True:
         with _slot_lock:
             avail = psutil.virtual_memory().available / 2**30
-            if (waited >= WAIT_LIMIT_S
-                    or ((avail - _inflight_cost_gb) >= MEM_RESERVE_GB + cost_gb
-                        and _inflight_count < _max_in_flight)):
+            need = MEM_RESERVE_GB + cost_gb
+            if (avail - _inflight_cost_gb) >= need and _inflight_count < _max_in_flight:
                 _inflight_cost_gb += cost_gb
                 _inflight_count += 1
-                return waited
-        time.sleep(2)
-        waited += 2
+                return waited, None
+            if _inflight_count == 0:
+                # 没有任何在飞批可等 ⇒ 条件不会自己满足，放行并告警
+                warn = (f"可用 {avail:.1f}GB 低于余量线 {need:.1f}GB，"
+                        f"{label} 仍照跑；要避免 OOM 请先腾内存或加 --serial")
+                _inflight_cost_gb += cost_gb
+                _inflight_count += 1
+                print(f"[batched] ⚠ 低内存强跑：{warn}", flush=True)
+                return waited, warn
+        time.sleep(1)
+        waited += 1
 
 
 def _release_slot(cost_gb: float) -> None:
@@ -206,13 +229,17 @@ def _run_batch(label: str, path: str, markers: str | None) -> dict:
     slug = _slug(label)
     log_path = OUT_DIR / f"{slug}.log"
     xml_path = OUT_DIR / f"{slug}.xml"
-    cmd = [sys.executable, "-m", "pytest", path, "--tb=line", "-p", "no:cacheprovider",
-           f"--junit-xml={xml_path}"]
+    # `-u`：子进程 stdout 不缓冲。默认块缓冲下进程被硬崩（Qt qFatal / abort）时，
+    #   缓冲区里最后几 KB 输出不落盘 —— 2026-10-24 实测同一崩溃：不加 -u 日志只剩 2 字节。
+    # `-vv`：一行一条 nodeid。addopts 里已有 `-q`，所以 -vv 的净效果才是"每条测试一行"；
+    #   改 addopts 时同步这里。没这一行的话，崩溃后只能知道死在哪个文件，不知道哪条测试。
+    cmd = [sys.executable, "-u", "-m", "pytest", path, "--tb=line", "-vv",
+           "-p", "no:cacheprovider", f"--junit-xml={xml_path}"]
     if markers:
         cmd += ["-m", markers]
 
     cost = _cost_gb_for(label)
-    waited = _acquire_slot(cost)
+    waited, mem_warn = _acquire_slot(cost, label)
     avail = psutil.virtual_memory().available / 2**30   # 报告里的"起跑前可用"
     t0 = time.monotonic()
     _IN_FLIGHT += 1
@@ -232,12 +259,18 @@ def _run_batch(label: str, path: str, markers: str | None) -> dict:
         log_path.unlink(missing_ok=True)
         xml_path.unlink(missing_ok=True)
         log_ref = ""   # 空 = 产物已回收，别让人去打开一个不存在的路径
+        tail, at = [], ""
     else:
         log_ref = str(log_path.relative_to(PROJECT_ROOT))
+        # 红批的现场直接取出来带走：崩溃时 XML 根本没写出来，报告里否则只剩一个裸退出码。
+        tail = tail_lines(log_path)
+        at = last_test_line(tail)
     return {
         "label": label, "rc": rc, "status": status, "detail": detail,
         "seconds": dur, "waited": waited, "avail_before": avail, "avail_after": low_water,
+        "mem_warn": mem_warn,
         "summary": summary, "failures": failures, "log": log_ref,
+        "tail": tail, "at": at,
         "slow": label in SLOW_BATCHES,
     }
 
@@ -264,9 +297,29 @@ def run(all_batches: list[tuple[str, str]], markers: str | None, parallel: int) 
 
     def _echo(kind: str, r: dict) -> None:
         wait = f" | 等内存 {r['waited']:.0f}s" if r["waited"] else ""
+        low = " | ⚠ 低内存强跑" if r.get("mem_warn") else ""
         print(f"{'OK ' if r['rc'] == 0 else 'RED'} [{kind}] {r['label']}: "
-              f"{_fmt_counts(r['summary'])} | {r['seconds']:.0f}s{wait} | "
+              f"{_fmt_counts(r['summary'])} | {r['seconds']:.0f}s{wait}{low} | "
               f"跑完可用 {r['avail_after']:.1f}GB | rc={r['rc']}", flush=True)
+        if r["rc"] != 0:
+            # 红批当场把现场打出来：等跑完再翻报告就没人看了（报告也确实给不全）。
+            print(f"     └─ {r['detail']}", flush=True)
+            if r["summary"] is None:
+                # 没有 XML = 硬崩/中断，日志末尾是唯一的现场
+                if r.get("at"):
+                    print(f"     └─ 最后停在: {r['at']}", flush=True)
+                if r.get("tail"):
+                    print(f"     └─ 日志末尾（{r['log']}）:", flush=True)
+                    for ln in r["tail"][-10:]:
+                        print(f"        {ln[:160]}", flush=True)
+            else:
+                # 有 XML = 普通失败，直接把失败清单摘几条出来，别逼人再开报告
+                for f in r["failures"][:5]:
+                    name = f"{f.get('classname', '')}::{f.get('name', '')}".strip(":")
+                    print(f"     └─ {name} — {f.get('message', '')[:120]}", flush=True)
+                if len(r["failures"]) > 5:
+                    print(f"     └─ …另有 {len(r['failures']) - 5} 条，见 {r['log']}",
+                          flush=True)
 
     try:
         if solo:
@@ -340,11 +393,38 @@ def write_report(results: list[dict], markers: str | None, parallel: int,
     if red:
         lines.append("\n## 非零批次明细\n")
         for r in red:
-            lines.append(f"- **{r['label']}** rc={r['rc']} — {r['detail']}；日志 `{r['log']}`")
-            for f in r["failures"][:20]:
-                lines.append(f"  - `{f.get('classname', '')}` {f.get('message', '')[:180]}")
-            if len(r["failures"]) > 20:
-                lines.append(f"  - …另有 {len(r['failures']) - 20} 条，见 XML")
+            crashed = r["summary"] is None    # XML 缺失 = 硬崩/中断，没有计数
+            lines.append(f"### {r['label']} — {r['status']}\n")
+            lines.append(f"- rc={r['rc']}：{r['detail']}")
+            if r.get("at"):
+                lines.append(f"- {'最后停在' if crashed else '最后一条测试'}：`{r['at']}`")
+            if crashed:
+                lines.append("- 计数不可得：JUnit XML 由 pytest 收尾时才写，"
+                             "硬崩/中断时没有，别把 `(XML 未生成)` 当成 0 失败")
+            if r["log"]:
+                lines.append(f"- 日志：`{r['log']}`")
+            lines.append(f"- 单批复现：`uv run python tools/run_tests_batched.py "
+                         f"--only {r['label']} --ihaveread --serial`")
+            if r["failures"]:
+                lines.append(f"- 失败/错误 {len(r['failures'])} 条：")
+                for f in r["failures"][:20]:
+                    lines.append(f"  - `{f.get('classname', '')}` {f.get('message', '')[:180]}")
+                if len(r["failures"]) > 20:
+                    lines.append(f"  - …另有 {len(r['failures']) - 20} 条，见 XML")
+            # 日志末尾只在没有 XML 时贴：普通失败已有上面的清单，再贴一遍日志纯噪声。
+            if crashed and r.get("tail"):
+                lines.append(f"\n日志末尾（末 {len(r['tail'])} 行）：\n")
+                lines.append("```")
+                lines.extend(r["tail"])
+                lines.append("```")
+            lines.append("")
+    warned = [r for r in results if r.get("mem_warn")]
+    if warned:
+        lines.append("\n## 低内存强跑的批次\n")
+        lines.append("余量不足但当时没有在飞批可等，按设计直接放行、不空等；"
+                     "这批结果若异常，先怀疑 OOM 而不是代码。\n")
+        for r in warned:
+            lines.append(f"- **{r['label']}** — {r['mem_warn']}")
     # 部分重跑（--only）写 SUMMARY.partial.md：红批日志现在跨轮保留，让子集跑覆盖整轮报告
     # 等于把那份索引丢掉。名字固定不加时间戳，否则又回到"产物越堆越多"。
     out = OUT_DIR / ("SUMMARY.partial.md" if partial else "SUMMARY.md")
@@ -358,10 +438,15 @@ def main() -> int:
     p.add_argument("--quick", action="store_true", help="只跑纯逻辑层（排除 gpu/browser/real_backend/network/chaos）")
     p.add_argument("--parallel", type=int, default=0,
                    help="并发硬上限；0=按内存自动（默认，上限 6），1=串行")
+    p.add_argument("--ihaveread", action="store_true",
+                   help="已阅读测试手册（必带；不带则拒绝执行）")
     p.add_argument("--serial", action="store_true", help="强制串行，对照或排障用")
     p.add_argument("--only", action="append", default=[],
                    help="只跑匹配的批次（可重复）；EXCLUDED_BATCHES 也可被显式选中")
     args = p.parse_args()
+    if not args.ihaveread:
+        print("❌ 拒绝执行：请先阅读测试手册，按手册里的测试使用方法补齐参数后再运行。", file=sys.stderr)
+        return 2
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     MEM_LOG.write_text("", encoding="utf-8")   # 采样数字只属于本轮，别和上次混
@@ -384,7 +469,7 @@ def main() -> int:
         skipped = [b for b in batches_all if b[0] in EXCLUDED_BATCHES]
         batches = [b for b in batches_all if b[0] not in EXCLUDED_BATCHES]
         if skipped:
-            print(f"[batched] 默认跳过 {[l for l, _ in skipped]}（--only 可显式跑）",
+            print(f"[batched] 默认跳过 {[lbl for lbl, _ in skipped]}（--only 可显式跑）",
                   flush=True)
 
     print(f"[batched] 批次 {len(batches)} 个，可用内存 "
@@ -403,3 +488,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

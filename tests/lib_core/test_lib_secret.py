@@ -74,8 +74,8 @@ def tmp_secrets_toml(tmp_path, monkeypatch):
 class TestPaths:
     """路径常量解析测试。"""
 
-    def test_get_project_root_returns_localagent_root(self):
-        """项目根应该是 localAgent/ 目录。"""
+    def test_get_project_root_returns_parcae_root(self):
+        """项目根应该是 Parcae/ 目录。"""
         root = get_project_root()
         assert root.is_dir()
         # 项目根应含 server/ client/ lib/ 等标志性目录

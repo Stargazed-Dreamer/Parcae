@@ -26,6 +26,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.client_ui._local_store import local_store_factory as _local_store_factory  # noqa: E402
+
 CHAT_PY = PROJECT_ROOT / "client" / "panels" / "chat.py"
 
 
@@ -40,7 +42,7 @@ def _make_chat_panel(monkeypatch, tmp_path):
     from client.panels.chat import ChatPanel
 
     db_path = str(tmp_path / "hover_test.db")
-    monkeypatch.setattr(chat_module, "DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(chat_module, "_make_read_store", _local_store_factory(db_path))
     return ChatPanel()
 
 
@@ -97,8 +99,8 @@ class TestUserBubbleHoverButtons:
 
     def test_user_message_has_hover_buttons(self, qapp):
         """user 消息：_hover_button_row 不为 None（hover 按钮存在）。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _UserBubble
+        from lib.agent_runtime.types import Message
 
         msg = Message(role="user", content="hello", source="user", id="m1")
         bubble = _UserBubble(msg)
@@ -111,8 +113,8 @@ class TestUserBubbleHoverButtons:
 
     def test_steer_message_has_hover_buttons(self, qapp):
         """steer 消息：2026-09-13 起也有复制/删除按钮（常态显示，_can_hover=True）。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _UserBubble
+        from lib.agent_runtime.types import Message
 
         msg = Message(role="user", content="guide", source="steer", id="m1")
         bubble = _UserBubble(msg)
@@ -126,8 +128,8 @@ class TestUserBubbleHoverButtons:
 
     def test_queue_message_has_hover_buttons(self, qapp):
         """queue 消息：2026-09-13 起也有复制/删除按钮（常态显示）。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _UserBubble
+        from lib.agent_runtime.types import Message
 
         msg = Message(role="user", content="queued", source="queue", id="m1")
         bubble = _UserBubble(msg)
@@ -146,8 +148,8 @@ class TestUserBubbleHoverButtons:
         逻辑可见性（未被显式 setVisible(False)）。enterEvent/leaveEvent 已是
         no-op（见 chat.py 注释），不再改变可见性。
         """
-        from client.core.agent.types import Message
         from client.panels.chat import _UserBubble
+        from lib.agent_runtime.types import Message
 
         msg = Message(role="user", content="hello", source="user", id="m1")
         bubble = _UserBubble(msg)
@@ -277,8 +279,8 @@ class TestChatPanelHoverSignalConnection:
 
     def test_connect_block_hover_signals_user(self, qapp, monkeypatch, tmp_path):
         """_connect_block_hover_signals 应连 _UserBubble 的 copy/delete 信号。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _UserBubble
+        from lib.agent_runtime.types import Message
 
         panel = _make_chat_panel(monkeypatch, tmp_path)
         try:
@@ -306,7 +308,7 @@ class TestChatPanelHoverSignalConnection:
         panel = _make_chat_panel(monkeypatch, tmp_path)
         try:
             block = _AssistantTextBlock(content="hello")
-            from client.core.agent.types import Message
+            from lib.agent_runtime.types import Message
             msg = Message(role="assistant", content="hello", source="assistant")
             panel._connect_block_hover_signals(block, msg)
             called = []
@@ -359,7 +361,7 @@ class TestAppendMessageConnectsHoverSignals:
 
     def test_append_user_message_connects_signals(self, qapp, monkeypatch, tmp_path):
         """追加 user 消息 → _UserBubble 的 copy_requested 信号已连。"""
-        from client.core.agent.types import Message
+        from lib.agent_runtime.types import Message
 
         panel = _make_chat_panel(monkeypatch, tmp_path)
         try:
@@ -384,8 +386,8 @@ class TestAppendMessageConnectsHoverSignals:
 
     def test_append_assistant_message_connects_signals(self, qapp, monkeypatch, tmp_path):
         """追加 assistant 消息 → _AssistantTextBlock 的 copy_requested 信号已连。"""
-        from client.core.agent.types import Message
         from client.panels.chat import _AssistantTextBlock
+        from lib.agent_runtime.types import Message
 
         panel = _make_chat_panel(monkeypatch, tmp_path)
         try:

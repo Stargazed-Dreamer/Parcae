@@ -3,7 +3,7 @@ name: endfield_gacha
 description: >
   终末地寻访记录采集与统计。触发词：终末地抽卡、终末地寻访、endfield抽卡、终末地抽卡记录、
   终末地寻访记录、更新终末地记录。当用户要求获取或更新终末地（Endfield）的寻访（抽卡）记录时触发。
-  ⚠️ 本地日志路径读取功能未经测试，使用时必须提醒用户并全程跟进。
+  ⚠️ 禁止单独使用 --log：日志里的 u8_token 会过期，而 --log 会一并关掉浏览器兜底。
 task_type: recurring.endfield_gacha
 ---
 
@@ -18,8 +18,11 @@ task_type: recurring.endfield_gacha
 2. **浏览器登录**：打开鹰角通行证，用户手动登录，拦截认证 token
 3. **命令行传入**：`--token` 直接使用已有 token
 
-> **⚠️ 未测试提醒：本地日志路径读取功能（`read_token_from_log()`）尚未经过实际测试。**
-> 当使用日志方式获取 token 时，必须明确告知此功能未测试，执行过程中需全程跟进并记录问题。
+> **⚠️ 日志 token 会过期（2026-07-31 首次遇到、2026-10-30 复现）**：`read_token_from_log()` 能正常找到寻访记录 URL 并解析出
+> `u8_token`，但拿到的是**最近一次在游戏内打开寻访记录页时**写进日志的那条——隔天即失效，API 回
+> `code=40100 msg=Token is invalid`。**必须不带 `--log` 跑**：`main_async` 的 `except RuntimeError` 回退分支
+> 要求 `source == "log" and not log_only and not token` 三条同时成立，而 `--log` 恰好把兜底关掉，
+> 脚本会直接崩在采集阶段。要立刻拿到可用 token，就让脚本走浏览器登录（浏览器已有鹰角登录态时不用重新输验证码）。
 
 **与明日方舟的关键区别**：终末地拿到 token 后可直接调 API，无需模拟翻页操作，流程更简单。
 
@@ -109,6 +112,8 @@ API 端点：`GET https://ef-webview.hypergryph.com/api/record/char`
   "pool": "特许寻访",
   "charId": "char_1001",
   "name": "角色名",
+  "kind": "draw",
+  "nameText": "角色名",
   "rarity": 6,
   "rarity_label": "★6",
   "is_new": true,
@@ -140,8 +145,14 @@ API 端点：`GET https://ef-webview.hypergryph.com/api/record/char`
 ```json
 {
   "total": 500,
+  "pull_total": 498,
   "char_count": 400,
   "weapon_count": 100,
+  "char_pull_count": 399,
+  "weapon_pull_count": 99,
+  "non_pull_count": 2,
+  "non_pull_entries": [{"type": "char", "kind": "gift_intel_book", "name": "寻访情报书", "time": "2026-10-18 14:08:26", "pool": "万物更新", "seqId": "291"}],
+  "non_pull_unknown_kinds": [],
   "rarity_count": {"★6": 8, "★5": 45, "★4": 447},
   "six_star_count": 8,
   "six_star_names": ["角色A(特许寻访)", "角色B(辉光庆典)"],
@@ -159,6 +170,8 @@ API 端点：`GET https://ef-webview.hypergryph.com/api/record/char`
 }
 ```
 
+`total` 是数据文件行数（含赠送类条目）；`pull_total` 才是"总抽数"，`non_pull_entries` 把非抽卡产出按 seqId 单列（身份取 `nameText`；2026-10-30 用户裁决：保留不删，只在统计里单列）。`non_pull_unknown_kinds` 非空 = 出现了没登记过的 `kind`，已按非抽卡处理，核对后补进 `KNOWN_NON_PULL_KINDS`。只想重算统计不想再取 token 时用 `--summary-only`。
+
 ## 服务器配置
 
 | 服务器 | provider | 登录页 | API 基础 URL | appCode |
@@ -171,7 +184,7 @@ API 端点：`GET https://ef-webview.hypergryph.com/api/record/char`
 - **原始数据永不覆盖、永不删除**：每次采集保存独立的 raw 文件
 - **增量更新只增不删**：新记录合并到已有数据，seqId 去重
 - **不需要模拟翻页**：拿到 u8_token 后直接调 API，比明日方舟简单
-- **优先读日志**：v2 优先从游戏日志获取 u8_token，无需浏览器和 token 交换
+- **优先读日志**：v2 优先从游戏日志获取 u8_token，无需浏览器和 token 交换（但日志 token 隔天即失效，**浏览器回退是常态而非异常**，见上方实测提醒）
 - **日志方式直接拿到 u8_token**：跳过 auth_token → grant → u8_token 交换流程
 - **用户手动登录**：浏览器方式下，AI 负责打开页面和拦截 token，用户在浏览器中输入手机号+验证码
 - **seqId 游标分页**：API 返回 `{code, data: {list, hasMore}}`，用最后一条的 seqId 翻页
@@ -179,6 +192,7 @@ API 端点：`GET https://ef-webview.hypergryph.com/api/record/char`
 - **强制模式不替换历史**：`--force` 重新采集全量后仍与已有数据合并
 - **国服 serverId 固定为 "1"**：国际服从角色列表中获取
 - **稀有度 4-6**：对应★4-★6（终末地没有★1-★3）
+- **非抽卡条目单列不删**：API 除角色/武器外还会下发赠送类记录（实测 `kind="gift_intel_book"` / `nameText="寻访情报书"`，不带 charId/rarity）。判据 `classify_pull()` **kind 优先**：`draw` 才算抽卡；无 kind 的老数据（6 月那批）退回稀有度 4-6；**没见过的 kind 一律按非抽卡单列**并写进 `non_pull_unknown_kinds`（宁可少计，不让新类型悄悄虚增抽数）。2026-10-30 用户裁决：数据行保留不删，统计用 `pull_total` 计"总抽数"，单列见 `non_pull_entries`。回归检查：`uv run python workspace/endfield_gacha/check_kind_rule.py`（用入库 raw 离线验，不需要 token）
 
 ## 日志路径
 
@@ -198,6 +212,7 @@ API 端点：`GET https://ef-webview.hypergryph.com/api/record/char`
 | 依赖 | 路径/接口 | 说明 |
 |------|----------|------|
 | 采集脚本 | `workspace/endfield_gacha/endfield_gacha.py` | 终末地寻访记录采集 v2 |
+| 回归检查 | `workspace/endfield_gacha/check_kind_rule.py` | kind 判据离线验（吃已入库 raw，不需要 token/浏览器） |
 | 配置 | `config.toml [endfield]` | provider (hypergryph/gryphline) |
 | 游戏日志 | `HGWebview.log` | 优先 token 来源（无需浏览器） |
 | 浏览器 | CDP 端口 9222 | Chrome 调试实例（日志失败时回退） |
@@ -218,7 +233,8 @@ API 端点：`GET https://ef-webview.hypergryph.com/api/record/char`
 python workspace/endfield_gacha/endfield_gacha.py                # 国服，增量采集
 python workspace/endfield_gacha/endfield_gacha.py --force        # 重新采集全量并与历史合并
 python workspace/endfield_gacha/endfield_gacha.py --global       # 国际服
-python workspace/endfield_gacha/endfield_gacha.py --log          # 仅从日志获取 token（不回退浏览器）
+python workspace/endfield_gacha/endfield_gacha.py --log          # ⛔ 排查日志解析时才用：token 失效会直接崩，不回退浏览器
+python workspace/endfield_gacha/endfield_gacha.py --summary-only # 只按已有记录重算 summary.json（不采集、不取 token）
 
 # 直接使用已有 token（跳过浏览器登录）
 python workspace/endfield_gacha/endfield_gacha.py --token YOUR_AUTH_TOKEN

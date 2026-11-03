@@ -42,7 +42,7 @@ class TestNoKeyCleanRoomStartup:
             with patch("server.llm_pool.singleton._global_pool", None), patch(
                 "server.llm_pool.load_provider_keys",
                 return_value=[],
-            ), caplog.at_level(logging.WARNING, logger="localagent.lifecycle"):
+            ), caplog.at_level(logging.WARNING, logger="parcae.lifecycle"):
                 result = _ensure_pool_initialized()
 
             assert result is False, "无 key 时 _ensure_pool_initialized 应返回 False"
@@ -215,7 +215,7 @@ class TestNoKeyCleanRoomStartup:
             )
             # v14: get_llm_provider_config 已删除；_ensure_pool_initialized 在无 key 时
             # 直接 return False，不会走到 _load_default_policy，无需 mock config
-            with caplog.at_level(logging.WARNING, logger="localagent.lifecycle"):
+            with caplog.at_level(logging.WARNING, logger="parcae.lifecycle"):
                 result = _ensure_pool_initialized()
             # 关键断言：不抛 TypeError，返回 False（无 key 降级）
             assert result is False

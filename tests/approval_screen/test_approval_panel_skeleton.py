@@ -71,7 +71,7 @@ class TestPanelSkeleton:
         from client.approval_panel.panel import ApprovalPanel
 
         panel = ApprovalPanel()
-        assert panel.windowTitle() == "LocalAgent 审批面板"
+        assert panel.windowTitle() == "Parcae 审批面板"
         assert panel.minimumSize().width() >= 400
         panel.deleteLater()
 

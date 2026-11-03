@@ -15,9 +15,9 @@
 4. **源目录上下文**：源目录仅作 prompt 文字信息（如「文件来自：下载」），
    不参与余弦计算（embedding 逻辑不变）。
 
-模型：BAAI/bge-m3 本地 ONNX（multilingual）。真实模型目录由 localAgent 根
+模型：BAAI/bge-m3 本地 ONNX（multilingual）。真实模型目录由 Parcae 根
 config.toml [models] external_dir 推导（external_dir + embeddings），读不到时
-回退 <localAgent根>/weights/embeddings；bge-m3 的 ONNX 在 bge-m3/onnx 子目录，
+回退 <Parcae根>/weights/embeddings；bge-m3 的 ONNX 在 bge-m3/onnx 子目录，
 model_dir 必须指向该子目录（指向根目录会走更重的 sentence-transformers 路径）。
 
 全部功能 fail-soft：引擎不可用（无权重/依赖缺失）时降级为原始行为——
@@ -46,15 +46,15 @@ _ENGINE = None
 _ENGINE_INIT_TRIED = False
 
 
-def get_localagent_root() -> str:
-    """localAgent 根目录 = 本文件上两级（tools/file_classifier → localAgent）"""
+def get_parcae_root() -> str:
+    """Parcae 根目录 = 本文件上两级（tools/file_classifier → Parcae）"""
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def resolve_embeddings_dir() -> str:
     """解析真实 embeddings 目录：config.toml [models] external_dir + /embeddings，
-    读不到或目录不存在时回退 <localAgent根>/weights/embeddings"""
-    root = get_localagent_root()
+    读不到或目录不存在时回退 <Parcae根>/weights/embeddings"""
+    root = get_parcae_root()
     try:
         import tomllib
         cfg_path = os.path.join(root, "config.toml")

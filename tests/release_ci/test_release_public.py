@@ -197,7 +197,7 @@ def test_gate_sbom_generated_valid(tmp_path):
             "SPDXID": "SPDXRef-DOCUMENT",
             "name": "test",
             "creationInfo": {"created": "2026-07-31T12:00:00Z"},
-            "packages": [{"SPDXID": "SPDXRef-Package", "name": "localagent"}],
+            "packages": [{"SPDXID": "SPDXRef-Package", "name": "parcae"}],
             "files": [{"SPDXID": "SPDXRef-File-0"}],
         }),
         encoding="utf-8",
@@ -217,7 +217,7 @@ def test_generate_spdx_sbom_basic():
     sbom = generate_spdx_sbom(plan, manifest_files)
     assert sbom["spdxVersion"] == "SPDX-2.3"
     assert sbom["SPDXID"] == "SPDXRef-DOCUMENT"
-    assert sbom["name"] == "localagent-public-full"
+    assert sbom["name"] == "parcae-public-full"
     assert len(sbom["packages"]) == 1
     assert sbom["packages"][0]["licenseConcluded"] == "Apache-2.0"
     assert sbom["packages"][0]["licenseDeclared"] == "Apache-2.0"

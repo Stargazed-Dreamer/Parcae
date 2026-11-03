@@ -38,11 +38,11 @@ def isolated_templates_path(tmp_path, monkeypatch):
     tmp_file = tmp_path / "chat_templates.json"
 
     # 替换 template_store 模块的 DEFAULT_TEMPLATES_PATH
-    from client.core.agent import template_store
+    from lib.agent_runtime import template_store
 
     monkeypatch.setattr(template_store, "DEFAULT_TEMPLATES_PATH", tmp_file)
 
-    # 也替换 chat.py 引用的别名（chat.py 通过 client.core.agent import 拿到 DEFAULT_TEMPLATES_PATH 别名）
+    # 也替换 chat.py 引用的别名（chat.py 通过 lib.agent_runtime import 拿到 DEFAULT_TEMPLATES_PATH 别名）
     # 注意：_TemplateManagerPanel 内部直接调 template_load_all() 不传 path，
     # 而 template_store.load_all() 内部用 `p = path or DEFAULT_TEMPLATES_PATH`，
     # monkeypatch.setattr(template_store, "DEFAULT_TEMPLATES_PATH", tmp_file) 会同时影响
@@ -52,7 +52,7 @@ def isolated_templates_path(tmp_path, monkeypatch):
     if not tmp_file.exists():
         import time
 
-        from client.core.agent import Template
+        from lib.agent_runtime import Template
 
         now = time.time()
         blank = Template(
@@ -228,8 +228,8 @@ class TestTemplateManagerPanelAutoSave:
 
     def test_editing_finished_saves_name(self, qapp, isolated_templates_path):
         """name edit editingFinished → 自动保存到文件。"""
-        from client.core.agent import template_get
         from client.panels.chat import _TemplateManagerPanel
+        from lib.agent_runtime import template_get
 
         panel = _TemplateManagerPanel()
         try:
@@ -251,8 +251,8 @@ class TestTemplateManagerPanelAutoSave:
 
     def test_checkbox_state_changed_saves_skills(self, qapp, isolated_templates_path):
         """skill 复选框状态变更 → 自动保存到文件。"""
-        from client.core.agent import list_all_task_types, template_get
         from client.panels.chat import _TemplateManagerPanel
+        from lib.agent_runtime import list_all_task_types, template_get
 
         panel = _TemplateManagerPanel()
         try:
@@ -290,7 +290,7 @@ class TestTemplateManagerPanelAutoSave:
             panel._auto_save_current()  # 应直接返回不保存
 
             # 重新从文件读，name 不应被改
-            from client.core.agent import template_get
+            from lib.agent_runtime import template_get
             tpl = template_get("blank")
             assert tpl is not None
             assert tpl.name != "不应被保存", "_loading=True 时不应触发保存"

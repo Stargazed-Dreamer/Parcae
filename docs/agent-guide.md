@@ -67,6 +67,18 @@ scope 分静态与动态两类：静态 scope 定义在 [agent_guide_data.py](fi
 
 > task_type 完整清单见 [.agents/skills/_index.md](file:///<project_root>/.agents/skills/_index.md) 核心 Skill 段 + 组件化模块段，数量随新增/重构变动。
 
+### 元 skill（设计上无 task_type）
+
+跨 skill 的决策层 / 方法论层（目前只有 `web_access` 联网决策表）**不占 task_type**，也不进 `GUIDE_REGISTRY`：它被各任务按需引用，本身不是可路由的任务入口。
+
+写法是 frontmatter 里显式声明，**不是靠检查器白名单**：
+
+```yaml
+meta_skill: true   # 元 skill：被其他任务引用，设计上不对应单独 task_type
+```
+
+`tools/check_skills.py` 见到该字段就把「缺 task_type」降为信息行（`[M]`，不计警告、不影响退出码）；**没标又缺 task_type 仍然告警** —— 这样「漏写」不会被混成「元 skill」。新增元 skill 时必须同时在 `.agents/skills/_index.md` 的 task_type 行标注「元 skill」，否则读者会以为漏了字段。
+
 ## 4. 三种调用模式
 
 **统一端点**：`GET /guide`（[agent_guide.py](file:///<project_root>/server/agent_guide.py) 的 `get_agent_guide` 处理函数，`operation_id="agent_guide"`）

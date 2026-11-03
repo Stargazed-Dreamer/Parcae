@@ -54,8 +54,26 @@ def _file_lines(rel_path: str) -> list[str]:
     return path.read_text(encoding="utf-8", errors="ignore").splitlines()
 
 
+def _personal_identifier_patterns() -> list[re.Pattern[str]]:
+    """profile `[scan] personal_identifiers` 编译成的 personal-hostname 规则。
+
+    必须与 `prepare.collect_sensitive_hits` 同源——那边**只在 identifiers 非空时**
+    才把 personal-hostname 并进规则表。本文件原先只看 `_SENSITIVE_PATTERNS`，
+    判据比引擎窄：任何「只遮蔽主机名」的 skip 都会被判成「遮蔽了本来不敏感的脏行」，
+    好配置反被判死（2026-11-03 加主机名豁免时踩到，被这条测试拦下）。
+    """
+    scan = _profile().get("scan") or {}
+    return [
+        re.compile(re.escape(s), re.IGNORECASE)
+        for s in (scan.get("personal_identifiers") or [])
+        if s
+    ]
+
+
 def _is_sensitive_line(line: str) -> bool:
-    return any(pat.search(line) for cfg in _SENSITIVE_PATTERNS.values() for pat in cfg["patterns"])
+    if any(pat.search(line) for cfg in _SENSITIVE_PATTERNS.values() for pat in cfg["patterns"]):
+        return True
+    return any(pat.search(line) for pat in _personal_identifier_patterns())
 
 
 # ── 1. line_skips / remove_lines 自锚活性 ─────────────────────────
@@ -103,6 +121,18 @@ def test_line_rule_gate_has_teeth(tmp_path: Path) -> None:
     missing_file = tmp_path / "gone.md"
     assert not missing_file.exists()
 
+    # 反向探针之三：personal-hostname 是「profile 派生规则」，判据必须认它。
+    # 只放宽不放宽都错——放宽到"什么行都算敏感"等于把闸门拆了，所以同时验中性行仍判否。
+    identifiers = (_profile().get("scan") or {}).get("personal_identifiers") or []
+    if identifiers:
+        probe = f"故障机 {str(identifiers[0]).upper()} 上的转储文件"
+        assert _is_sensitive_line(probe), (
+            "personal-hostname 未被判据识别：合法的主机名豁免会被误判成死规则"
+        )
+        assert not _is_sensitive_line("这一行只有普通说明文字，没有任何盘符或标识"), (
+            "判据过宽：无标识无路径的行也被判敏感，闸门形同虚设"
+        )
+
 
 # ── 2. path_mapping 必须在语料里真命中 ────────────────────────────
 _BINARY_EXTS = {
@@ -114,7 +144,7 @@ _BINARY_EXTS = {
 # 已知当前无命中面的键 → 留下的理由（都不是"规则写坏"，而是刻意多备的一层转义/另一台机器的盘符）
 PATH_MAPPING_EXEMPTIONS = {
     "<projects_parent>\\\\localagent": "混合转义变体，语料里无此写法；同族单转义键已覆盖真实形态",
-    "E:\\System_Programes\\\\Miniconda3": "混合转义变体，语料里无此写法；同族键已覆盖",
+    "<data_drive>:/<apps_root>\\\\Miniconda3": "混合转义变体，语料里无此写法；同族键已覆盖",
     "<debug_profile_dir>": "另一台机器上的盘符形态，本机语料只出现别的盘符",
     "System_Programes\\\\envs": "混合转义变体，语料里无此写法",
 }

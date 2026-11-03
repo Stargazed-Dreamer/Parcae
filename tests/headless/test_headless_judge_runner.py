@@ -4,14 +4,14 @@
 - [x] JUDGE_PROMPT_TEMPLATE 常量定义
 - [x] run_judge_agent 函数实现
 - [x] 创建 judge session（mode="headless_judge"，session_id=headless-judge-{uuid}）
-- [x] judge config：max_iterations=10, max_budget_usd=0.5, wall_clock_budget_secs=300
-- [x] 调 facade.start(judge_session_id, judge_prompt)
+- [x] judge config：max_iterations=10, wall_clock_budget_secs=300
+- [x] 提交 judge session（butler-runtime T6 起走 runtime submit）
 - [x] 解析 JSON verdict {"verdict": ..., "reason": ...}
 - [x] 降级规则：JSON 解析失败 / judge session 失败 / max_iterations / 空输出 → uncertain
 
 测试分组：
 1. _parse_judge_verdict 纯函数测试（无 mock）
-2. run_judge_agent 端到端测试（mock SessionFacade.start）
+2. run_judge_agent 端到端测试（scripted runtime client）
 """
 
 from __future__ import annotations
@@ -27,15 +27,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
-    EventStore,
-    Message,
-    MockToolExecutor,
-    SessionFacade,
-)
-from client.core.agent.types import RunOutcome  # noqa: E402
+from fake_runtime import FakeRuntimeClient, assistant  # noqa: E402
+
+from server.activity_tracker import headless_runner as hr  # noqa: E402
 from server.activity_tracker.headless_runner import (  # noqa: E402
-    DEFAULT_BASE_URL,
     HEADLESS_JUDGE_PREFIX,
     JUDGE_PROMPT_TEMPLATE,
     VALID_VERDICTS,
@@ -55,7 +50,6 @@ def base_config(tmp_db_path) -> HeadlessConfig:
     """基础 judge 测试 config（资源限制用默认值）。"""
     return HeadlessConfig(
         trigger_text="测试任务",
-        db_path=tmp_db_path,
         judge_max_iterations=5,
         judge_wall_clock_budget_secs=60,
     )
@@ -191,82 +185,35 @@ class TestJudgePromptTemplate:
 
 
 # ============================================================================
-# 3. run_judge_agent 端到端测试（mock SessionFacade.start）
+# 3. run_judge_agent 端到端测试（scripted runtime client）
 # ============================================================================
 
 
-def _make_outcome(
-    session_id: str,
-    status: str = "completed",
-    stop_reason: str = "end_turn",
-) -> RunOutcome:
-    """构造 RunOutcome（用于 mock facade.start 返回值）。"""
-    return RunOutcome(
-        session_id=session_id,
-        status=status,
-        stop_reason=stop_reason,
-        iterations=1,
-    )
-
-
-def _patch_facade_start_with_judge_output(
+def _patch_runtime(
     monkeypatch,
     judge_response_text: str,
-    outcome: RunOutcome | None = None,
+    *,
+    status: str = "completed",
+    stop_reason: str = "end_turn",
     fail_with_exception: Exception | None = None,
-):
-    """patch SessionFacade.start 让它写一条 judge assistant 消息后返回指定 outcome。
+) -> FakeRuntimeClient:
+    """把 judge 的 runtime 客户端换成按脚本返回终态的替身。
 
     Args:
-        monkeypatch: pytest monkeypatch fixture
-        judge_response_text: judge 写入 EventStore 的 assistant 消息 content
-        outcome: facade.start 返回的 RunOutcome（None 时构造默认 completed）
-        fail_with_exception: 若非 None，facade.start 抛此异常
+        judge_response_text: judge 会话最后一条 assistant 消息
+        status/stop_reason: runtime 返回的终态
+        fail_with_exception: 非 None 时 submit 直接抛此异常
     """
-    async def patched_start(self, session_id, text, *, mode="dialogue", model_override=""):
-        if fail_with_exception is not None:
-            raise fail_with_exception
-        # 先创建 session 行（真实 facade.start 会调 create_session）
-        await self._deps.event_store.create_session(
-            session_id=session_id, mode=mode, title=text[:20] if text else "",
-        )
-        # 写一条 judge assistant 消息到 EventStore（facade 内部 store 与 deps 共享）
-        await self._deps.event_store.append_message(
-            session_id,
-            Message(
-                role="assistant",
-                content=judge_response_text,
-                source="assistant",
-                session_id=session_id,
-            ),
-        )
-        if outcome is None:
-            return _make_outcome(session_id)
-        return outcome
-
-    monkeypatch.setattr(SessionFacade, "start", patched_start)
-
-
-def _patch_gateway_registry_executor(monkeypatch):
-    """patch LLMPoolGateway / ToolRegistry / HttpClientToolExecutor（不真实调 LLM/HTTP）。"""
-    class MockLLMPoolGateway:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-
-    class MockToolRegistry:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        def refresh(self, *, timeout: float = 10.0) -> int:
-            return 0
-
-    class MockHttpClientToolExecutor(MockToolExecutor):
-        def __init__(self, registry=None, base_url=DEFAULT_BASE_URL, **kwargs):
-            super().__init__(**kwargs)
-
-    import client.core.agent as agent_pkg
-    monkeypatch.setattr(agent_pkg, "LLMPoolGateway", MockLLMPoolGateway)
-    monkeypatch.setattr(agent_pkg, "ToolRegistry", MockToolRegistry)
-    monkeypatch.setattr(agent_pkg, "HttpClientToolExecutor", MockHttpClientToolExecutor)
+    fake = FakeRuntimeClient()
+    fake.on(
+        "headless_judge",
+        messages=[assistant(judge_response_text)],
+        status=status,
+        stop_reason=stop_reason,
+    )
+    fake.submit_error = fail_with_exception
+    monkeypatch.setattr(hr, "_make_runtime_client", lambda config: fake)
+    return fake
 
 
 # ---------- 合法 JSON verdict 三种 ----------
@@ -274,8 +221,7 @@ def _patch_gateway_registry_executor(monkeypatch):
 
 def test_run_judge_agent_success(base_config, monkeypatch):
     """Ticket 03: judge 返回 verdict=success → JudgeResult.verdict=success。"""
-    _patch_gateway_registry_executor(monkeypatch)
-    _patch_facade_start_with_judge_output(
+    fake = _patch_runtime(
         monkeypatch,
         judge_response_text='{"verdict": "success", "reason": "任务完成"}',
     )
@@ -294,12 +240,13 @@ def test_run_judge_agent_success(base_config, monkeypatch):
     assert result.session_id.startswith(HEADLESS_JUDGE_PREFIX)
     assert result.error == ""
     assert "verdict" in result.raw_output
+    # 提交走 runtime，mode 标记 judge
+    assert fake.submits[0]["mode"] == "headless_judge"
 
 
 def test_run_judge_agent_failed(base_config, monkeypatch):
     """Ticket 03: judge 返回 verdict=failed → JudgeResult.verdict=failed。"""
-    _patch_gateway_registry_executor(monkeypatch)
-    _patch_facade_start_with_judge_output(
+    _patch_runtime(
         monkeypatch,
         judge_response_text='{"verdict": "failed", "reason": "任务未完成"}',
     )
@@ -318,8 +265,7 @@ def test_run_judge_agent_failed(base_config, monkeypatch):
 
 def test_run_judge_agent_uncertain(base_config, monkeypatch):
     """Ticket 03: judge 返回 verdict=uncertain → JudgeResult.verdict=uncertain。"""
-    _patch_gateway_registry_executor(monkeypatch)
-    _patch_facade_start_with_judge_output(
+    _patch_runtime(
         monkeypatch,
         judge_response_text='{"verdict": "uncertain", "reason": "输出含糊"}',
     )
@@ -341,8 +287,7 @@ def test_run_judge_agent_uncertain(base_config, monkeypatch):
 
 def test_run_judge_agent_invalid_json_degrades_to_uncertain(base_config, monkeypatch):
     """Ticket 03 降级：judge 输出非 JSON → uncertain。"""
-    _patch_gateway_registry_executor(monkeypatch)
-    _patch_facade_start_with_judge_output(
+    _patch_runtime(
         monkeypatch,
         judge_response_text="我觉得任务好像完成了吧",  # 非 JSON
     )
@@ -363,8 +308,7 @@ def test_run_judge_agent_invalid_json_degrades_to_uncertain(base_config, monkeyp
 
 def test_run_judge_agent_empty_output_degrades_to_uncertain(base_config, monkeypatch):
     """Ticket 03 降级：judge 输出为空 → uncertain。"""
-    _patch_gateway_registry_executor(monkeypatch)
-    _patch_facade_start_with_judge_output(
+    _patch_runtime(
         monkeypatch,
         judge_response_text="",  # 空输出
     )
@@ -383,8 +327,7 @@ def test_run_judge_agent_empty_output_degrades_to_uncertain(base_config, monkeyp
 
 def test_run_judge_agent_missing_verdict_field_degrades_to_uncertain(base_config, monkeypatch):
     """Ticket 03 降级：JSON 缺 verdict 字段 → uncertain。"""
-    _patch_gateway_registry_executor(monkeypatch)
-    _patch_facade_start_with_judge_output(
+    _patch_runtime(
         monkeypatch,
         judge_response_text='{"reason": "no verdict"}',  # 缺 verdict
     )
@@ -403,18 +346,11 @@ def test_run_judge_agent_missing_verdict_field_degrades_to_uncertain(base_config
 
 def test_run_judge_agent_session_failed_degrades_to_uncertain(base_config, monkeypatch):
     """Ticket 03 降级：judge session status != completed → uncertain。"""
-    _patch_gateway_registry_executor(monkeypatch)
-    # status="failed" 而非 "completed"
-    failed_outcome = RunOutcome(
-        session_id="will-be-replaced",
-        status="failed",
-        stop_reason="provider_error",
-        iterations=1,
-    )
-    _patch_facade_start_with_judge_output(
+    _patch_runtime(
         monkeypatch,
         judge_response_text='{"verdict": "success", "reason": "不应到达"}',  # 不应被解析
-        outcome=failed_outcome,
+        status="failed",
+        stop_reason="provider_error",
     )
 
     async def run():
@@ -431,17 +367,11 @@ def test_run_judge_agent_session_failed_degrades_to_uncertain(base_config, monke
 
 def test_run_judge_agent_max_iterations_degrades_to_uncertain(base_config, monkeypatch):
     """Ticket 03 降级：judge stop_reason 含 max_iterations → uncertain。"""
-    _patch_gateway_registry_executor(monkeypatch)
-    max_iter_outcome = RunOutcome(
-        session_id="will-be-replaced",
-        status="completed",  # status 可能是 completed 但 stop_reason 是 max_iterations
-        stop_reason="max_iterations",
-        iterations=base_config.judge_max_iterations,
-    )
-    _patch_facade_start_with_judge_output(
+    _patch_runtime(
         monkeypatch,
         judge_response_text='{"verdict": "success", "reason": "不应到达"}',
-        outcome=max_iter_outcome,
+        status="completed",  # status 可能是 completed 但 stop_reason 是 max_iterations
+        stop_reason="max_iterations",
     )
 
     async def run():
@@ -457,12 +387,8 @@ def test_run_judge_agent_max_iterations_degrades_to_uncertain(base_config, monke
 
 
 def test_run_judge_agent_outcome_none_degrades_to_uncertain(base_config, monkeypatch):
-    """Ticket 03 降级：facade.start 返回 None（异常场景）→ uncertain。
-
-    通过让 facade.start 抛异常触发 except 分支（run_judge_agent 内部 catch → JudgeResult uncertain）。
-    """
-    _patch_gateway_registry_executor(monkeypatch)
-    _patch_facade_start_with_judge_output(
+    """Ticket 03 降级：runtime 提交/等待异常 → uncertain。"""
+    _patch_runtime(
         monkeypatch,
         judge_response_text="unused",
         fail_with_exception=RuntimeError("simulated judge session failure"),
@@ -480,13 +406,12 @@ def test_run_judge_agent_outcome_none_degrades_to_uncertain(base_config, monkeyp
     assert "simulated judge session failure" in result.reason or "judge session failed" in result.reason.lower()
 
 
-# ---------- session_id / mode / interrupt registry 验证 ----------
+# ---------- session_id / mode / prompt 内容验证 ----------
 
 
 def test_run_judge_agent_generates_judge_session_id(base_config, monkeypatch):
     """Ticket 03: 不传 session_id 时自动生成 headless-judge-{uuid}。"""
-    _patch_gateway_registry_executor(monkeypatch)
-    _patch_facade_start_with_judge_output(
+    _patch_runtime(
         monkeypatch,
         judge_response_text='{"verdict": "success", "reason": "ok"}',
     )
@@ -505,8 +430,7 @@ def test_run_judge_agent_generates_judge_session_id(base_config, monkeypatch):
 
 def test_run_judge_agent_uses_explicit_session_id(base_config, monkeypatch):
     """Ticket 03: 支持外部传入 session_id。"""
-    _patch_gateway_registry_executor(monkeypatch)
-    _patch_facade_start_with_judge_output(
+    fake = _patch_runtime(
         monkeypatch,
         judge_response_text='{"verdict": "success", "reason": "ok"}',
     )
@@ -522,56 +446,12 @@ def test_run_judge_agent_uses_explicit_session_id(base_config, monkeypatch):
 
     result = asyncio.run(run())
     assert result.session_id == explicit_sid
+    assert fake.submits[0]["session_id"] == explicit_sid
 
 
 def test_run_judge_agent_writes_headless_judge_mode(base_config, monkeypatch):
-    """Ticket 03: judge session 写入 sessions 表 mode='headless_judge'。"""
-    _patch_gateway_registry_executor(monkeypatch)
-    _patch_facade_start_with_judge_output(
-        monkeypatch,
-        judge_response_text='{"verdict": "success", "reason": "ok"}',
-    )
-
-    captured_sid = []
-
-    async def run():
-        # 包一层 patched_start 捕获 session_id
-        original_start = SessionFacade.start
-
-        async def capture_start(self, session_id, text, *, mode="dialogue", model_override=""):
-            captured_sid.append(session_id)
-            return await original_start(self, session_id, text, mode=mode, model_override=model_override)
-
-        monkeypatch.setattr(SessionFacade, "start", capture_start)
-        return await run_judge_agent(
-            main_output=["输出"],
-            trigger_text=base_config.trigger_text,
-            config=base_config,
-        )
-
-    result = asyncio.run(run())
-    assert len(captured_sid) == 1
-    assert captured_sid[0] == result.session_id
-
-    # 重新打开 EventStore 验证 mode
-    verify_store = EventStore(db_path=base_config.db_path)
-    verify_store.init()
-    try:
-        async def verify():
-            session = await verify_store.get_session(result.session_id)
-            assert session is not None
-            assert session.mode == "headless_judge"
-        asyncio.run(verify())
-    finally:
-        verify_store.close()
-
-
-def test_run_judge_agent_cleans_interrupt_registry(base_config, monkeypatch):
-    """Ticket 03/07: run_judge_agent 结束后清理 interrupt registry。"""
-    from server.activity_tracker.headless_runner import get_interrupt_event
-
-    _patch_gateway_registry_executor(monkeypatch)
-    _patch_facade_start_with_judge_output(
+    """Ticket 03: judge session 以 mode='headless_judge' 提交给 runtime。"""
+    fake = _patch_runtime(
         monkeypatch,
         judge_response_text='{"verdict": "success", "reason": "ok"}',
     )
@@ -584,8 +464,39 @@ def test_run_judge_agent_cleans_interrupt_registry(base_config, monkeypatch):
         )
 
     result = asyncio.run(run())
-    # 结束后 interrupt registry 应已清理
-    assert get_interrupt_event(result.session_id) is None
+    assert len(fake.submits) == 1
+    assert fake.submits[0]["session_id"] == result.session_id
+    assert fake.submits[0]["mode"] == "headless_judge"
+    # judge prompt 作为 submit 文本发出
+    assert base_config.trigger_text in fake.submits[0]["text"]
+
+
+def test_run_judge_agent_prompt_carries_execution_evidence(base_config, monkeypatch):
+    """T13: 执行账本进入 judge prompt（判定材料不只是主 agent 自述）。"""
+    fake = _patch_runtime(
+        monkeypatch,
+        judge_response_text='{"verdict": "uncertain", "reason": "账本有失败项"}',
+    )
+    evidence = {
+        "total": 2,
+        "counts": {"completed": 1, "failed": 1},
+        "non_success": [{"id": "c2", "name": "exec_cmd", "status": "failed"}],
+        "rejected_terminal_writes": 0,
+    }
+
+    async def run():
+        return await run_judge_agent(
+            main_output=["输出"],
+            trigger_text=base_config.trigger_text,
+            config=base_config,
+            execution_evidence=evidence,
+        )
+
+    result = asyncio.run(run())
+    assert result.verdict == "uncertain"
+    prompt = fake.submits[0]["text"]
+    assert "工具调用总数：2" in prompt
+    assert "exec_cmd→failed" in prompt
 
 
 # ---------- 资源限制默认值 ----------

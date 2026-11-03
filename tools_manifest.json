@@ -1,7 +1,7 @@
 {
   "version": "1.1",
   "updated_at": "2026-09-18",
-  "description": "LocalAgent 项目工具清单 - GUI 桌面程序读取此文件展示可用工具",
+  "description": "Parcae 项目工具清单 - GUI 桌面程序读取此文件展示可用工具",
   "categories": [
     {
       "id": "system",
@@ -783,7 +783,7 @@
       "id": "start_backend",
       "name": "启动后端服务",
       "category": "system",
-      "description": "启动LocalAgent后端服务（自动UAC提权→杀8766端口旧进程→启动server.main）",
+      "description": "启动Parcae后端服务（自动UAC提权→杀8766端口旧进程→启动server.main）",
       "script": "start.bat",
       "command": "start.bat",
       "usage": "user",

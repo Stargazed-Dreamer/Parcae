@@ -4,9 +4,54 @@
 
 ## 后端重启流程
 
-项目经常需要更新后端代码并重启服务。**必须按以下流程操作，否则会关不掉旧进程或打不开新进程。**
+### 一句话
 
-### 1. 优雅关闭旧后端
+**改代码不等于要重启。** 默认不动后端，让改动等下一次自然重启生效。
+
+### 一、先判断：这次改动不重启会不会「不生效」
+
+只有「进程启动时读一次、之后不再读」的东西，不重启就永远是旧值：
+
+| 类型 | 例子 |
+|---|---|
+| 注册表 / 常量表 | `server/todos/*`、`mcp_whitelist.py`、`browser/site_lessons.py`、`_WIPE_ALERT_KINDS` |
+| 启动时装配的映射 | 路由表、safety 清单、`init_op_path_map` 建的反查表 |
+
+判断方法：看这个值是不是在模块 import 或 startup 事件里就读进了内存。
+**是 → 需要重启才生效；否 → 不用管**。请求进来才执行的代码（绝大多数 endpoint、
+service、工具函数）下一次重启自然带上新逻辑，不需要为它专门重启。
+
+### 二、即使需要重启，也不等于「现在就重启」
+
+先看两件事：
+
+1. **手上有没有活**：在途接口调用、批量任务、调试浏览器 / 终端、用户正在跑的东西。
+2. **旧定义会不会先闯祸**：注册表类改动仍在内存里按旧 cron 走，查 `next_run_at`，
+   看它会不会在你打算重启的时刻之前触发。
+
+两件都不急 ⇒ **改动落盘、记为「待生效」**，等自然边界（用户点头 / 活干完 /
+下次本来就要重启时合并）。回报时写明「已落盘、未生效、需重启」，不要描述成已修好。
+
+### 三、谁来决定重启
+
+**用户。** agent 不得自行决定重启后端（真源 `.agents/memory/TOPIC_backend.md` 第十三节）：
+
+- 三类**许可**（不是义务）：① 注册表类改动且确实需要生效；② 用户点名；③ 端口/环境治理且已安排替身。
+- ⛔「收工了 / 测试完了 / 我想验证一下」都**不是**理由。后端是常驻服务，默认留在原地。
+- ⛔⛔ **已有实例在跑时不要起测试实例**：两者共用 `data/runtime/server_port.json`，后起的会覆盖前者的
+  端口声明 ⇒ 前者 `GET /runtime/port` 回退成 `config.toml` 的首选端口，所有按该端点找后端的消费方连错端口（10-20 实测）。
+  收尾按 PID 精确 `taskkill`，并用 `netstat` + `server_port.json` 的 `pid` **双确认**存量实例还在。
+
+> 下面是「确实要重启时」的操作步骤。**先过完上面三节再往下读**，不要把它当成改完代码的默认下一步。
+
+### 四、操作步骤（仅在确实要重启时）
+
+顺序不能颠倒，否则会关不掉旧进程或打不开新进程。
+
+#### 1. 优雅关闭旧后端
+
+> 用 `start.bat` 启动时，这一步已**自动化**：外壳会先 `POST /shutdown` 再启动新实例
+> （见 §2 的「重复启动先优雅关闭」）。下面是手动场景仍要用的原始步骤。
 
 调用 `POST /shutdown` 接口，后端收到后会自动退出（0.5秒延迟后 `os._exit(0)`）：
 
@@ -18,7 +63,7 @@ curl -X POST http://127.0.0.1:8766/shutdown
 Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8766/shutdown
 
 # 方式三：MCP 工具（如果 MCP 还能用）
-mcp_localagent_exec_python 执行: import urllib.request; urllib.request.urlopen("http://127.0.0.1:8766/shutdown")
+mcp_parcae_exec_python 执行: import urllib.request; urllib.request.urlopen("http://127.0.0.1:8766/shutdown")
 ```
 
 **注意**：
@@ -26,22 +71,102 @@ mcp_localagent_exec_python 执行: import urllib.request; urllib.request.urlopen
 - 如果 `/shutdown` 无响应（后端已卡死），才用 `taskkill /PID <pid> /F` 强杀
 - 关闭后等 2-3 秒再启动新进程，确保端口释放
 
-### 2. 启动新后端
+#### 2. 启动新后端
 
-运行根目录的 `start.bat`，它会自动完成：
+**用户手动启动**：运行根目录的 `start.bat`，它会自动完成：
 
 1. **检测管理员权限** → 无权限则自动 UAC 提权（弹窗申请管理员权限）
 2. **杀掉占用 8766 端口的旧进程** → `netstat` 查找 + `taskkill /F`
-3. **启动后端** → `.venv\Scripts\python.exe -m server.main`
+3. **启动后端** → `.venv\Scripts\python.exe -m server.main`（经下面这个外壳）
+
+> 📋 **退出监控（2026-10-30 新增，`tools/runtime/run_backend.py`）**
+> 第 3 步现在走一层外壳。外壳**只记录、不改后端行为**（stdin 仍接控制台，Ctrl+C 照旧两边都收）：
+> - `data/logs/backend_console_YYYYMMDD.log` —— 子进程 stdout+**stderr 全量**（以前 traceback 只打在窗口里，窗口一关就丢）
+> - `data/logs/backend_shell_YYYYMMDD.log` —— **外壳自己**的输出：启动横幅、接管过程、每 5 分钟一行采样、退出摘要
+>   （⛔ 与上一份**必须分开**：两个写入方共用一个文件时，子进程把文件写大之后外壳的写入会**整段丢掉**，
+>   而且 `ConsoleTee` 的 `except OSError: pass` 会把它吞成静默——2026-11-01 实测连「子进程已启动」都没留下）
+> - `data/logs/backend_mem_YYYYMMDD.jsonl` —— 每 30s 一条：**真正干活的后端进程**的 private commit /
+>   working set / 句柄 / 线程 + 系统可用内存与页面文件水位；窗口里每 5 分钟打一行
+>   （⚠ 采的是**进程树里真正跑 `server.main` 的那个**，不是 `Popen` 句柄——见下面那条坑）
+> - `data/logs/backend_exit.jsonl` —— 退出时追加：exit code（十进制 + `0x…` + **释义**）、存活时长、
+>   峰值内存、**「优雅关闭 vs 硬杀 vs 原生崩溃」判定**、`crash_tail`（**死前最后 10 行输出**，现场就在这）、
+>   有无 Traceback
+> - `data/runtime/server_birth.json` —— 出生登记：启动时刻、子进程 PID、**父进程链**、命令行
+>
+> 窗口里启动时会先打印**最近 3 次退出记录**，退出时打印摘要 + 死前输出 + stderr 里的 Traceback。
+> 下次再"莫名其妙死了"：先看 `backend_exit.jsonl` 最后一行（exit code 能直接区分
+> `0xC0000005 访问冲突（原生崩溃）` / `0xC000012D 超提交上限` / `0xC0000017 分配失败` / `1 通用错误`），
+> 再跑 `python tools/runtime/backend_postmortem.py`。
+> 自检（不碰 8766）：`python tools/runtime/run_backend.py --self-test` —— **35 项**，含
+> 「崩掉必判非优雅」「优雅关闭必判优雅」「硬杀形态 exit=1 无 traceback」「优雅接管存量实例」
+> 「taskkill 降级真能收掉进程」「**原生崩溃不被收尾标记骗过**」「**采样抓到真身而非转发壳**」
+> 「**访问冲突时 faulthandler 记下栈并指到调用帧**」「**致命信号下进程真死且仍留栈**」九条腿。
+> 后两条是用真崩溃验的（不是断言）：`ctypes.string_at(0)` 触发纯 AV（形态与 18:10 那次一致），
+> `faulthandler._sigsegv()` 触发致命信号（进程真死）。
+>
+> ⛔ **两个实测踩过的坑（2026-10-30 18:10 那次暴露，都已修）**
+> 1. **退出码必须优先于日志标记**。那次后端原生崩溃 `0xC0000005`，但崩溃途中打到了
+>    「记忆系统已关闭」这行收尾日志，旧逻辑据此判成**优雅关闭**，把最关键的结论写反了。
+>    现在 `_judge_graceful()` 先看 exit code：非 0 一律判异常，不再被日志骗。
+> 2. **`Popen` 句柄是转发壳，不是后端**。`.venv\Scripts\python.exe` 是 uv 的 launcher（实测
+>    1MB private / 57 句柄 / 1 线程），真正跑 `server.main` 的是它派生的孙子进程
+>    （`<user_home>\AppData\Roaming\uv\python\cpython-3.12.12-...\python.exe`）。
+>    旧实现直接采 `proc.pid`，68 个样本全是 0.8MB，等于没采。现在沿进程树按
+>    「命令行含 `server.main` → private 最大」两档选真身。
+> 3. **原生崩溃时 stderr 里通常没有本次的 traceback**。`has_traceback=True` 可能只是运行期
+>    的历史异常（那次是 17:49 的 MCP `Task group is not initialized`）。所以摘要里同时给
+>    `crash_tail`——**死前最后输出了什么**才是真现场。
+>
+> 🔬 **`PYTHONFAULTHANDLER=1` 已默认注入子进程环境**（`run_backend.py:680`）。原生崩溃
+> （`0xC0000005` 这类 SEH 异常）Python 层来不及打 traceback，窗口里什么都留不下；
+> faulthandler 在 Windows 上装 VEH，能在访问冲突时打印**所有线程的 Python 栈**，
+> 直接落到 `backend_console_*.log`。**这条链路已用真崩溃验过**，输出长这样：
+>
+> ```
+> Windows fatal exception: access violation          ← 原生 AV
+> Current thread 0x00075344 (most recent call first):
+>   File "...\ctypes\__init__.py", line 525 in string_at
+>   File "<string>", line 6 in dive                  ← 崩在哪一帧，看这里
+> ```
+>
+> 另一种机制会给 `Fatal Python error: Segmentation fault`（CRT abort 路径，退出码 3）。
+> **搜这两个关键词任意一个**：`Windows fatal exception` / `Fatal Python error`。
+>
+> 📖 **下次崩了按这个顺序读**（选项 C 的全部动作，不用改代码）：
+> 1. `data/logs/backend_exit.jsonl` 最后一行 → `exit_code`。`3221225477` = `0xC0000005` 原生崩溃
+>    ⇒ 往下走第 2 步；其他码先查 `exit_hint`。
+> 2. 同一行看 `crash_tail`（死前最后 10 行）→ 崩之前最后一件事是什么。
+> 3. `grep -a -A 12 "Windows fatal exception" data/logs/backend_console_YYYYMMDD.log`
+>    → **最顶那一帧就是调用点**（例如 `paddle ... predict` / `torch ...`），这就是凶手。
+> 4. 若 3 什么也没搜到（faulthandler 没赶上，比如崩在非 Python 线程或栈已破坏），
+>    退回去看 `backend_mem_*.jsonl` 崩前内存曲线 + WER 的 `故障模块`（`mkldnn.dll` /`torch_cpu.dll` 等）。
+>
+> 🔁 **重复启动先优雅关闭（2026-10-30，替代 start.bat 里的直杀）**
+> 外壳在起自己之前，先读 `data/runtime/server_port.json` 的 `port` / `pid`，对存量实例发
+> `POST /shutdown`（走后端完整清理链：Screen/System/VL/记忆/Loop/浏览器 session…），等它自己退出；
+> 逐级降级判定与记账全在窗口和 `backend_exit.jsonl` 的 `takeover` 字段里：
+> `[1/3] POST /shutdown 成功 → 等待退出（默认 30s）` → `[2/3] taskkill /PID`（软，WM_CLOSE）
+> → `[3/3] taskkill /F`。pid 文件指向的进程已不在时会顺手清掉陈旧 `server.pid`，不再误杀。
+> `start.bat` 里原有的 `/F` 硬杀块**只在外壳文件缺失时**才执行（保底路径不变）。
+> 关掉接管：`--no-takeover`；改等待时长：`--graceful-timeout 60`。
+> 注意：`/shutdown` 有 30s 看门狗，若清理链卡住它自己会强退，外壳这时只会看到"等了 30s 没退" ⇒ 再降级。
 
 ```bash
 # 直接双击或命令行运行
 start.bat
 ```
 
-**管理员权限说明**：键鼠操控（`SetCursorPos`）需要管理员权限，否则 Windows UIPI 会阻止。`start.bat` 会自动检测并申请提权。
+**管理员权限说明**：键鼠操控（`SetCursorPos`）需要管理员权限，否则 Windows UIPI 会阻止。`start.bat` 会自动检测并申请提权——但这是**用户手动启动**的入口。
 
-### 3. 验证启动成功
+**⚠️ agent 自启动不要用 `start.bat`**：它会在无管理员权限时弹 UAC，agent 不应替用户点提权。agent 自主启动后端一律用非提权命令：
+
+```bash
+env -u PYTHONPATH PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m server.main
+```
+
+（非沙箱 shell 可去掉 `env -u PYTHONPATH`。）非提权后端的 MCP / REST / 浏览器 / 截图 / OCR 正常，但 `screen.admin=false`，键鼠与 UIA 激活窗口会被 UIPI 拦截；需要这些能力时请用户手动运行 `start.bat`，agent 不替用户触发 UAC。
+
+#### 3. 验证启动成功
 
 ```bash
 curl http://127.0.0.1:8766/health
@@ -49,7 +174,7 @@ curl http://127.0.0.1:8766/health
 
 返回 `"status": "ok"` 即启动成功。
 
-### 4. 从 WorkBuddy 沙箱 shell 内启动后端的陷阱（2026-09-03 实测）
+#### 4. 从 WorkBuddy 沙箱 shell 内启动后端的陷阱（2026-09-03 实测）
 
 **症状**：从 WorkBuddy（CodeBuddy）的沙箱 bash 里启动后端，进程会在**运行一段时间后或启动瞬间被 `SystemExit(1)` 击杀**——日志末尾是 `sitecustomize.py` 的批量删除守卫报错，不是后端自己的异常。2026-09-03 实测：v2 跑了 ~10 分钟后暴毙，v3 启动即失败。
 
@@ -63,16 +188,104 @@ env -u PYTHONPATH PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m server.main
 
 - `env -u PYTHONPATH` 是关键——去掉沙箱注入的 sitecustomize 钩子
 - 不要用沙箱化的后台任务方式拉后端；`start.bat` 双击/命令行直启不受此问题影响
+- agent 自启动走上面的非提权命令即可，同样不需要也不应该触发 UAC
 - 排查辅助：`ps -W | grep python` 看进程存活时长；后端日志写 `temp/backend_restart_*.log` 可定位死亡时刻
+
+### 关停卡住的定位（2026-10-16 整改）
+
+后端有**两条关停路径**，行为不同，别混：
+
+| 路径 | 触发 | uvicorn 侧 | 收尾方式 |
+|------|------|-----------|----------|
+| 优雅关停 | 控制台 `Ctrl+C`（SIGINT） | 关监听 → 等在飞连接/任务结束 → 跑 lifespan 清理 | 进程正常退出，之后 `start.bat` 的 `pause` 会停住窗口 |
+| 硬关停（文档推荐） | `POST /shutdown` | **完全绕过** | 0.5s 后手动清理子进程 → `os._exit(0)`，无完成回执 |
+
+**曾经的卡点**：uvicorn 的 `timeout_graceful_shutdown` 默认 `None`，即"等待连接的关闭"这一步**无限等**；而本机未装 httptools ⇒ 走 h11，h11 的 `Connection.shutdown()` 对**有在飞请求**的连接只置 `keep_alive=False`、不关连接 ⇒ 只要有 1 个请求不返回（LLM 池排队 / 未断开的 SSE / IDE 的 MCP 长连接），进程就永久停在 `Waiting for connections to close. (CTRL+C to force quit)`。特征：**请求还能继续被服务**（访问日志照刷），但 `data/logs/server.log` 里一条清理日志都没有——uvicorn 自己的关停日志只进控制台（`uvicorn.error` 挂在 `uvicorn` 父 logger 上，`propagate=False`）。
+
+**现在有三层保护**：
+
+1. `[server] graceful_shutdown_timeout_secs`（默认 15s）：uvicorn 到点打 `Cancel N running task(s), timeout graceful shutdown exceeded`、取消挂起任务，再照常执行清理；`[server] shutdown_cleanup_deadline_secs`（默认 30s）：清理链总兜底，超时强制退出。两条路径都挂了兜底。
+2. 清理链**逐步打点**：文件日志里最后一条 `关闭步骤: xxx` 就是被阻塞的那一步（写入 `data/logs/server.log`）。
+3. 想立刻通关：**再按一次 `Ctrl+C`** —— uvicorn 收到第二次 SIGINT 会置 `force_exit`，直接跳过等待阶段。
+
+**卡住时的三分支判据**（在另一个终端跑 `netstat -ano | findstr :8766` 与 `curl.exe -s -m 3 http://127.0.0.1:8766/health`）：
+
+- 无 `LISTENING` 但有 `ESTABLISHED`、health 连不上 ⇒ 卡在 uvicorn 等待阶段；那几条 ESTABLISHED 就是"谁在拽着连接"
+- 仍有 `LISTENING` 且 health 正常 ⇒ 关停信号还没生效
+- 两者都无、health 拒绝 ⇒ 已进清理链，看日志最后一条 `关闭步骤`
 
 ### 常见问题
 
 | 问题 | 原因 | 解决 |
 |------|------|------|
 | 端口 8766 被占用 | 旧进程未完全退出 | 等 2-3 秒，或手动 `netstat -ano \| findstr :8766` 找 PID 杀掉 |
+| 端口 8766 **绑不上**（报 `WinError 10013`，且 `netstat` 里**查不到任何占用**） | ⛔ **不是"被占用"**，是 WinNAT/Hyper-V 把它划进了**端口保留区**（本机真凶 `Tcpip\Parameters\MaxUserPort=15000`） | ⛔ **别找 PID 杀——没有进程可杀**。用 `netsh int ipv4 show excludedportrange protocol=tcp` 确认，然后走 `tools/disk_io_audit/fix_port_and_start.py`（`net stop winnat` → 起后端 → `net start winnat`）。机制、判据与三档对策见 `docs/environment-constraints.md`「端口保留区」章；⚠️ 只做临时解堵，**重启后仍会复发** |
 | `start.bat` 闪退 | UAC 被拒绝 | 右键 → 以管理员身份运行 |
-| MCP 工具不可用 | 后端未启动 | 先运行 `start.bat` |
+| MCP 工具不可用 | 后端未启动 | agent 用非提权命令自启动；需要键鼠权限时请用户运行 `start.bat` |
 | 沙箱里起的后端莫名暴毙（`SystemExit(1)`） | PYTHONPATH 里沙箱注入的 sitecustomize 删除守卫击杀 | 见上文「第 4 节」：`env -u PYTHONPATH` 非沙箱启动 |
+
+## butler runtime（对话循环宿主）
+
+`butler runtime` 是独立进程：持有对话账本（SQLite）与所有会话循环。桌面面板、headless 作业、probe 都是它的客户端；8766 后端只提供 LLM/工具/审批能力，**不再持有对话循环**。架构见 [chat-engine.md](file:///<project_root>/docs/chat-engine.md)。
+
+### 启动
+
+```powershell
+# 双击或命令行运行（手工启动；开机自启未做）
+.\start_butler_runtime.bat
+
+# 拿实际端口（首选 18766，被占或落进 WinNAT 保留区会顺延）
+Get-Content data\runtime\butler_runtime.json
+curl.exe -s http://127.0.0.1:18766/health        # 端口以声明里的 port 为准
+curl.exe -s http://127.0.0.1:18766/runtime/port
+```
+
+- 启动脚本用 `--supervise`：子进程非零退出按 1s→2s→5s→30s 退避重启。
+- 已有健康 runtime 时再启动一次：第二个进程打印 `already running` 并**退出 0**，不改声明。
+- 账本 `format_version` 比代码新 → 退出码 2（致命），supervisor 不重启；先升级代码，**不要**手工改库里的版本号。
+- 日志：`data/runtime/butler_runtime.log`（滚动）。
+
+### 停止
+
+- **推荐**：关掉启动 runtime 的那个窗口（Ctrl+C）。supervisor 会 terminate 子进程后退出 0。
+- 需要强制停：先找 supervisor（不是子进程）再整树结束，否则只杀子进程会被 1 秒后拉起：
+  ```powershell
+  Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*lib.agent_runtime.server --supervise*' }
+  taskkill /PID <supervisor_pid> /T /F
+  ```
+- 声明文件里的 `pid` 是**子进程** pid；`taskkill` 掉它只会触发 supervisor 自愈。
+- **不要用 `start.bat` 停 runtime**：它管理的是 8766 后端，停了后端只会让 LLM/工具调用失败，runtime 进程还在。
+
+### 迁移与备份
+
+- 首次用新版本启动会按迁移链升级账本（v1→v2：事件域 + 三投影）；失败整批回滚，进程退出。
+- 备份**必须用 SQLite backup API**，WAL 库按文件 copy 会缺行：
+  ```python
+  import sqlite3
+  src = sqlite3.connect(r"data/client/agent.db")
+  dst = sqlite3.connect(r"data/client/agent.db.bak")
+  src.backup(dst)
+  dst.close(); src.close()
+  ```
+
+### 重建投影
+
+读路径报 `projection_missing`（或手工改过库）后，从账本重建：
+
+```powershell
+curl.exe -s -X POST http://127.0.0.1:<runtime_port>/admin/projections/rebuild -H "Content-Type: application/json" -d "{}"
+# 单会话：{"session_id":"sess-xxx"}
+```
+
+### 启动恢复
+
+runtime 启动时（对外 ready 前）自动跑 reconcile：残留 `streaming/awaiting_tools` 会话转 `interrupted`、补缺失 tool_result、合并未完成 streaming 事件。结果可查：
+
+```powershell
+curl.exe -s http://127.0.0.1:<runtime_port>/admin/recovery
+```
+
+桌面面板的"检测到 N 个异常退出的会话"banner 就来自这里；GUI 不再自己 reconcile。
 
 ## API 常见陷阱
 
@@ -105,7 +318,7 @@ curl.exe -s -G "http://127.0.0.1:8766/guide" --data-urlencode "task=开虚拟机
 ```
 
 **避免方法**：
-- 判协议层行为优先走 **MCP 工具**（`mcp_localagent_agent_guide` 等），JSON 传输不经 shell 编码
+- 判协议层行为优先走 **MCP 工具**（`mcp_parcae_agent_guide` 等），JSON 传输不经 shell 编码
 - 或 `python -c` / `urllib` 自己拼 UTF-8 查询
 - 必须用 curl 时：**自己按 UTF-8 预先把中文百分号编码好**写进 URL（如上面那串 `%E5%BC%80...`），
   不要用 `--data-urlencode` 让 shell 编码
@@ -161,7 +374,7 @@ AGENTS.md / _index.md / skill 文件中的注释可能过时（如"XX 尚未创�
 所有代码、脚本、MCP 工具调用都不得返回大段 base64 数据（截图、文件、音频等）到 LLM 上下文。遇到 base64 立即改代码或调用方式：
 - 截图给多模态 LLM：用 `capture_screen(format="inline")`（返回 ImageContent，由 MCP 协议处理，不进文本上下文）
 - 截图特征分析：用 `screen_analyze`（返回纯文本的颜色/亮度/异常分析，无 base64）
-- 截图+OCR：优先 `localagent_advanced_tool(tool="screen_ocr", params={...})`，直接返回文字和 bbox，不经过 base64
+- 截图+OCR：优先 `parcae_advanced_tool(tool="screen_ocr", params={...})`，直接返回文字和 bbox，不经过 base64
 - 文件读取：用 `docviewer_read` 或 `exec_python` 提取文本，绝不返回 base64
 - **违反此规则会导致上下文窗口被数 MB 的 base64 字符串撑爆，LLM 无法继续工作**
 
@@ -180,7 +393,7 @@ AGENTS.md / _index.md / skill 文件中的注释可能过时（如"XX 尚未创�
 优先调用高级工具 `screen_ocr`，一步截图并返回 `text + details[].box`，不返回图片数据：
 
 ```
-localagent_advanced_tool(
+parcae_advanced_tool(
     tool="screen_ocr",
     params={"mode":"window", "hwnd":123, "engine":"ocr"}
 )
@@ -226,9 +439,9 @@ Pydantic 验证失败时返回 422，响应体包含 `detail` 数组，每项有
 
 ## 终端会话 API（长时间运行命令）
 
-对于模型下载、pip 安装、批量处理等长时间运行命令，使用终端会话 API 而非 `/exec/python`（后者有 30s 默认超时）：
+对于模型下载、pip 安装、批量处理等长时间运行命令，直接使用终端会话 API。`/exec/python` 自 v15 起**也走同一套 terminal 机制**（写 `temp/exec_<uuid>.py` → spawn），它默认只内联等 `[server] exec_python_inline_wait_secs`（默认 10）秒：子进程在该窗口内结束就返回 `status="done"` + 完整 stdout/exit_code，否则返回 `status="running"` + `terminal_id`，由调用方自己 `exec_inspect`——**不存在"到点被杀"的超时**（spawn 侧 `timeout=0`）。
 
-> **注意**：当 agent 平台的终端功能较差或无法满足需求时，才考虑使用本项目的终端 API。本项目的终端实现可能较为原始，主要用于后端长时间运行命令的监控和管理。
+> **注意**：本项目的终端 API 是**后端常驻进程的执行面**，不是"agent 平台终端不好用时才考虑的替代"——启动调试浏览器（CDP 9222）这类必须长过 harness 会话的进程，**只能**走 `exec_terminal_spawn`（见 `docs/environment-constraints.md`「调试浏览器实例」回收机制小节），harness 侧 Bash / 后台任务起的进程会随会话清理被回收。运行中终端数量有硬上限（常量 `_MAX_RUNNING_TERMINALS`，真源在 `server/exec.py`），不是无界创建。
 
 | MCP 工具 | 用途 |
 |---------|------|
@@ -261,11 +474,11 @@ Pydantic 验证失败时返回 422，响应体包含 `detail` 数组，每项有
 
 1. **首选：[data/activity/hourly/](file:///<project_root>/data/activity/hourly) 目录下的 `YYYYMMDD_HH.md` 文件** — 这是本功能的本源数据，由 `hourly_summarize` loop 任务每整点自动生成。**先读这些文件，不要先查 git log**。
 2. **补全缺失时段**：用 `git log --since="YYYY-MM-DD 05:00" --until="now"` 补全 hourly summary 缺失或失败的时段（注意 since 用 05:00 不是 00:00，与日期划分规则一致）。
-3. **memory 仅作参考**：`<user_home>\.trae-cn\memory\projects\-f-project-temp-localAgent\YYYYMMDD\topics.md` 提供会话级上下文，但**不是主要数据源**。
+3. **memory 仅作参考**：`<user_home>\.trae-cn\memory\projects\-f-project-temp-Parcae\YYYYMMDD\topics.md` 提供会话级上下文，但**不是主要数据源**。
 
 **易踩的坑**：
 - hourly summary 文件可能整小时缺失（LLM 失败、后端重启）— 此时必须用 git log 补全
-- 若 hourly summary 标注 "VL 屏幕描述数据整小时缺失" → `screen_vl` loop 任务可能被暂停，查 `loop_list_tasks`（走 `localagent_advanced_tool` 网关调 `loop_status`）确认
+- 若 hourly summary 标注 "VL 屏幕描述数据整小时缺失" → `screen_vl` loop 任务可能被暂停，查 `loop_list_tasks`（走 `parcae_advanced_tool` 网关调 `loop_status`）确认
 - 若 hourly summary 显示"LLM 返回空内容"占位文件 → `hourly_summarize` 任务最近失败，可手动 `loop_run_task` 重试
 - **不要在日报中加入 agent 的 task_closure 工作报告** — 日报是用户的活动记录，不是 agent 的收尾报告，两者是不同的东西
 
@@ -314,13 +527,13 @@ Pydantic 验证失败时返回 422，响应体包含 `detail` 数组，每项有
 
 ```
 # 触发关机
-localagent_advanced_tool(
+parcae_advanced_tool(
     tool="auto_shutdown_trigger",
     params={"task_id": "game_afk", "reason": "游戏完成", "screenshot": true, "dry_run": false}
 )
 
 # 取消关机
-localagent_advanced_tool(
+parcae_advanced_tool(
     tool="auto_shutdown_cancel",
     params={"dry_run": false}
 )
@@ -529,6 +742,27 @@ localagent_advanced_tool(
 
 向后兼容：调用方零改动，`keep_models=true` 等价于 `restore_preload=true`（默认值已开启）。
 
+#### 空闲回收（`idle_unload_sec`，2026-10-23 补）
+
+`restore_preload` 单独存在时有个缺口：它只管「被逐出后要不要自动重载」，**不管「用完了什么时候释放」**，
+而 OCR 的加载发生在请求路径里（`_run_classic_ocr → models.get_ocr()` 懒加载），所以关掉常驻后
+任何一次 OCR 调用都会把模型重新拉回内存并一直挂着——表现为「关了常驻还是常驻」。
+
+补法是在管理器里加空闲回收，**门闸仍是 `keep_models`**（不新增第二个开关）：
+
+| 配置 | 位置 | 含义 |
+|------|------|------|
+| `idle_unload_sec` | `[model_manager]`（全局，默认 `0`=禁用） | 模型空闲超过 N 秒且常驻关闭时自动卸载 |
+| `idle_unload_sec` | `[model_manager.models.<id>]`（覆盖全局） | 本机 OCR 配 10 秒 |
+| `idle_tick_sec` | `[model_manager]`（默认 `1.0`） | 空闲判定循环周期（独立于 5s 压力采样） |
+
+- 判据是 **`last_active_at`**（`get_ocr()` 进入 + 每次推理结束刷新），不是 `loaded_at`；
+  否则「加载很久但一直在用」会被误判为空闲。
+- 跳过条件：未加载 / `in_flight>0` / 冷却中 / 常驻开启。回收与压力逐出共用串行锁，锁内复查。
+- 可观测：`/ocr/status` 与 `/health.ocr` 的 `idle_unload_sec`、`idle_remaining_sec`（倒计时，`null`=不适用）、
+  `last_active_at`。GUI「模型池 → OCR」显示倒计时，并提供「加载模型 / 卸载模型 / 常驻开关」三个按钮。
+- 想恢复旧行为（永不自动卸）：把 `idle_unload_sec` 删掉或设 `0`。
+
 ### 配置参考
 
 `config.example.toml` 的 `[model_manager]` 段（详见 `temp/sdd/model-lifecycle-manager/design.md` §9）：
@@ -574,7 +808,7 @@ enabled = false
 | 问题 | 原因 | 解决 |
 |------|------|------|
 | `POST /models/ocr/load` 返回 503 | GPU 压力态 REFUSING/PROBE_DEGRADED | 等压力下降到 ARMED/NORMAL 后重试；或调 `/models/pause` 手动超驰（注意：PAUSED 期间逐出也暂停） |
-| `POST /models/ocr/load` 返回 503 reason="reload_degraded" | OCR 连续 ≥3 次加载失败 | 重启后端（`POST /shutdown` + `start.bat`） |
+| `POST /models/ocr/load` 返回 503 reason="reload_degraded" | OCR 连续 ≥3 次加载失败 | 重启后端（`POST /shutdown` 后由用户运行 `start.bat`，或 agent 用非提权命令重启） |
 | `GET /models` 返回空 models 列表 | ModelLifecycleManager 启动失败 | 查后端日志 "ModelLifecycleManager 启动失败"；管理器降级为透传模式（模块行为回退现状，无自动监控） |
 | `GET /models/pressure` 的 `gpu.probe_status = "absent"` | 该机没有 NVIDIA 卡/驱动（NVML 库由驱动提供） | 正常降级，不是故障：GPU 监控失效、准入放行。CPU-only 机器另把 `[models] paddle_device` 设 `"cpu"` 让推理真跑 CPU |
 | `/health.model_manager` 字段缺失 | HealthResponse schema 漏声明 | 已修复（design §10 v2 修订），如仍缺失查 `server/core/health.py` 是否含 `model_manager: dict = {}` 字段 |
@@ -715,7 +949,7 @@ def _on_data(self, data):  # 主线程，填充 widget
 **v3 新增（参考 Shadow-Weave/HMS）**：
 - **EvidenceLedger 中间层**：`memory_search` 改为 messages（BM25/向量）+ facts（SQL LIKE）+ summaries（SQL LIKE）三源召回，经证据组织器做 Jaccard 交叉佐证 + 时间窗口冲突检测。原原始事实不变，但推理结论可被审视和修正（HMS 核心）
 - **facts 结构化字段**：`memory_set` 顶层支持 `fact_type`/`occurred_at`/`consumption_contexts`/`trigger_keywords`，写入 `facts` 表独立列。`consumption_contexts` 支持 SQL LIKE 索引优化匹配 task_type
-- **SearchTracer 检索可观测性**：自动记录 query/子检索延迟/融合结果，支持 `sample_rate` 采样率。新增 `GET /memory/search/traces` 等端点（走 `localagent_advanced_tool` 网关）
+- **SearchTracer 检索可观测性**：自动记录 query/子检索延迟/融合结果，支持 `sample_rate` 采样率。新增 `GET /memory/search/traces` 等端点（走 `parcae_advanced_tool` 网关）
 
 **使用原则**：
 - **任务完成时写记忆**：每个 Skill 工作流结束后，将任务进度、关键结果写入记忆（含 `consumption_contexts` + `trigger_keywords` 确保未来可消费）
@@ -725,7 +959,7 @@ def _on_data(self, data):  # 主线程，填充 widget
 
 **记忆生成**（用户触发）：用户说"生成记忆"/"保存经验"/"记忆总结"时 → 调 `agent_guide(task_type='recurring.memory_generation')` 获取 5 步工作流（recall→classify→dedup→write→optional_maintain）。结构化记忆含 `type`/`consumption_contexts`/`trigger_keywords` 字段，确保未来任务能消费。
 
-**记忆维护器**（后端自动）：每 6 小时运行一次（下次记忆 API 调用时触发），老化 >7 天未更新记忆为 stale + 用 LLM 验证准确性。同时自动清理过期 `search_traces` 和 `evidence_ledger` 记录。手动触发：`POST /memory/maintain`（force=true）。
+**记忆维护器**（后端自动）：每 6 小时运行一次（下次记忆 API 调用时触发），流程为「垃圾预过滤 → 老化评分（>7 天未更新记 stale） → 指标日聚合 → 清理过期明细」，**零 LLM 调用**（LLM 验证器已于 2026-10-31 删除）。同时自动清理过期 `search_traces` 和 `evidence_ledger` 记录。手动触发：`POST /memory/maintain`（force=true）。
 
 > 三层架构、语义检索、记忆压缩、自动记录、完整 API 表、记忆生成工作流详解、维护器配置详见 `docs/memory-system.md`。设计文档见 `.agents/wip/memory_system_hms_improvement.md`。
 

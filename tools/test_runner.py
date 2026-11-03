@@ -7,10 +7,12 @@
    跑测试时能实时看到进度和失败，跑完有完整 log（替代 capture_output=True 黑盒）。
 2. JUnit XML：--junit-xml 结构化输出，解析 XML 而非文本（pytest-xdist 并行时
    文本输出顺序乱，正则解析易漏；XML 是结构化真源）。
-3. 崩溃检测：检查 returncode，非 0/1/2/3/4/5 时标记"进程崩溃"（如
-   3221225477 = STATUS_ACCESS_VIOLATION，conftest.py:95-122 已知问题），
-   不假装"0 失败"假绿。
-4. 报告生成：解析 XML 生成 test_failure_report.md，含崩溃状态 + 失败表格。
+3. 崩溃检测：检查 returncode，非 0/1/2/3/4/5 时标记"进程崩溃"并把 Windows 异常码
+   翻成人话（如 0xC0000409 = __fastfail，abort()/Qt qFatal 走它；0xC0000005 =
+   ACCESS_VIOLATION），不假装"0 失败"假绿。
+4. 崩溃现场：XML 是 pytest 收尾时才写的，硬崩就没有 XML。此时把**日志末尾**和
+   "最后停在哪个测试"直接摊进报告/控制台——否则报告里只剩一个裸退出码。
+5. 报告生成：解析 XML 生成 test_failure_report.md，含崩溃状态 + 失败表格。
 
 退出码分类（pytest 官方 + Windows 崩溃）：
   0  = 全过
@@ -23,6 +25,7 @@
 
 详见 docs/dev-workflow.md "测试运行与问题定位流程" 段。
 """
+import re
 import subprocess
 import sys
 import time
@@ -41,6 +44,42 @@ QUICK_MARKERS = (
     "not gpu and not browser and not real_backend and not network "
     "and not chaos and not e2e and not gui and not migration"
 )
+
+
+IHAVEREAD_FLAG = "--ihaveread"
+
+# 闸门提示语只说"去读手册"——不点名是哪一份手册、也不点名缺哪个参数。
+# AGENTS.md「测试」节已经写明测试手册是哪一份，照着做即可；说破了就退化成"照抄参数"。
+IHAVEREAD_REFUSAL = "拒绝执行：请先阅读测试手册，按手册里的测试使用方法补齐参数后再运行。"
+
+
+def require_ihaveread(argv: list[str]) -> int | None:
+    """测试入口的「读过手册」闸门：不带 --ihaveread 就拒绝执行。
+
+    返回 None = 放行；返回非 0 = 调用方直接 return 该退出码。
+    ⚠️ 这不是 pytest 参数：调用方必须把它从下传给 pytest 的参数里剔除。
+    """
+    if IHAVEREAD_FLAG in argv:
+        return None
+    print("❌ " + IHAVEREAD_REFUSAL, file=sys.stderr)
+    return 2
+
+
+# Windows 致命异常码（低 32 位）→ 人话。
+# ⚠️ 0xC0000409 名字叫 STACK_BUFFER_OVERRUN，实践中它就是 `__fastfail` 的通用码：
+# MSVC 的 abort()/terminate()、Qt 的 qFatal() 都走它。进程被内核直接终止，
+# Python 层不会有 traceback（faulthandler 也来不及打印）——所以崩溃现场只能靠日志末尾。
+WINDOWS_FATAL_CODES = {
+    0xC0000409: "0xC0000409 __fastfail（abort()/Qt qFatal 一类快速失败，无 Python traceback）",
+    0xC0000602: "0xC0000602 FAIL_FAST_EXCEPTION（RaiseFailFastException）",
+    0xC0000005: "0xC0000005 ACCESS_VIOLATION（野指针/越界访问）",
+    0xC0000374: "0xC0000374 HEAP_CORRUPTION（堆被写坏）",
+    0xC00000FD: "0xC00000FD STACK_OVERFLOW（栈溢出）",
+    0x80000003: "0x80000003 BREAKPOINT（断言/断点）",
+    0xC000001D: "0xC000001D ILLEGAL_INSTRUCTION（非法指令）",
+    0xC0000135: "0xC0000135 DLL_NOT_FOUND（缺 DLL）",
+    0xC0000139: "0xC0000139 ENTRYPOINT_NOT_FOUND（DLL 入口缺失）",
+}
 
 
 def classify_exit(rc: int) -> tuple[str, str]:
@@ -64,9 +103,63 @@ def classify_exit(rc: int) -> tuple[str, str]:
     }
     if rc in error_map:
         return f"pytest_error_{rc}", error_map[rc]
-    # Windows fatal exception（如 3221225477 = STATUS_ACCESS_VIOLATION）
-    # conftest.py:95-122 已知：全量测试时随机崩溃，JUnit XML 无 failure/error 记录
-    return f"crashed_{rc}", f"进程崩溃（exit={rc}，可能是 STATUS_ACCESS_VIOLATION 等 Windows fatal exception）"
+    # 非 pytest 退出码 = Windows 致命异常。翻成人话，别再写"可能是 ACCESS_VIOLATION"
+    # ——0xC0000409 是最常遇到的那个，而它的名字（STACK_BUFFER_OVERRUN）也具有误导性。
+    code = rc & 0xFFFFFFFF   # 有的调用方传负数形式，统一按低 32 位查表
+    known = WINDOWS_FATAL_CODES.get(code)
+    if known:
+        return f"crashed_{rc}", f"进程崩溃（exit={rc} = {known}）"
+    return f"crashed_{rc}", (f"进程崩溃（exit={rc} = 0x{code:08X}，不是 pytest 退出码；"
+                             f"看日志末尾停在哪个测试）")
+
+
+LOG_TAIL_LINES = 25        # 报告里摊几行日志末尾
+LOG_TAIL_BYTES = 16 * 1024  # 只读文件尾这么多字节，不整读（红批日志可能几十 MB）
+
+# -vv 下 pytest 一行一条：`tests/x.py::TestY::test_z PASSED [ 12%]`
+# 崩溃时那一行没有结果后缀 —— 它就是把进程带崩的测试。
+_NODEID_RE = re.compile(r"^\s*(\S+\.py::\S+)")
+# 默认 verbosity 只有文件级进度：`tests/x/test_y.py ..F`
+_FILEPROG_RE = re.compile(r"^\s*(\S+\.py)\s+[.sFEx]{2,}")
+
+
+def tail_lines(path: Path, limit: int = LOG_TAIL_LINES) -> list[str]:
+    """取日志末尾若干非空行（只读尾部 16KB，不整读）。
+
+    存在的理由：JUnit XML 是 pytest `sessionfinish` 才写的，进程硬崩时根本没有 XML，
+    报告里就只剩一个裸退出码。把日志末尾摊出来，才不用人去开文件猜死在哪。
+    """
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            start = max(0, size - LOG_TAIL_BYTES)
+            fh.seek(start)
+            raw = fh.read()
+    except OSError:
+        return []
+    text = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+    if start and lines:
+        lines = lines[1:]   # 从中间切进来的第一行是半截
+    return lines[-limit:]
+
+
+def last_test_line(lines: list[str]) -> str:
+    """从日志末尾找"最后停在哪条测试"。
+
+    优先 nodeid（`-vv` 一行一条，崩溃时最后一条是没有结果的半行）；退回文件级进度行
+    （默认 verbosity 的 `tests/x/test_y.py ..F`）。都没有就返回空串，不瞎猜。
+    """
+    for ln in reversed(lines):
+        m = _NODEID_RE.match(ln)
+        if m:
+            return m.group(1)
+    for ln in reversed(lines):
+        m = _FILEPROG_RE.match(ln)
+        if m:
+            return m.group(1)
+    return ""
 
 
 def parse_junit_xml(xml_path: Path) -> tuple[dict, list[dict]] | tuple[None, list]:
@@ -163,6 +256,19 @@ def generate_report(
         report.append("> JUnit XML 未生成或解析失败（进程崩溃或被中断）。")
         report.append("> 无法解析结构化结果，**不能假设\"0 失败\"**。")
         report.append(f"> 完整输出见 `{log_path.relative_to(PROJECT_ROOT)}`。\n")
+        # 别把"自己去看 log"当交付：XML 缺失时报告里本来什么都没有，这里直接摊现场。
+        tail = tail_lines(log_path)
+        at = last_test_line(tail)
+        if at or tail:
+            report.append("## 崩溃现场\n")
+            if at:
+                report.append(f"- 最后停在：`{at}`（XML 是 pytest 收尾才写的，"
+                              f"硬崩时拿不到计数）")
+            if tail:
+                report.append(f"\n### 日志末尾（末 {len(tail)} 行）\n")
+                report.append("```")
+                report.extend(tail)
+                report.append("```\n")
     else:
         report.append("## 结果摘要\n")
         report.append(
@@ -236,6 +342,7 @@ def _print_failure_list(
     status: str,
     xml_path: Path,
     report_path: Path,
+    log_path: Path | None = None,
 ) -> None:
     """把完整失败/错误清单打印到 console（默认强制，调用方显式关才不打印）。
 
@@ -257,9 +364,17 @@ def _print_failure_list(
         else:
             print(
                 "[list] XML 未生成（进程崩溃或被中断），无法生成结构化失败清单；"
-                "完整输出见 log 末尾",
+                "下面是日志末尾",
                 flush=True,
             )
+        # 控制台也把现场摊出来：调用方常常只看 stdout，不读报告文件。
+        if log_path is not None:
+            tail = tail_lines(log_path, limit=15)
+            at = last_test_line(tail)
+            if at:
+                print(f"[list] 最后停在：{at}", flush=True)
+            for ln in tail:
+                print(f"[list]   {ln}", flush=True)
         return
 
     print(f"[list] ===== 失败/错误清单（共 {len(failures)} 个，来自 JUnit XML）=====", flush=True)
@@ -268,7 +383,7 @@ def _print_failure_list(
         msg = (f["message"] or f["type"] or "(无消息)").replace("\n", " ")
         print(f"[list] {i:>3}. [{f['kind']}] {full} — {msg}", flush=True)
     if failures:
-        print(f"[list] ===== 清单结束 =====", flush=True)
+        print("[list] ===== 清单结束 =====", flush=True)
         print(
             f"[list] 完整表格 + 每个失败的单独复现命令见 {report_path.relative_to(PROJECT_ROOT)}。"
             "修复后先跑失败子集/`pytest --lf` 验证，全部通过再整轮收尾。",
@@ -354,10 +469,14 @@ def build_pytest_cmd(
 
     注意：不在此加 -q/-ra/--maxfail/--timeout 等——这些走 pyproject.toml addopts，
     避免重复。脚本层只补 --tb（覆盖 addopts 的 --tb=short）和 --junit-xml。
+
+    `-u`（子进程 stdout 无缓冲）是**崩溃现场的唯一保障**：默认块缓冲下进程被硬崩
+    （Qt qFatal / abort）时，缓冲区里最后几 KB 输出根本不落盘，日志只剩半截。
+    2026-10-24 实测同一崩溃命令：不加 -u 日志只留 2 字节，加了能留到崩溃那条测试。
     """
     if python_exe is None:
         python_exe = sys.executable
-    cmd = [python_exe, "-m", "pytest", "tests/"]
+    cmd = [python_exe, "-u", "-m", "pytest", "tests/"]
     if include_workspace_tests:
         try:
             # 直接以脚本方式跑（如 python tests/run_all.py）时项目根不在 sys.path
@@ -402,7 +521,7 @@ def run_and_report(
     "测→修→再测"循环）。
     """
     rc, elapsed = run_pytest_streaming(cmd, log_path, xml_path, cwd)
-    content = generate_report(xml_path, rc, elapsed, log_path, report_path, cmd)
+    generate_report(xml_path, rc, elapsed, log_path, report_path, cmd)   # 报告由它自己写盘
     print(f"[done] report -> {report_path}", flush=True)
     # 打印报告关键摘要到控制台
     status, detail = classify_exit(rc)
@@ -419,5 +538,6 @@ def run_and_report(
     else:
         print("[result] XML 未生成（进程崩溃或被中断），见 log 末尾", flush=True)
     if show_failure_list:
-        _print_failure_list(summary, failures, status, xml_path, report_path)
+        _print_failure_list(summary, failures, status, xml_path, report_path, log_path)
     return rc
+

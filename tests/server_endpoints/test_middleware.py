@@ -177,11 +177,15 @@ class TestMCpStatsMiddleware:
         """POST /mcp tools/call 触发统计记录"""
         recorded = []
 
-        def fake_record_call(tool_name, duration_ms, success):
+        # ⚠ 形参必须跟随 server.core.middleware.record_call 的签名：
+        # via_gateway 由 9dea394（2026-10-09 网关遥测拆分）加入，是带默认值的可选参数。
+        # mock 少收这个形参会以 TypeError 炸掉——表现为"中间件坏了"的假红，实为测试没跟上实现。
+        def fake_record_call(tool_name, duration_ms, success, via_gateway=False):
             recorded.append({
                 "tool": tool_name,
                 "duration_ms": duration_ms,
                 "success": success,
+                "via_gateway": via_gateway,
             })
 
         # middleware 模块在模块级定义 record_call（原 mcp_stats.py 已归并），
@@ -200,6 +204,9 @@ class TestMCpStatsMiddleware:
         assert len(recorded) == 1
         assert recorded[0]["tool"] == "test_tool"
         assert recorded[0]["success"] in [True, False]
+        # 钉住「直连 tools/call 不得被标成网关转发」：test_tool 不在
+        # _GATEWAY_TOOL_NAMES（只含 parcae_advanced_tool）内，故必为 False。
+        assert recorded[0]["via_gateway"] is False
 
     def test_mcp_get_no_stats(self, client, monkeypatch):
         """GET /mcp 不记录统计"""

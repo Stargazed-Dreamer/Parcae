@@ -1,4 +1,4 @@
-# LocalAgent
+# Parcae
 
 > 一个本地运行的个人 Agent 系统：自己天天在用，也作为各 agent 平台之间切换时的兜底层。
 
@@ -9,7 +9,7 @@
 
 ## 这是什么
 
-LocalAgent 是一个跑在 Windows 上的本地 Agent 系统，由 FastAPI 后端、PySide6 桌面客户端、Chromium 调试浏览器实例和一批 Skill 工作流组成。它通过 MCP（Streamable HTTP）把后端能力暴露给 IDE / 桌面客户端里的 LLM，让模型可以"看见屏幕、操作浏览器、跑代码、读写文档、调外部 API"，从而把"打开浏览器抓面经并打分"、"识别账单图片并记到 Obsidian"、"扫描抽卡记录并合并去重"这类琐事自动化掉。
+Parcae 是一个跑在 Windows 上的本地 Agent 系统，由 FastAPI 后端、PySide6 桌面客户端、Chromium 调试浏览器实例和一批 Skill 工作流组成。它通过 MCP（Streamable HTTP）把后端能力暴露给 IDE / 桌面客户端里的 LLM，让模型可以"看见屏幕、操作浏览器、跑代码、读写文档、调外部 API"，从而把"打开浏览器抓面经并打分"、"识别账单图片并记到 Obsidian"、"扫描抽卡记录并合并去重"这类琐事自动化掉。
 
 它不是框架，也不是 SDK——更接近一个长期在跑、不停迭代的个人自动化系统。
 
@@ -34,7 +34,7 @@ LocalAgent 是一个跑在 Windows 上的本地 Agent 系统，由 FastAPI 后�
 - **Agent 状态在后端，IDE 只是壳**。记忆、WIP 留档、待办、偏好都存在后端，IDE 里的 LLM 是无状态的 MCP 客户端。换 IDE 不丢状态，新 IDE 接入零成本——这是"跨 agent 切换不丢上下文"的物理基础。
 - **60+ Skill 系统**。每次重复做某类任务，做法稳定下来后就写成 Skill（一段 Markdown + workspace 脚本 + 后端端点 + 记忆 key），下次 `agent_guide` 自动路由。
 - **三层记忆系统**。Recent 滑动窗口 + SQLite 时间索引 + 向量语义检索 + BM25 + EvidenceLedger + SearchTracer，跨会话保留偏好和经验。
-- **MCP 三层兜底**。直连白名单 + `localagent_advanced_tool` 网关 + 预定义工作流模板，在 token 成本和能力覆盖之间找平衡。**对外接入零成本**：任何支持 MCP 的 agent 产品都能把本项目当工具库用，缺什么补什么。
+- **MCP 三层兜底**。直连白名单 + `parcae_advanced_tool` 网关 + 预定义工作流模板，在 token 成本和能力覆盖之间找平衡。**对外接入零成本**：任何支持 MCP 的 agent 产品都能把本项目当工具库用，缺什么补什么。
 - **Windows 原生 Computer Use**。截图 / 窗口枚举 / 键鼠操控走 Win32 + UIA 语义层，不依赖 Electron 或浏览器扩展——这是 Windows 单平台取舍换来的精度。
 - **独立调试浏览器 agent**。Chromium CDP 9222 调试实例配独立用户数据目录，DOM locator 优先于 OCR / VL，自动化行为不影响用户正在用的实际浏览器。
 - **"和 AI 一起写代码"实验**。AGENTS.md 是行为合同，Skill 是经验固化，记忆是经验沉淀——AI 是一个能持续继承上次进步的协作方。
@@ -46,7 +46,7 @@ LocalAgent 是一个跑在 Windows 上的本地 Agent 系统，由 FastAPI 后�
 - **日常自动化（recurring）**：记账、社群帖子总结、面经打分、多个手游抽卡记录采集、GKD 签到规则采集与回归、GitHub 私有镜像监控、人生设计对话等。
 - **按需工具（adhoc）**：磁盘清理与备份、文件 / 图片 / 媒体分类、API Key 测试、网页存档、文档查看、ModelScope 模型库更新、自动关机、期末复习资料整理等。
 - **系统层（system）**：任务提醒、WIP 留档、任务收尾、记忆生成、文档洁癖审查、Skill 路由（`agent_guide`）。
-- **工程化开发（dev）**：SDD 流程编排（grill-me → to-spec → to-tickets → implement）、防幻觉小修补、TDD、代码库探索、领域建模、原型设计、合并冲突处理——这一桶 Skill 是用来开发 LocalAgent 自己的。
+- **工程化开发（dev）**：SDD 流程编排（grill-me → to-spec → to-tickets → implement）、防幻觉小修补、TDD、代码库探索、领域建模、原型设计、合并冲突处理——这一桶 Skill 是用来开发 Parcae 自己的。
 
 **底层能力**：
 
@@ -56,7 +56,7 @@ LocalAgent 是一个跑在 Windows 上的本地 Agent 系统，由 FastAPI 后�
 - **视觉 AI**：远程 VL（ModelScope Qwen3-VL）做布局/状态描述和文档解析，配额感知 + provider 级 fallback + 活动强度加权节流。
 - **LLM 池**：多 provider 多 key 轮换、tier 硬匹配 + model 软偏好、per-project token 统计、真 SSE 流式 + DoomLoop 检测 + 三层独立熔断。
 - **三层记忆**：Recent + SQLite + 向量语义 + BM25 + EvidenceLedger + SearchTracer。
-- **MCP 网关**：直连白名单工具 + `localagent_advanced_tool` 网关 + `localagent_template_tool` 预定义工作流，逐层兜底。
+- **MCP 网关**：直连白名单工具 + `parcae_advanced_tool` 网关 + `parcae_template_tool` 预定义工作流，逐层兜底。
 
 ## 快速开始
 
@@ -66,11 +66,11 @@ LocalAgent 是一个跑在 Windows 上的本地 Agent 系统，由 FastAPI 后�
 
 ```bat
 REM 1. clone（任意目录；路径别带中文和空格）
-git clone https://github.com/Stargazed-Dreamer/localagent-public.git localAgent
-cd localAgent
+git clone https://github.com/Stargazed-Dreamer/localagent-public.git Parcae
+cd Parcae
 
 REM 2. 把发布包里的路径占位符换成你本机的（--data-drive 传盘符字母，不要带冒号）
-python tools\deploy\apply_placeholders.py . --project-root D:\code\localAgent --username your_name --data-drive D
+python tools\deploy\apply_placeholders.py . --project-root D:\code\Parcae --username your_name --data-drive D
 
 REM 3. 前置自检（7 项，不装依赖；用系统 python，别用 uv run）
 python tools\deploy\preflight_check.py
@@ -135,7 +135,7 @@ start_client.bat
 ```json
 {
   "mcpServers": {
-    "localagent": {
+    "parcae": {
       "type": "streamableHttp",
       "url": "http://127.0.0.1:8766/mcp"
     }
@@ -202,7 +202,7 @@ start_client.bat
 | **SDD** | Spec-Driven Development，项目的开发方法论，产物在 `temp/sdd/<slug>/` |
 | **agent_guide** | 任务路由入口，返回候选 Skill + first_action + 自动注入记忆 + 工具优先级 |
 | **三层记忆** | Recent 滑动窗口 + SQLite 时间索引 + 向量语义检索 + BM25 + EvidenceLedger |
-| **MCP 三层** | 直连白名单工具 → `localagent_advanced_tool` 网关 → `localagent_template_tool` 预定义工作流 |
+| **MCP 三层** | 直连白名单工具 → `parcae_advanced_tool` 网关 → `parcae_template_tool` 预定义工作流 |
 | **WIP** | Work-In-Progress 留档，跨会话保留"上次做到哪"，由 `task_closure` 自动管理 |
 
 ## 使用方式
@@ -237,7 +237,7 @@ Agent 会调 `agent_guide(task='你的描述')` 路由到对应 Skill，按 `fir
 **新功能流程**（详见 [AGENTS.md](AGENTS.md) 和 [.agents/rules/project_rules.md](.agents/rules/project_rules.md)）：
 
 1. **先查现有 skill**：调 `agent_guide(task='用户任务描述')` 看是否已有 Skill 覆盖。读 [.agents/skills/_index.md](.agents/skills/_index.md) 查看完整清单。
-2. **查 MCP 工具优先级**：按 4 层结构（直连白名单 → `localagent_advanced_tool` 网关 → `localagent_template_tool` → `exec_python`），只有 MCP 无法满足才写自定义脚本。
+2. **查 MCP 工具优先级**：按 4 层结构（直连白名单 → `parcae_advanced_tool` 网关 → `parcae_template_tool` → `exec_python`），只有 MCP 无法满足才写自定义脚本。
 3. **中等以上复杂度走 SDD**：`grill-me` → `to-spec` → `to-tickets` → `implement`。SDD 产物放 `temp/sdd/<slug>/`（不进 git）。
 
 **Skill 编写规范**：见 [.agents/skills/skill-creator.md](.agents/skills/skill-creator.md)。
@@ -301,7 +301,7 @@ release/               # 源码分发引擎（profile 驱动 + 4 静态 gate + 4
 
 ### 三层 MCP 兜底：在 token 成本和能力覆盖之间找平衡
 
-后端有 200+ 个 REST 路由，但全塞进 LLM 工具目录会炸上下文。所以分三层：直连白名单（高频 GET 工具，免审批，清单见 `server/mcp_whitelist.py`）→ `localagent_advanced_tool` 网关（其余工具统一入口，LLM 看到的工具目录只有一个）→ `localagent_template_tool` 预定义工作流。路由通过 `x-agent-callable` 标记决定是否进入 Agent 工具目录，默认 fail-open（新端点自动暴露），安全靠 `safety_map` + 审批级别的第二道防线兜底（见 ADR-0018）。
+后端有 200+ 个 REST 路由，但全塞进 LLM 工具目录会炸上下文。所以分三层：直连白名单（高频 GET 工具，免审批，清单见 `server/mcp_whitelist.py`）→ `parcae_advanced_tool` 网关（其余工具统一入口，LLM 看到的工具目录只有一个）→ `parcae_template_tool` 预定义工作流。路由通过 `x-agent-callable` 标记决定是否进入 Agent 工具目录，默认 fail-open（新端点自动暴露），安全靠 `safety_map` + 审批级别的第二道防线兜底（见 ADR-0018）。
 
 ## 关于这个项目
 

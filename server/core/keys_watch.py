@@ -22,7 +22,7 @@ import asyncio
 import logging
 from typing import Any
 
-logger = logging.getLogger("localagent.keys_watch")
+logger = logging.getLogger("parcae.keys_watch")
 
 # 轮询周期（秒）。改一次 keys.json 最多 20s 后自动生效，成本可忽略（一次 stat）。
 DEFAULT_INTERVAL = 20.0

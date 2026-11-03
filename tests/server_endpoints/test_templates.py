@@ -266,7 +266,7 @@ class TestTemplateRunEndpoint:
         assert resp.status_code == 404
         detail = resp.json()["detail"]
         assert "nonexistent_template" in detail
-        assert "localagent_list_templates" in detail
+        assert "parcae_list_templates" in detail
 
     def test_missing_required_param_returns_422(self, client):
         """缺必填参数返回 422"""

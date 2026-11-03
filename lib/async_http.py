@@ -30,7 +30,7 @@ import logging
 
 import httpx
 
-logger = logging.getLogger("localagent.async_http")
+logger = logging.getLogger("parcae.async_http")
 
 # 模块级单例（懒加载，首次 get_*_client() 时创建）
 _async_client: httpx.AsyncClient | None = None

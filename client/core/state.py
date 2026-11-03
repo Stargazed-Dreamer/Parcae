@@ -14,7 +14,7 @@ class AppState:
 
     def __init__(self):
         from PySide6.QtCore import QSettings
-        self._settings = QSettings("LocalAgent", "Client")
+        self._settings = QSettings("Parcae", "Client")
 
     @classmethod
     def instance(cls) -> "AppState":

@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, ConfigDict
 import uvicorn
 
-logger = logging.getLogger("localagent.accounting_server")
+logger = logging.getLogger("parcae.accounting_server")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
 # === 路径配置（基于 __file__ 重新计算，不依赖 server 模块）===
@@ -58,7 +58,7 @@ def _get_accounting_dir() -> Path:
 ACCOUNTING_DIR = _get_accounting_dir()
 
 app = FastAPI(
-    title="LocalAgent Accounting Server",
+    title="Parcae Accounting Server",
     version="1.0",
     description="记账审核独立服务 - Web 可视化审核页面后端",
 )
@@ -662,7 +662,7 @@ async def health():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("LocalAgent Accounting Server")
+    print("Parcae Accounting Server")
     print(f"访问入口: http://127.0.0.1:8780/")
     print(f"健康检查: http://127.0.0.1:8780/health")
     print(f"账单目录: {ACCOUNTING_DIR}")

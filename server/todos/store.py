@@ -2,13 +2,28 @@
 
 import calendar
 import json
-import sqlite3
 import logging
+import os
+import shutil
+import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-logger = logging.getLogger("localagent.todos.store")
+from server.todos.classify import (
+    PURPOSES,
+    STRUCT_LONG,
+    STRUCT_RECURRING,
+    STRUCT_TYPES,
+    as_date,
+    build_queue,
+    classify_todo,
+    classify_wip,
+    summarize,
+)
+
+logger = logging.getLogger("parcae.todos.store")
 
 TODOS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS todos (
@@ -27,10 +42,14 @@ CREATE TABLE IF NOT EXISTS todos (
     start_date TEXT,
     end_date TEXT,
     trigger_condition TEXT,
+    task_class TEXT,
+    purpose TEXT,
+    next_review_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status);
+
 CREATE INDEX IF NOT EXISTS idx_todos_type ON todos(type);
 CREATE INDEX IF NOT EXISTS idx_todos_next_due ON todos(next_due_at);
 
@@ -49,11 +68,80 @@ CREATE TABLE IF NOT EXISTS wip_tasks (
     blocked_reason TEXT,
     related_memory_keys TEXT DEFAULT '[]',
     extra_data TEXT DEFAULT '{}',
+    task_class TEXT,
+    purpose TEXT,
+    due_at TEXT,
+    done_when TEXT,
+    next_review_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_wip_status ON wip_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_wip_priority ON wip_tasks(priority);
+
+-- DL2：循环模板的一次性实例。模板永不 done，occurrence 才记"这次做没做"。
+-- 唯一索引 (template_id, due_at) 让 materialize 天然幂等。
+CREATE TABLE IF NOT EXISTS task_occurrences (
+    id TEXT PRIMARY KEY,
+    template_id TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    done_at TEXT,
+    evidence TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_occ_template_due ON task_occurrences(template_id, due_at);
+CREATE INDEX IF NOT EXISTS idx_occ_status ON task_occurrences(status);
+
+-- T14（2026-10-27）：任务表合并。todos + wip_tasks 的超集；老表冻结为 legacy。
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    priority TEXT DEFAULT 'medium',
+    task_class TEXT,
+    purpose TEXT,
+    goal TEXT DEFAULT '',
+    done_when TEXT,
+    progress INTEGER DEFAULT 0,
+    next_steps TEXT DEFAULT '[]',
+    current_state TEXT DEFAULT '{}',
+    blocked_reason TEXT,
+    notes TEXT DEFAULT '',
+    tags TEXT DEFAULT '[]',
+    skill TEXT,
+    related_skills TEXT DEFAULT '[]',
+    related_files TEXT DEFAULT '[]',
+    related_memory_keys TEXT DEFAULT '[]',
+    frequency TEXT,
+    start_date TEXT,
+    end_date TEXT,
+    condition TEXT,
+    condition_status TEXT,
+    trigger_condition TEXT,
+    due_at TEXT,
+    next_due_at TEXT,
+    last_done_at TEXT,
+    next_review_at TEXT,
+    extra_data TEXT DEFAULT '{}',
+    -- v15（2026-10-30）：面板归档。归档不覆盖 status，另存归档前那一档以便原样恢复。
+    archived_at TEXT,
+    archive_prev_status TEXT,
+    archive_reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_kind ON tasks(kind);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_next_due ON tasks(next_due_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(due_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_class ON tasks(task_class);
+
+CREATE TABLE IF NOT EXISTS task_merge_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 # ALTER TABLE 语句用于已有 DB 升级（幂等，列已存在时忽略错误）
@@ -63,6 +151,22 @@ _ALTER_STATEMENTS = [
     "ALTER TABLE todos ADD COLUMN start_date TEXT",
     "ALTER TABLE todos ADD COLUMN end_date TEXT",
     "ALTER TABLE todos ADD COLUMN trigger_condition TEXT",
+    # DL2（2026-10-27）：结构轴 task_class / 目的轴 purpose / 长期任务复盘点
+    "ALTER TABLE todos ADD COLUMN task_class TEXT",
+    "ALTER TABLE todos ADD COLUMN purpose TEXT",
+    "ALTER TABLE todos ADD COLUMN next_review_at TEXT",
+    # wip 是"其余三类"的落点：一次性要 due_at/done_when，小任务靠 extra_data.one_session
+    "ALTER TABLE wip_tasks ADD COLUMN task_class TEXT",
+    "ALTER TABLE wip_tasks ADD COLUMN purpose TEXT",
+    "ALTER TABLE wip_tasks ADD COLUMN due_at TEXT",
+    "ALTER TABLE wip_tasks ADD COLUMN done_when TEXT",
+    "ALTER TABLE wip_tasks ADD COLUMN next_review_at TEXT",
+    # v15（2026-10-30）：面板归档三列。这里也要有一份——新库由 DDL 带，
+    # 但只经 TodosStore 初始化（不经 schema.py 迁移）的库得靠这几句补齐，
+    # 否则 apply_task_action("archive") 会报 no such column: archived_at。
+    "ALTER TABLE tasks ADD COLUMN archived_at TEXT",
+    "ALTER TABLE tasks ADD COLUMN archive_prev_status TEXT",
+    "ALTER TABLE tasks ADD COLUMN archive_reason TEXT",
 ]
 
 # todos 表可更新字段（排除 id、created_at、updated_at 等自动字段）
@@ -71,12 +175,14 @@ _TODO_UPDATE_FIELDS = {
     "last_done_at", "next_due_at", "condition", "condition_status",
     "notes", "related_memory_keys",
     "start_date", "end_date", "trigger_condition",
+    "task_class", "purpose", "next_review_at",
 }
 # wip_tasks 表可更新字段
 _WIP_UPDATE_FIELDS = {
     "title", "status", "priority", "goal", "progress", "tags",
     "next_steps", "related_skills", "related_files",
     "current_state", "blocked_reason", "related_memory_keys", "extra_data",
+    "task_class", "purpose", "due_at", "done_when", "next_review_at",
 }
 
 # JSON 数组/对象字段，读写时需要 json.loads/dumps
@@ -86,11 +192,44 @@ _WIP_JSON_FIELDS = {
     "current_state", "related_memory_keys", "extra_data",
 }
 
+# 依赖 DL2 新增列的索引：必须在 _migrate_schema() 之后建，
+# 否则旧库（列还没 ALTER 出来）执行建表脚本会 "no such column: task_class"。
+_TASK_INDEXES_SQL = """
+CREATE INDEX IF NOT EXISTS idx_todos_task_class ON todos(task_class);
+CREATE INDEX IF NOT EXISTS idx_wip_task_class ON wip_tasks(task_class);
+CREATE INDEX IF NOT EXISTS idx_wip_due ON wip_tasks(due_at);
+"""
+
 # 已完结的 WIP 状态：summary 模式下这些条目只留最少的字段与最短的标题
 # （active/paused/blocked 之外的历史遗留状态一并纳入，避免漏压缩）
 _CLOSED_WIP_STATUSES = frozenset({"completed", "done", "archived", "cancelled"})
 # summary 模式下已完结条目的标题截断长度
 _CLOSED_WIP_TITLE_MAX = 24
+
+# T14：tasks 表的 kind 分组与状态映射
+_TODO_KINDS = ("recurring", "phased_recurring", "triggered")
+_WIP_KINDS = ("one_shot", "long_running")
+_TODO_STATUS_IN = {
+    "pending": "active", "in_progress": "active",
+    "done": "completed", "skipped": "completed",
+    "blocked": "blocked", "archived": "archived",
+    "active": "active", "paused": "paused", "completed": "completed",
+}
+_TODO_STATUS_OUT = {
+    "active": "pending", "paused": "paused", "blocked": "blocked",
+    "completed": "done", "archived": "archived",
+}
+_TODO_STATUS_FILTER = {
+    "pending": ("active", "paused"), "in_progress": ("active",),
+    "done": ("completed",), "skipped": ("completed",),
+    "blocked": ("blocked",), "archived": ("archived",),
+    "active": ("active",), "paused": ("paused",), "completed": ("completed",),
+}
+_WIP_STATUS_FILTER = {
+    "active": ("active",), "paused": ("paused",), "blocked": ("blocked",),
+    "completed": ("completed", "done"), "archived": ("archived",),
+    "done": ("completed", "done"), "cancelled": ("archived", "cancelled"),
+}
 
 
 class TodosStore:
@@ -120,6 +259,8 @@ class TodosStore:
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(TODOS_SCHEMA_SQL)
         self._migrate_schema()
+        self._conn.executescript(_TASK_INDEXES_SQL)
+        self._migrate_tasks_v1()
         self._conn.commit()
 
     def _migrate_schema(self) -> None:
@@ -130,6 +271,98 @@ class TodosStore:
                 self._conn.execute(stmt)
             except sqlite3.OperationalError:
                 pass  # 列已存在
+
+    def _table_exists(self, name: str) -> bool:
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        return row is not None
+
+    def _migrate_tasks_v1(self) -> None:
+        """T14：把 todos / wip_tasks 的影子数据搬进 tasks（不切读写，先建影子）。
+
+        幂等：成功搬迁后写 task_merge_meta.tasks_v1；老表不动，回滚时直接恢复。
+        """
+        assert self._conn is not None
+        if not self._table_exists("tasks"):
+            return
+        done = self._conn.execute(
+            "SELECT value FROM task_merge_meta WHERE key='tasks_v1'"
+        ).fetchone()
+        if done:
+            return
+        has_todos = self._table_exists("todos")
+        has_wip = self._table_exists("wip_tasks")
+        todos_n = self._conn.execute("SELECT COUNT(*) FROM todos").fetchone()[0] if has_todos else 0
+        wip_n = self._conn.execute("SELECT COUNT(*) FROM wip_tasks").fetchone()[0] if has_wip else 0
+        if not todos_n and not wip_n:
+            return  # 空库：不写标志，等历史导入落库后再搬
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(FULL)")
+            dst = f"{self.db_path}.bak.tasks_merge.{time.strftime('%Y%m%d_%H%M%S')}"
+            shutil.copy2(self.db_path, dst)
+            logger.info("T14 迁移前备份: %s", dst)
+        except Exception as exc:  # 备份失败不阻断，但必须留痕
+            logger.warning("T14 迁移前备份失败（继续迁移）: %s", exc)
+        with self._conn_lock:
+            if has_todos:
+                self._conn.execute(
+                    """INSERT OR IGNORE INTO tasks (
+                           id, kind, title, status, priority, task_class, purpose,
+                           goal, done_when, progress, next_steps, current_state,
+                           blocked_reason, notes, tags, skill, related_skills,
+                           related_files, related_memory_keys, frequency, start_date,
+                           end_date, condition, condition_status, trigger_condition,
+                           due_at, next_due_at, last_done_at, next_review_at,
+                           extra_data, created_at, updated_at)
+                       SELECT id, type, title,
+                           CASE status
+                               WHEN 'pending' THEN 'active'
+                               WHEN 'in_progress' THEN 'active'
+                               WHEN 'done' THEN 'completed'
+                               WHEN 'skipped' THEN 'completed'
+                               ELSE status END,
+                           'medium', task_class, purpose, '', NULL, 0, '[]', '{}',
+                           NULL, COALESCE(notes, ''), '[]', skill, '[]', '[]',
+                           COALESCE(related_memory_keys, '[]'), frequency, start_date,
+                           end_date, condition, condition_status, trigger_condition,
+                           NULL, next_due_at, last_done_at, next_review_at,
+                           CASE WHEN status='skipped'
+                                THEN '{"legacy_status":"skipped"}' ELSE '{}' END,
+                           created_at, updated_at
+                       FROM todos""",
+                )
+            if has_wip:
+                self._conn.execute(
+                    """INSERT OR IGNORE INTO tasks (
+                           id, kind, title, status, priority, task_class, purpose,
+                           goal, done_when, progress, next_steps, current_state,
+                           blocked_reason, notes, tags, skill, related_skills,
+                           related_files, related_memory_keys, frequency, start_date,
+                           end_date, condition, condition_status, trigger_condition,
+                           due_at, next_due_at, last_done_at, next_review_at,
+                           extra_data, created_at, updated_at)
+                       SELECT id,
+                           CASE WHEN due_at IS NOT NULL AND due_at != ''
+                                THEN 'one_shot' ELSE 'long_running' END,
+                           title, status, priority, task_class, purpose,
+                           COALESCE(goal, ''), done_when, COALESCE(progress, 0),
+                           COALESCE(next_steps, '[]'), COALESCE(current_state, '{}'),
+                           blocked_reason, '', COALESCE(tags, '[]'), NULL,
+                           COALESCE(related_skills, '[]'), COALESCE(related_files, '[]'),
+                           COALESCE(related_memory_keys, '[]'),
+                           NULL, NULL, NULL, NULL, NULL, NULL,
+                           due_at, NULL, NULL, next_review_at,
+                           COALESCE(extra_data, '{}'), created_at, updated_at
+                       FROM wip_tasks""",
+                )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO task_merge_meta (key, value) VALUES ('tasks_v1', ?)",
+                (f"{todos_n}+{wip_n}",),
+            )
+            self._conn.commit()
+        logger.info("T14 tasks 影子迁移完成: todos=%d wip=%d", todos_n, wip_n)
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -162,6 +395,21 @@ class TodosStore:
                     d[field] = [] if field != "current_state" else {}
         return d
 
+    @classmethod
+    def _deserialize_task_row(cls, row, *, legacy_todo: bool = True) -> dict:
+        """tasks 行的反序列化；todo 行默认把 canonical 状态映射回旧词。"""
+        d = cls._deserialize_row(row, is_wip=False)  # 先按 todo 集合反序列化
+        kind = str(d.get("kind") or "")
+        is_wip = kind in _WIP_KINDS
+        if is_wip:
+            d = cls._deserialize_row(row, is_wip=True)
+        d["table"] = "wip_tasks" if is_wip else "todos"
+        if not is_wip:
+            d["type"] = kind
+            if legacy_todo:
+                d["status"] = _TODO_STATUS_OUT.get(str(d.get("status")), d.get("status"))
+        return d
+
     # ─── Todos CRUD ──────────────────────────────────────────
 
     def create_todo(self, todo: dict) -> dict:
@@ -174,16 +422,16 @@ class TodosStore:
             condition_status = "active"
         with self._conn_lock:
             self.conn.execute(
-                """INSERT INTO todos (id, title, skill, type, status, frequency,
-                       last_done_at, next_due_at, condition, condition_status, notes,
-                       related_memory_keys, start_date, end_date, trigger_condition,
-                       created_at, updated_at)
-                   VALUES (?, ?, ?, ?, 'pending', ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO tasks (id, kind, title, status, skill, frequency,
+                       condition, condition_status, notes, related_memory_keys,
+                       start_date, end_date, trigger_condition, task_class, purpose,
+                       next_review_at, created_at, updated_at)
+                   VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     todo_id,
+                    todo.get("type", "recurring"),
                     todo["title"],
                     todo.get("skill"),
-                    todo.get("type", "recurring"),
                     todo.get("frequency"),
                     condition,
                     condition_status,
@@ -193,6 +441,9 @@ class TodosStore:
                     todo.get("start_date"),
                     todo.get("end_date"),
                     todo.get("trigger_condition"),
+                    todo.get("task_class"),
+                    todo.get("purpose"),
+                    todo.get("next_review_at"),
                     now, now,
                 ),
             )
@@ -203,29 +454,33 @@ class TodosStore:
 
     def get_todo(self, todo_id: str) -> Optional[dict]:
         with self._conn_lock:
-            cur = self.conn.execute("SELECT * FROM todos WHERE id = ?", (todo_id,))
+            cur = self.conn.execute(
+                "SELECT * FROM tasks WHERE id = ? AND kind IN (?, ?, ?)",
+                (todo_id, *_TODO_KINDS),
+            )
             row = cur.fetchone()
         if not row:
             return None
-        return self._deserialize_row(row, is_wip=False)
+        return self._deserialize_task_row(row, legacy_todo=True)
 
     def list_todos(self, status: Optional[str] = None,
                    todo_type: Optional[str] = None) -> list[dict]:
-        conditions = []
-        params = []
+        conditions = ["kind IN (?, ?, ?)"]
+        params: list = list(_TODO_KINDS)
         if status:
-            conditions.append("status = ?")
-            params.append(status)
+            allowed = _TODO_STATUS_FILTER.get(status, (status,))
+            conditions.append(f"status IN ({','.join('?' * len(allowed))})")
+            params.extend(allowed)
         if todo_type:
-            conditions.append("type = ?")
+            conditions.append("kind = ?")
             params.append(todo_type)
-        where = " AND ".join(conditions) if conditions else "1=1"
+        where = " AND ".join(conditions)
         with self._conn_lock:
             cur = self.conn.execute(
-                f"SELECT * FROM todos WHERE {where} ORDER BY updated_at DESC", params
+                f"SELECT * FROM tasks WHERE {where} ORDER BY updated_at DESC", params
             )
             rows = cur.fetchall()
-        return [self._deserialize_row(r, is_wip=False) for r in rows]
+        return [self._deserialize_task_row(r) for r in rows]
 
     def update_todo(self, todo_id: str, updates: dict) -> Optional[dict]:
         if not updates:
@@ -235,22 +490,30 @@ class TodosStore:
         for field, value in updates.items():
             if field not in _TODO_UPDATE_FIELDS:
                 continue
-            set_clauses.append(f"{field} = ?")
+            col = "kind" if field == "type" else field
+            if field == "status":
+                value = _TODO_STATUS_IN.get(str(value), value)
+            set_clauses.append(f"{col} = ?")
             params.append(self._serialize_field(field, value, is_wip=False))
         if not set_clauses:
             return self.get_todo(todo_id)
         set_clauses.append("updated_at = datetime('now', 'localtime')")
-        params.append(todo_id)
+        params.extend([todo_id, *_TODO_KINDS])
         with self._conn_lock:
             self.conn.execute(
-                f"UPDATE todos SET {', '.join(set_clauses)} WHERE id = ?", params
+                f"UPDATE tasks SET {', '.join(set_clauses)} "
+                f"WHERE id = ? AND kind IN (?, ?, ?)",
+                params,
             )
             self.conn.commit()
         return self.get_todo(todo_id)
 
     def delete_todo(self, todo_id: str) -> bool:
         with self._conn_lock:
-            cur = self.conn.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
+            cur = self.conn.execute(
+                "DELETE FROM tasks WHERE id = ? AND kind IN (?, ?, ?)",
+                (todo_id, *_TODO_KINDS),
+            )
             self.conn.commit()
             return cur.rowcount > 0
 
@@ -261,7 +524,7 @@ class TodosStore:
             return None
         todo_type = todo.get("type", "recurring")
         next_due = None
-        new_status = "pending"
+        new_status = "active"
         if todo.get("frequency"):
             next_due = self._compute_next_due(
                 todo["frequency"], today,
@@ -275,12 +538,13 @@ class TodosStore:
         # triggered 类型 mark_done 时不计算 next_due（等下次事件触发）
         if todo_type == "triggered":
             next_due = None
-            new_status = "pending"
+            new_status = "active"
         with self._conn_lock:
             self.conn.execute(
-                """UPDATE todos SET status=?, last_done_at=?, next_due_at=?,
-                       updated_at=datetime('now', 'localtime') WHERE id=?""",
-                (new_status, today, next_due, todo_id),
+                """UPDATE tasks SET status=?, last_done_at=?, next_due_at=?,
+                       updated_at=datetime('now', 'localtime')
+                   WHERE id=? AND kind IN (?, ?, ?)""",
+                (new_status, today, next_due, todo_id, *_TODO_KINDS),
             )
             self.conn.commit()
         return self.get_todo(todo_id)
@@ -299,7 +563,7 @@ class TodosStore:
         for t in self.list_todos():
             if t.get("type") not in ("recurring", "phased_recurring"):
                 continue
-            if t.get("status") == "archived":
+            if t.get("status") in ("archived", "paused"):
                 continue
             todos.append(t)
         due = []
@@ -433,9 +697,10 @@ class TodosStore:
         # 触发：更新 next_due_at=today（标记已触发待处理）
         with self._conn_lock:
             self.conn.execute(
-                """UPDATE todos SET next_due_at=?, condition_status='active',
-                       updated_at=datetime('now', 'localtime') WHERE id=?""",
-                (today, todo_id),
+                """UPDATE tasks SET next_due_at=?, condition_status='active',
+                       updated_at=datetime('now', 'localtime')
+                   WHERE id=? AND kind IN (?, ?, ?)""",
+                (today, todo_id, *_TODO_KINDS),
             )
             self.conn.commit()
         return {"triggered": True, "reason": reason, "todo_id": todo_id}
@@ -447,14 +712,17 @@ class TodosStore:
         task_id = task.get("id") or f"wip_{uuid.uuid4().hex[:8]}"
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._conn_lock:
+            kind = "one_shot" if str(task.get("due_at") or "").strip() else "long_running"
             self.conn.execute(
-                """INSERT INTO wip_tasks (id, title, status, priority, goal, progress,
+                """INSERT INTO tasks (id, kind, title, status, priority, goal, progress,
                        tags, next_steps, related_skills, related_files,
                        current_state, blocked_reason, related_memory_keys, extra_data,
+                       task_class, purpose, due_at, done_when, next_review_at,
                        created_at, updated_at)
-                   VALUES (?, ?, 'active', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, 'active', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task_id,
+                    kind,
                     task["title"],
                     task.get("priority", "medium"),
                     task.get("goal", ""),
@@ -467,6 +735,11 @@ class TodosStore:
                     self._serialize_field("related_memory_keys",
                                           task.get("related_memory_keys", []), is_wip=True),
                     self._serialize_field("extra_data", task.get("extra_data", {}), is_wip=True),
+                    task.get("task_class"),
+                    task.get("purpose"),
+                    task.get("due_at"),
+                    task.get("done_when"),
+                    task.get("next_review_at"),
                     now, now,
                 ),
             )
@@ -477,11 +750,14 @@ class TodosStore:
 
     def get_wip(self, task_id: str) -> Optional[dict]:
         with self._conn_lock:
-            cur = self.conn.execute("SELECT * FROM wip_tasks WHERE id = ?", (task_id,))
+            cur = self.conn.execute(
+                "SELECT * FROM tasks WHERE id = ? AND kind IN (?, ?)",
+                (task_id, *_WIP_KINDS),
+            )
             row = cur.fetchone()
         if not row:
             return None
-        return self._deserialize_row(row, is_wip=True)
+        return self._deserialize_task_row(row)
 
     def get_wip_many(self, ids: list) -> dict:
         """按 id 批量取 WIP 详情（保序；不存在的 id 单独列出）。
@@ -498,10 +774,11 @@ class TodosStore:
         placeholders = ",".join("?" * len(uniq))
         with self._conn_lock:
             cur = self.conn.execute(
-                f"SELECT * FROM wip_tasks WHERE id IN ({placeholders})", uniq
+                f"SELECT * FROM tasks WHERE id IN ({placeholders}) AND kind IN (?, ?)",
+                (*uniq, *_WIP_KINDS),
             )
             rows = cur.fetchall()
-        by_id = {r["id"]: self._deserialize_row(r, is_wip=True) for r in rows}
+        by_id = {r["id"]: self._deserialize_task_row(r) for r in rows}
         return {
             "tasks": [by_id[i] for i in uniq if i in by_id],
             "missing": [i for i in uniq if i not in by_id],
@@ -518,31 +795,28 @@ class TodosStore:
         需要完整字段（goal/next_steps/current_state/related_*/extra_data）时，
         用 get_wip(task_id) 单条取或 get_wip_many(ids) 批量取，而不是把 summary 关掉全量拉取。
         """
+        conditions = ["kind IN (?, ?)"]
+        params: list = list(_WIP_KINDS)
+        if status:
+            allowed = _WIP_STATUS_FILTER.get(status, (status,))
+            conditions.append(f"status IN ({','.join('?' * len(allowed))})")
+            params.extend(allowed)
+        where = " AND ".join(conditions)
         if summary:
             cols = "id, title, status, priority, progress, updated_at"
             with self._conn_lock:
-                if status:
-                    cur = self.conn.execute(
-                        f"SELECT {cols} FROM wip_tasks WHERE status = ? ORDER BY updated_at DESC",
-                        (status,),
-                    )
-                else:
-                    cur = self.conn.execute(
-                        f"SELECT {cols} FROM wip_tasks ORDER BY updated_at DESC"
-                    )
+                cur = self.conn.execute(
+                    f"SELECT {cols} FROM tasks WHERE {where} ORDER BY updated_at DESC",
+                    params,
+                )
                 return [self._compact_wip_summary(dict(r)) for r in cur.fetchall()]
         with self._conn_lock:
-            if status:
-                cur = self.conn.execute(
-                    "SELECT * FROM wip_tasks WHERE status = ? ORDER BY updated_at DESC",
-                    (status,),
-                )
-            else:
-                cur = self.conn.execute(
-                    "SELECT * FROM wip_tasks ORDER BY updated_at DESC"
-                )
+            cur = self.conn.execute(
+                f"SELECT * FROM tasks WHERE {where} ORDER BY updated_at DESC",
+                params,
+            )
             rows = cur.fetchall()
-        return [self._deserialize_row(r, is_wip=True) for r in rows]
+        return [self._deserialize_task_row(r) for r in rows]
 
     @staticmethod
     def _compact_wip_summary(row: dict) -> dict:
@@ -573,42 +847,373 @@ class TodosStore:
         for field, value in updates.items():
             if field not in _WIP_UPDATE_FIELDS:
                 continue
+            if field == "status":
+                value = {"done": "completed", "cancelled": "archived"}.get(str(value), value)
             set_clauses.append(f"{field} = ?")
             params.append(self._serialize_field(field, value, is_wip=True))
         if not set_clauses:
             return self.get_wip(task_id)
         set_clauses.append("updated_at = datetime('now', 'localtime')")
-        params.append(task_id)
+        params.extend([task_id, *_WIP_KINDS])
         with self._conn_lock:
             self.conn.execute(
-                f"UPDATE wip_tasks SET {', '.join(set_clauses)} WHERE id = ?", params
+                f"UPDATE tasks SET {', '.join(set_clauses)} "
+                f"WHERE id = ? AND kind IN (?, ?)",
+                params,
             )
             self.conn.commit()
         return self.get_wip(task_id)
 
     def delete_wip(self, task_id: str) -> bool:
         with self._conn_lock:
-            cur = self.conn.execute("DELETE FROM wip_tasks WHERE id = ?", (task_id,))
+            cur = self.conn.execute(
+                "DELETE FROM tasks WHERE id = ? AND kind IN (?, ?)",
+                (task_id, *_WIP_KINDS),
+            )
             self.conn.commit()
             return cur.rowcount > 0
 
+    # ─── 统一动作面（T14）────────────────────────────────────
+
+    def list_tasks_view(self, include_archived: bool = True) -> list[dict]:
+        """面板用：tasks 单表的轻量列表（canonical 状态，不返回正文大字段）。"""
+        sql = (
+            "SELECT id, kind, title, status, priority, task_class, purpose, progress, "
+            "done_when, due_at, next_due_at, updated_at, created_at FROM tasks"
+        )
+        if not include_archived:
+            sql += " WHERE status != 'archived'"
+        sql += " ORDER BY updated_at DESC, id DESC"
+        with self._conn_lock:
+            rows = self.conn.execute(sql).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            d = dict(r)
+            d["table"] = "wip_tasks" if d["kind"] in _WIP_KINDS else "todos"
+            out.append(d)
+        return out
+
+    def apply_task_action(self, scope: str, task_id: str, action: str,
+                          reason: str | None = None) -> Optional[dict]:
+        """统一 pause/resume/archive/unarchive/complete；todos 与 wip 同一套词。
+
+        v15 起 archive/unarchive 额外维护归档三列（面板要有「归档于 …」和
+        「归档原因」，也要能原样恢复）：
+
+        - `archived_at`        收进归档视图的时间（面板排序/显示用）；
+        - `archive_prev_status` 归档前的 status，恢复时照抄回去——不留这一列，
+                                一个 done 的事务恢复后会变成 active，进度就丢了；
+        - `archive_reason`     归档原因，可空。
+
+        归档视图仍按 `status='archived'` 判断（沿用 T14，不另造判据），
+        所以别的入口把状态置 archived 也会正常出现在归档里，只是没有时间戳。
+        """
+        status_map = {
+            "pause": "paused", "resume": "active",
+            "archive": "archived", "unarchive": "active", "complete": "completed",
+            # 2026-10-28：面板要能直接标记「卡住」，原来 5 个状态里唯独缺这个。
+            "block": "blocked",
+        }
+        if action not in status_map:
+            raise ValueError(f"unknown action: {action}")
+        if scope == "todos" and action == "complete":
+            done = self.mark_done(task_id)
+            if not done:
+                return None
+            row = self.conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            return self._deserialize_task_row(row, legacy_todo=False) if row else None
+        kinds = _TODO_KINDS if scope == "todos" else _WIP_KINDS
+        placeholders = ",".join("?" * len(kinds))
+        now = "datetime('now', 'localtime')"
+        params: list = []
+        if action == "archive":
+            sets = (f"status = ?, updated_at = {now}, archived_at = {now}, "
+                    # 重复归档时保留首次记下的原状态
+                    "archive_prev_status = COALESCE(NULLIF(status, 'archived'), "
+                    "archive_prev_status, status), archive_reason = ?")
+            params = ["archived", reason]
+        elif action == "unarchive":
+            sets = (f"status = COALESCE(NULLIF(archive_prev_status, ''), 'active'), "
+                    f"updated_at = {now}, archived_at = NULL, "
+                    "archive_prev_status = NULL, archive_reason = NULL")
+        else:
+            sets = f"status = ?, updated_at = {now}"
+            params = [status_map[action]]
+            if action == "complete" and scope == "wip":
+                sets += ", progress = 100"
+        params.extend([task_id, *kinds])
+        with self._conn_lock:
+            cur = self.conn.execute(
+                f"UPDATE tasks SET {sets} WHERE id = ? AND kind IN ({placeholders})",
+                params,
+            )
+            self.conn.commit()
+            if cur.rowcount == 0:
+                return None
+            row = self.conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return self._deserialize_task_row(row, legacy_todo=False) if row else None
+
     # ─── 统计 ─────────────────────────────────────────────────
 
+    # ─── 事务分类（DL2 / 2026-10-27）────────────────────────────
+    #
+    # 结构轴决定到期表现，目的轴决定交到哪一步；两轴都只加列，不动老字段。
+    # L0-L5 不在这里 —— 那是授权刻度（40_用户标注），与目的轴不换算。
+
+    def _task_rows(self) -> list[dict]:
+        """todos + wip 统一成一种行，带上"库里已落 / 规则会判成什么"。"""
+        out: list[dict] = []
+        with self._conn_lock:
+            rows = self.conn.execute("SELECT * FROM tasks").fetchall()
+        for r in rows:
+            d = self._deserialize_task_row(r, legacy_todo=False)
+            if d["table"] == "todos":
+                c = classify_todo(d)
+            else:
+                c = classify_wip(d)
+            d["class_notes"] = c.notes
+            d["class_source"] = "db" if d.get("task_class") else ("rule" if c.task_class else "unmapped")
+            if not d.get("task_class"):
+                d["task_class"] = c.task_class
+            if not d.get("purpose") and c.purpose:
+                d["purpose"] = c.purpose
+            out.append(d)
+        return out
+
+    def classify_tasks(self, apply: bool = False) -> dict:
+        """按规则给现有 todos / wip 打标。
+
+        默认 **apply=False 只出报告**（dry run）。`unmapped` 与 `purpose_unset`
+        必须原样返回：映射不上的不许挑个近的类别塞进去，目的轴判不出的不许猜。
+        """
+        assignments: list[dict] = []
+        unmapped: list[dict] = []
+        purpose_unset: list[dict] = []
+        unchanged = 0
+
+        for row in self._task_rows():
+            c = classify_todo(row) if row["table"] == "todos" else classify_wip(row)
+            if c.unmapped:
+                unmapped.append(
+                    {
+                        "id": row.get("id"),
+                        "table": row["table"],
+                        "title": row.get("title"),
+                        "status": row.get("status"),
+                        "notes": c.notes,
+                    }
+                )
+                continue
+            new_purpose = row.get("purpose") or c.purpose
+            if not new_purpose and str(row.get("status") or "") not in (
+                "completed", "done", "archived", "cancelled", "skipped"
+            ):
+                purpose_unset.append(
+                    {"id": row.get("id"), "table": row["table"], "title": row.get("title")}
+                )
+            item = {
+                "id": row.get("id"),
+                "table": row["table"],
+                "title": row.get("title"),
+                "from_class": row.get("task_class") if row.get("class_source") == "db" else None,
+                "task_class": c.task_class,
+                "purpose": new_purpose,
+                "notes": c.notes,
+            }
+            if row.get("class_source") == "db" and row.get("task_class") == c.task_class \
+                    and row.get("purpose") == new_purpose:
+                unchanged += 1
+                continue
+            assignments.append(item)
+
+        if apply:
+            for a in assignments:
+                self.set_task_class(
+                    a["table"], str(a["id"]),
+                    task_class=a["task_class"], purpose=a["purpose"],
+                )
+
+        return {
+            "applied": apply,
+            "planned": len(assignments),
+            "unchanged": unchanged,
+            "assignments": assignments,
+            "unmapped": unmapped,
+            "purpose_unset": purpose_unset,
+        }
+
+    def set_task_class(
+        self,
+        table: str,
+        task_id: str,
+        *,
+        task_class: Optional[str] = None,
+        purpose: Optional[str] = None,
+        due_at: Optional[str] = None,
+        done_when: Optional[str] = None,
+        next_review_at: Optional[str] = None,
+    ) -> Optional[dict]:
+        """人工改分类。task_class/purpose 只接受白名单值，非法直接 ValueError（不静默忽略）。"""
+        if table not in ("todos", "wip_tasks"):
+            raise ValueError(f"未知表 {table!r}（只支持 todos / wip_tasks）")
+        if task_class is not None and task_class not in STRUCT_TYPES:
+            raise ValueError(f"task_class={task_class!r} 不在四类里：{list(STRUCT_TYPES)}")
+        if purpose is not None and purpose not in PURPOSES:
+            raise ValueError(f"purpose={purpose!r} 不在三档里：{list(PURPOSES)}")
+        if table == "todos" and (due_at is not None or done_when is not None):
+            raise ValueError("todos 用 next_due_at，不设 due_at / done_when（那是 wip 的列）")
+
+        updates: dict[str, Optional[str]] = {"task_class": task_class, "purpose": purpose}
+        if next_review_at is not None:
+            updates["next_review_at"] = next_review_at
+        if table == "wip_tasks":
+            if due_at is not None:
+                updates["due_at"] = due_at
+            if done_when is not None:
+                updates["done_when"] = done_when
+        updates = {k: v for k, v in updates.items() if v is not None}
+        if not updates:
+            return self.get_todo(task_id) if table == "todos" else self.get_wip(task_id)
+
+        set_clauses = ", ".join(f"{k} = ?" for k in updates)
+        kinds = _TODO_KINDS if table == "todos" else _WIP_KINDS
+        params = list(updates.values()) + [task_id, *kinds]
+        placeholders = ",".join("?" * len(kinds))
+        with self._conn_lock:
+            self.conn.execute(
+                f"UPDATE tasks SET {set_clauses}, updated_at = datetime('now', 'localtime') "
+                f"WHERE id = ? AND kind IN ({placeholders})",
+                params,
+            )
+            self.conn.commit()
+        return self.get_todo(task_id) if table == "todos" else self.get_wip(task_id)
+
+    def task_queue(self, now: Optional[datetime] = None) -> list[dict]:
+        """按 `15` §5.2 的默认顺序出"现在该做什么"。"""
+        return build_queue(self._task_rows(), now)
+
+    def task_summary(self, now: Optional[datetime] = None) -> dict:
+        """分类报告：两轴计数 + 派生视图 + 待判清单。"""
+        rows = self._task_rows()
+        out = summarize(rows, now)
+        out["by_table"] = {
+            "todos": sum(1 for r in rows if r["table"] == "todos"),
+            "wip_tasks": sum(1 for r in rows if r["table"] == "wip_tasks"),
+        }
+        out["class_source"] = {
+            "db": sum(1 for r in rows if r.get("class_source") == "db"),
+            "rule": sum(1 for r in rows if r.get("class_source") == "rule"),
+            "unmapped": sum(1 for r in rows if r.get("class_source") == "unmapped"),
+        }
+        return out
+
+    def materialize_occurrences(self, now: Optional[datetime] = None) -> dict:
+        """把到期的循环模板落成 occurrence（幂等：靠 (template_id, due_at) 唯一索引）。"""
+        import uuid
+
+        now = now or datetime.now()
+        today = now.date()
+        created: list[dict] = []
+        existing: list[dict] = []
+        skipped: list[dict] = []
+
+        for todo in self.list_todos():
+            cls = todo.get("task_class") or classify_todo(todo).task_class
+            if cls != STRUCT_RECURRING:
+                continue
+            if todo.get("status") in ("archived", "done"):
+                continue
+            due = as_date(todo.get("next_due_at"))
+            if due is None:
+                skipped.append({"template_id": todo.get("id"), "why": "无 next_due_at（未排期）"})
+                continue
+            if due > today:
+                skipped.append({"template_id": todo.get("id"), "why": f"未到期（{due}）"})
+                continue
+            occ_id = f"occ_{uuid.uuid4().hex[:10]}"
+            with self._conn_lock:
+                cur = self.conn.execute(
+                    """INSERT OR IGNORE INTO task_occurrences
+                           (id, template_id, due_at, status, created_at)
+                       VALUES (?, ?, ?, 'pending', ?)""",
+                    (occ_id, todo.get("id"), due.isoformat(), now.strftime("%Y-%m-%d %H:%M:%S")),
+                )
+                self.conn.commit()
+                inserted = cur.rowcount > 0
+            rec = {"template_id": todo.get("id"), "due_at": due.isoformat(), "title": todo.get("title")}
+            (created if inserted else existing).append(rec)
+
+        return {"created": created, "existing": existing, "skipped": skipped}
+
+    def list_occurrences(self, status: Optional[str] = None, limit: int = 200) -> list[dict]:
+        sql = "SELECT * FROM task_occurrences"
+        args: list = []
+        if status:
+            sql += " WHERE status = ?"
+            args.append(status)
+        sql += " ORDER BY due_at DESC LIMIT ?"
+        args.append(limit)
+        with self._conn_lock:
+            rows = self.conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def complete_occurrence(
+        self, occ_id: str, evidence: Optional[str] = None, advance_template: bool = True
+    ) -> Optional[dict]:
+        """完成一次 occurrence：记证据 → 推进模板 → 更早的 pending 判 missed。"""
+        with self._conn_lock:
+            row = self.conn.execute(
+                "SELECT * FROM task_occurrences WHERE id = ?", (occ_id,)
+            ).fetchone()
+            if not row:
+                return None
+            now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.conn.execute(
+                """UPDATE task_occurrences SET status = 'done', done_at = ?, evidence = ?
+                   WHERE id = ?""",
+                (now_text, evidence, occ_id),
+            )
+            if advance_template:
+                self.conn.execute(
+                    """UPDATE task_occurrences SET status = 'missed'
+                       WHERE template_id = ? AND status = 'pending' AND due_at < ?""",
+                    (row["template_id"], row["due_at"]),
+                )
+            self.conn.commit()
+        if advance_template:
+            self.mark_done(str(row["template_id"]))
+        return {
+            "id": occ_id,
+            "template_id": row["template_id"],
+            "status": "done",
+            "done_at": now_text,
+            "template_advanced": bool(advance_template),
+        }
+
     def get_stats(self) -> dict:
+        kinds_todo = ",".join("?" * len(_TODO_KINDS))
+        kinds_wip = ",".join("?" * len(_WIP_KINDS))
         with self._conn_lock:  # get_due_todos 内部经 list_todos 重入，RLock 安全
-            todos_total = self.conn.execute("SELECT COUNT(*) FROM todos").fetchone()[0]
+            todos_total = self.conn.execute(
+                f"SELECT COUNT(*) FROM tasks WHERE kind IN ({kinds_todo})", _TODO_KINDS
+            ).fetchone()[0]
             todos_due = len(self.get_due_todos())
-            wip_total = self.conn.execute("SELECT COUNT(*) FROM wip_tasks").fetchone()[0]
+            wip_total = self.conn.execute(
+                f"SELECT COUNT(*) FROM tasks WHERE kind IN ({kinds_wip})", _WIP_KINDS
+            ).fetchone()[0]
             wip_active = self.conn.execute(
-                "SELECT COUNT(*) FROM wip_tasks WHERE status = 'active'"
+                f"SELECT COUNT(*) FROM tasks WHERE kind IN ({kinds_wip}) AND status = 'active'",
+                _WIP_KINDS,
             ).fetchone()[0]
             type_counts = {}
             for row in self.conn.execute(
-                "SELECT type, COUNT(*) as cnt FROM todos GROUP BY type"
+                f"SELECT kind, COUNT(*) as cnt FROM tasks WHERE kind IN ({kinds_todo}) GROUP BY kind",
+                _TODO_KINDS,
             ).fetchall():
-                type_counts[row["type"]] = row["cnt"]
+                type_counts[row["kind"]] = row["cnt"]
             archived_count = self.conn.execute(
-                "SELECT COUNT(*) FROM todos WHERE status = 'archived'"
+                f"SELECT COUNT(*) FROM tasks WHERE kind IN ({kinds_todo}) AND status = 'archived'",
+                _TODO_KINDS,
             ).fetchone()[0]
         return {
             "available": True,

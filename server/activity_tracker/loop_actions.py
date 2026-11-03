@@ -31,7 +31,7 @@ from server.model_manager.types import ModelUnavailableError
 
 from .loop_manager import Action
 
-logger = logging.getLogger("localagent.loop_actions")
+logger = logging.getLogger("parcae.loop_actions")
 
 
 # ==================== 工具函数 ====================
@@ -1666,18 +1666,33 @@ def _load_optional_actions(manager) -> None:
     用目录扫描而非 pkgutil.iter_modules：后者只枚举带 __init__.py 的包，
     组件目录按约定不带 __init__.py（见 _load_optional_loop_defs 同款扫描）。
     """
-    import importlib
-
+    from lib.component_loader import load_component_module, warm_probe
     from server.component_manifest import _WORKSPACE_DIR
 
     if not _WORKSPACE_DIR.exists():
         return
-    for child in sorted(_WORKSPACE_DIR.iterdir()):
+    children = sorted(_WORKSPACE_DIR.iterdir())
+    specs: dict[str, Path] = {
+        f"workspace.{child.name}.loop_actions": child / "loop_actions.py"
+        for child in children
+        if child.is_dir() and not child.name.startswith('_') and not child.name.startswith('.')
+    }
+    # 一次性子进程试 import：组件模块级阻塞在这里被超时剔除，不会卡住注册流程；
+    # 语法错误由 component_loader 预检拦下（原实现只 catch ImportError）。
+    try:
+        warm_probe({mod: src for mod, src in specs.items() if src.exists()})
+    except Exception as exc:
+        logger.warning("loop_actions 组件试 import 预热失败: %s", exc)
+    for child in children:
         if not child.is_dir() or child.name.startswith('_') or child.name.startswith('.'):
             continue
-        try:
-            mod = importlib.import_module(f'workspace.{child.name}.loop_actions')
-        except ImportError:
+        module_name = f"workspace.{child.name}.loop_actions"
+        src = specs.get(module_name)
+        if src is None or not src.exists():
+            # 组件没有 loop_actions.py（多数组件只有 SKILL.md），不是错误，静默跳过
+            continue
+        mod = load_component_module(module_name, component=child.name, path=src)
+        if mod is None:
             continue
         if hasattr(mod, 'register'):
             mod.register(manager)
@@ -1757,12 +1772,14 @@ class MemoryMaintainAction(Action):
             }
 
         aging = result.get("aging", {})
-        validate = result.get("validate", {})
+        prefilter = result.get("prefilter", {})
 
-        # 仅当存在 stale 记忆时推 inbox 告警（archived=1 是 LLM 常态建议，不算待审查事件）
-        # 去重交给 InboxStore 的 dedupe_key（同周只落一条），不再由调用方扫 pending 比对
+        # 仅当存在 stale 记忆时推 inbox 告警（去重交给 InboxStore 的 dedupe_key：
+        # 同周只落一条，不再由调用方扫 pending 比对）
         stale_count = aging.get("stale_count", 0)
-        archived = validate.get("archive", 0)
+        prefilter_deleted = int(prefilter.get("deleted_test", 0)) + int(
+            prefilter.get("deleted_orphan_subfield", 0)
+        )
         if stale_count > 0:
             try:
                 from server.inbox import get_store
@@ -1770,19 +1787,16 @@ class MemoryMaintainAction(Action):
                 created = store.create({
                     "source": "memory",
                     "category": "maintain_result",
-                    "title": f"记忆维护告警: {stale_count} 条 stale, {archived} 条建议归档",
+                    "title": f"记忆维护告警: {stale_count} 条 stale",
                     "description": (
                         f"老化扫描: {stale_count} 条记忆超过 "
                         f"{aging.get('stale_threshold_days', 7)} 天未更新。\n"
-                        f"LLM 验证: {validate.get('validated', 0)} 条，"
-                        f"其中 keep={validate.get('keep', 0)}, "
-                        f"update={validate.get('update', 0)}, "
-                        f"archive={archived}。\n"
-                        f"建议归档的记忆需要用户确认后删除。"
+                        f"垃圾预过滤已删除 {prefilter_deleted} 条（测试前缀/孤儿子字段）。\n"
+                        f"过时只影响召回排序权重，不会自动删除任何记忆。"
                     ),
                     "payload": {
                         "aging": aging,
-                        "validate": validate,
+                        "prefilter": prefilter,
                         "last_run": result.get("last_run"),
                     },
                     "dedupe_key": _maintain_inbox_dedupe_key(),
@@ -1797,21 +1811,12 @@ class MemoryMaintainAction(Action):
 
         logger.info(
             f"MemoryMaintain 完成: stale={stale_count}, "
-            f"validated={validate.get('validated', 0)}, "
-            f"archive={archived}"
-            + (f", broke_on_429=True (skipped_429={validate.get('skipped_429', 0)})"
-               if validate.get("broke_on_429") else "")
+            f"prefilter_deleted={prefilter_deleted}"
         )
         return {
             "success": True,
             "stale_count": stale_count,
-            "validated": validate.get("validated", 0),
-            "keep": validate.get("keep", 0),
-            "update": validate.get("update", 0),
-            "archive": archived,
-            # 429 熔断监控字段（P0-3）：broke_on_429=True 表示本次因连续 3 次 429 提前终止
-            "skipped_429": validate.get("skipped_429", 0),
-            "broke_on_429": validate.get("broke_on_429", False),
+            "prefilter_deleted": prefilter_deleted,
             "last_run": result.get("last_run"),
         }
 

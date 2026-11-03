@@ -252,6 +252,17 @@ async def browser_evaluate(req: BrowserEvaluateRequest):
             return BrowserEvaluateResponse(success=False, elapsed_ms=elapsed, error=err)
 
     # 无 session：走 exec_python 子进程模型（冷启动）
+    # 2026-11-01（G4）：多 tab 且没指定目标 ⇒ TAB_REQUIRED（不再默认第一个 tab）
+    from .target_resolver import cold_guard
+
+    _cold = await cold_guard(req.tab_id, req.url_pattern, start)
+    if isinstance(_cold, str):
+        # 后端替你选定了唯一可信 tab（其余是外来者/无主页），走精确匹配
+        req.tab_id = _cold
+    elif _cold is not None:
+        return BrowserEvaluateResponse(
+            success=False, elapsed_ms=_cold.elapsed_ms, error=_cold,
+        )
     # 修复幽灵参数：无会话模式支持 tab_id 精确消歧。
     _tab_id_url = None
     if req.tab_id:

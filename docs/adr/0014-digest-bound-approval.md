@@ -14,7 +14,7 @@ release engine 的审批必须 digest-bound：审批凭据携带 `plan_digest`�
 2. 审批通过后源码、profile、组件选择、扫描结果、豁免内容任何一项变化，审批依然有效——审计和构建消费的是不同时间点的状态。
 3. 没有任何机制保证"用户审批时看到的状态 = 实际打包的状态"。
 
-LocalAgent 的 release 产物会分发给朋友（friend-full profile 含私有数据）或公开发布（public profile），一次错误发布不可撤回（朋友拿到含凭据的 ZIP 后无法远程擦除），因此 release 审批是"高代价不可逆操作"，必须有密码学强度的状态绑定。
+Parcae 的 release 产物会分发给朋友（friend-full profile 含私有数据）或公开发布（public profile），一次错误发布不可撤回（朋友拿到含凭据的 ZIP 后无法远程擦除），因此 release 审批是"高代价不可逆操作"，必须有密码学强度的状态绑定。
 
 ## Decision
 

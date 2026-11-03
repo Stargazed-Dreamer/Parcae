@@ -1,6 +1,6 @@
 """clipboard 端点 — 剪贴板读写（ZCode computer-use 对齐项）。
 
-ZCode computer-use 提供 read_clipboard / write_clipboard 原语；此前 LocalAgent
+ZCode computer-use 提供 read_clipboard / write_clipboard 原语；此前 Parcae
 agent 只能靠 hotkey ctrl+c/ctrl+v 间接用剪贴板，无法直接读取内容做验证。
 本模块补齐：
 - GET  /screen/clipboard（read_clipboard）：读当前剪贴板文本（默认截断 2000 字符防上下文污染）

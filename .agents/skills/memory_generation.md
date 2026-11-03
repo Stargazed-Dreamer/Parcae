@@ -104,7 +104,7 @@ key 命名规范：`{scope}.{name}`，如 `preferences.curl_usage`, `project.yih
 已有的 key（如 accounting, wip_index）保持原名，用 merge 模式更新。
 
 ### 步骤 5：可选触发维护
-如果写入了 3 条以上新记忆，可调用 `localagent_advanced_tool(memory_maintain, {force: true})`。
+如果写入了 3 条以上新记忆，可调用 `parcae_advanced_tool(memory_maintain, {force: true})`。
 
 ### 自检（可选）
 写入后自检：
@@ -134,4 +134,4 @@ key 命名规范：`{scope}.{name}`，如 `preferences.curl_usage`, `project.yih
 | 依赖 | 路径/接口 | 说明 |
 |------|----------|------|
 | 记忆系统 | memory_list / memory_get / memory_set | 读写记忆 |
-| 维护器 | localagent_advanced_tool(memory_maintain) | 可选触发验证 |
+| 维护器 | parcae_advanced_tool(memory_maintain) | 可选触发验证 |

@@ -39,7 +39,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
+from lib.agent_runtime import (  # noqa: E402
     Compactor,
     ContextOverflow,
     EventStore,
@@ -52,14 +52,14 @@ from client.core.agent import (  # noqa: E402
     RunnerDeps,
     SessionRunner,
 )
-from client.core.agent.llm_pool_gateway import (  # noqa: E402
+from lib.agent_runtime.llm_pool_gateway import (  # noqa: E402
     SSE_EVENT_CONTEXT_OVERFLOW,
     SSE_EVENT_DONE,
     SSE_EVENT_PROVIDER_ERROR,
     SSE_EVENT_TEXT_DELTA,
     SSE_EVENT_USAGE,
 )
-from client.core.agent.types import (  # noqa: E402
+from lib.agent_runtime.types import (  # noqa: E402
     TRANSITION_REACTIVE_COMPACT_RETRY,
     LLMRequest,
     LLMResponse,
@@ -299,7 +299,7 @@ class TestHttpClientToolExecutorL0:
 
     def test_large_response_persisted_via_l0(self, tmp_path):
         """工具返回 >8KB → L0 落盘 → ToolResult.content 是 preview+path。"""
-        from client.core.agent.tool_registry import ToolEntry, ToolRegistry
+        from lib.agent_runtime.tool_registry import ToolEntry, ToolRegistry
 
         # 构造 mock registry 和 entry
         reg = MagicMock(spec=ToolRegistry)
@@ -330,7 +330,7 @@ class TestHttpClientToolExecutorL0:
 
     def test_small_response_not_persisted(self, tmp_path):
         """工具返回 <8KB → 不落盘 → ToolResult.content 是原内容。"""
-        from client.core.agent.tool_registry import ToolEntry, ToolRegistry
+        from lib.agent_runtime.tool_registry import ToolEntry, ToolRegistry
 
         reg = MagicMock(spec=ToolRegistry)
         entry = MagicMock(spec=ToolEntry)
@@ -358,7 +358,7 @@ class TestHttpClientToolExecutorL0:
 
     def test_error_response_not_persisted(self, tmp_path):
         """错误响应不落盘（让模型看到完整错误信息）。"""
-        from client.core.agent.tool_registry import ToolEntry, ToolRegistry
+        from lib.agent_runtime.tool_registry import ToolEntry, ToolRegistry
 
         reg = MagicMock(spec=ToolRegistry)
         entry = MagicMock(spec=ToolEntry)
@@ -747,7 +747,10 @@ class TestReactiveCompactRetry:
 
             # ScriptedLLM：第1次 overflow → 第2次返回 summary → 第3次返回正常文本
             llm = _ScriptedCompactorLLM(summary_text="SUMMARY", final_text="final answer")
-            compactor = Compactor(max_context_tokens=1000, tail_keep=4)
+            # max_context_tokens=0 = 上限未知 ⇒ should_compact 恒 False（compactor.py:281-288）
+            # ⇒ 主动压缩天然 no-op，本类只验收 reactive 路径，不依赖 LLM 调用序号。
+            # ⛔ X11（workspace/local_butler 大整改）重写压缩触发机制后，本类需重新编排。
+            compactor = Compactor(max_context_tokens=0, tail_keep=4)
 
             runner = SessionRunner(
                 deps=RunnerDeps(
@@ -789,7 +792,10 @@ class TestReactiveCompactRetry:
                 )))
 
             llm = _ScriptedCompactorLLM(summary_text="SUMMARY", final_text="ok")
-            compactor = Compactor(max_context_tokens=1000, tail_keep=4)
+            # max_context_tokens=0 = 上限未知 ⇒ should_compact 恒 False（compactor.py:281-288）
+            # ⇒ 主动压缩天然 no-op，本类只验收 reactive 路径，不依赖 LLM 调用序号。
+            # ⛔ X11（workspace/local_butler 大整改）重写压缩触发机制后，本类需重新编排。
+            compactor = Compactor(max_context_tokens=0, tail_keep=4)
 
             runner = SessionRunner(
                 deps=RunnerDeps(
@@ -843,7 +849,10 @@ class TestReactiveCompactRetry:
             # compactor.compact() 调 LLM → overflow → fail-open 返回原 messages
             # runner 检测 compacted is messages → compact_noop → fail
             llm = _AlwaysOverflowCompactorLLM()
-            compactor = Compactor(max_context_tokens=1000, tail_keep=4)
+            # max_context_tokens=0 = 上限未知 ⇒ should_compact 恒 False（compactor.py:281-288）
+            # ⇒ 主动压缩天然 no-op，本类只验收 reactive 路径，不依赖 LLM 调用序号。
+            # ⛔ X11（workspace/local_butler 大整改）重写压缩触发机制后，本类需重新编排。
+            compactor = Compactor(max_context_tokens=0, tail_keep=4)
 
             runner = SessionRunner(
                 deps=RunnerDeps(
@@ -902,7 +911,10 @@ class TestReactiveCompactRetry:
                     yield {"type": SSE_EVENT_CONTEXT_OVERFLOW, "error": "overflow", "status_code": 413}
                     yield {"type": SSE_EVENT_DONE, "finish_reason": "error"}
 
-            compactor = Compactor(max_context_tokens=1000, tail_keep=4)
+            # max_context_tokens=0 = 上限未知 ⇒ should_compact 恒 False（compactor.py:281-288）
+            # ⇒ 主动压缩天然 no-op，本类只验收 reactive 路径，不依赖 LLM 调用序号。
+            # ⛔ X11（workspace/local_butler 大整改）重写压缩触发机制后，本类需重新编排。
+            compactor = Compactor(max_context_tokens=0, tail_keep=4)
             runner = SessionRunner(
                 deps=RunnerDeps(
                     llm_gateway=_LLM(), event_store=store,

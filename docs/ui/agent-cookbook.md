@@ -142,7 +142,7 @@ print("saved", w.size())
 
 ## 五、client/ 迁移路径（供后续 agent 参考）
 
-1. `client/app.py` 的 `_load_stylesheet()` 改为 `apply_theme(app)`；
+1. `client/main.py` 的 `apply_theme(app)`（原 `client/app.py` 的 `_load_stylesheet()` 已改名，该文件也不存在了）；
    删除 `client/resources/style.qss`（其 token 已并入 lib/ui）。
 2. client 内 274+ 处内联 `setStyleSheet` 含色值的，按本手册逐文件替换为
    textRole/kind 钩子；优先迁移主窗口与高频对话框。

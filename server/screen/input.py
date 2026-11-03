@@ -10,7 +10,7 @@ import time
 
 from server.screen.windows import _ADMIN_STATUS
 
-logger = logging.getLogger("localagent.screen")
+logger = logging.getLogger("parcae.screen")
 
 
 # ========== Windows SendInput 结构体（用于原生键鼠事件注入，绕过 pyautogui 的 IME/双击问题） ==========
@@ -258,7 +258,13 @@ def _execute_action(action: str, x: int | None = None, y: int | None = None,
                     dx: int = 0, dy: int = 0, button: str = "left") -> dict:
     """执行键鼠操作，返回结果"""
     if not _ADMIN_STATUS:
-        return {"success": False, "message": "键鼠操控需要管理员权限！请以管理员身份启动后端。"}
+        # 兜底：正常路径已被各端点开头的提权闸门挡住（status=not_elevated，不弹窗）。
+        # 走到这里说明有人绕过闸门直接调用，文案保持与闸门同口径。
+        return {
+            "success": False,
+            "status": "not_elevated",
+            "message": "not_elevated: 键鼠操控需要管理员权限（Windows UIPI 会丢弃非提权进程注入的事件）。",
+        }
 
     import pyautogui
     pyautogui.FAILSAFE = True

@@ -18,7 +18,7 @@ from pydantic import Field
 
 from lib.schema import BaseSchema
 
-logger = logging.getLogger("localagent.docviewer")
+logger = logging.getLogger("parcae.docviewer")
 router = APIRouter(prefix="/docviewer", tags=["DocViewer"])
 
 # 支持的文件扩展名 → MIME 类型映射

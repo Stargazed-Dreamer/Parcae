@@ -57,7 +57,7 @@ task_type: system.wip_tracking
 
 ### 留档（任务中断时）
 
-1. 调用 `POST /wip`（MCP 网关: `localagent_advanced_tool(wip_create)`）：
+1. 调用 `POST /wip`（MCP 网关: `parcae_advanced_tool(wip_create)`）：
 
 ```json
 {
@@ -98,7 +98,7 @@ task_type: system.wip_tracking
 
 ### 更新进度
 
-调用 `PUT /wip/{task_id}`（MCP 网关: `localagent_advanced_tool(wip_update)`）：
+调用 `PUT /wip/{task_id}`（MCP 网关: `parcae_advanced_tool(wip_update)`）：
 
 ```json
 {
@@ -156,4 +156,4 @@ task_type: system.wip_tracking
 | 依赖 | 路径/接口 | 说明 |
 |------|----------|------|
 | 待办模块 | `wip_list`（默认轻量）/ `wip_get` / `wip_get_many` | MCP 直连，列 WIP / 单条取详情 / 批量取详情 |
-| 待办模块 | `localagent_advanced_tool(wip_create/wip_update/wip_delete)` | MCP 网关，写操作 |
+| 待办模块 | `parcae_advanced_tool(wip_create/wip_update/wip_delete)` | MCP 网关，写操作 |

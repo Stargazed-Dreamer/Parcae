@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 import sys
@@ -34,7 +35,7 @@ from client.core.ask_user_bridge import (  # noqa: E402
     OUTCOME_TIMEOUT,
     AskUserBridge,
 )
-from client.panels.chat import ChatPanel, _AskUserBlock  # noqa: E402
+from client.panels.chat import _AskUserBlock  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("qapp")
 
@@ -393,11 +394,10 @@ class TestAskUserBridge:
 
 
 class TestTimeoutOnlyFromConfig:
-    """`[runner] ask_user_timeout_secs` 是唯一入口，且必须真的被面板读到。
+    """`[runner] ask_user_timeout_secs` 仍是唯一入口；T7 起由 runtime 读取。
 
-    只测 `_load_ask_user_timeout_secs()` 的解析不够——它还可能在构造时没被接线，
-    于是配置改多少都没用（本项目有过"死配置"这一类）。所以下面一条真的建面板，
-    读回 bridge 上生效的值。
+    面板不再持有 ask_user 等待逻辑（卡片只负责把选择 POST 回 runtime），
+    所以这里验两段：config 解析口径不变 + runtime 把该值传给 provider。
     """
 
     @staticmethod
@@ -410,8 +410,10 @@ class TestTimeoutOnlyFromConfig:
         return merged
 
     def test_positive_value_is_read(self, monkeypatch):
+        from lib.agent_runtime.runtime_deps import settings_from_config
+
         self._patch(monkeypatch, {"ask_user_timeout_secs": 25})
-        assert ChatPanel._load_ask_user_timeout_secs() == 25.0
+        assert settings_from_config("http://127.0.0.1:18766").ask_user_timeout_secs == 25.0
 
     @pytest.mark.parametrize("table", [
         {},
@@ -422,16 +424,56 @@ class TestTimeoutOnlyFromConfig:
     ])
     def test_missing_zero_junk_all_mean_never_timeout(self, monkeypatch, table):
         """缺失/0/负数/写错类型 ⇒ 0.0（永不超时），绝不因为读失败就变成一个短超时"""
-        self._patch(monkeypatch, table)
-        assert ChatPanel._load_ask_user_timeout_secs() == 0.0
+        from lib.agent_runtime.runtime_deps import settings_from_config
 
-    def test_panel_wires_the_configured_value_into_the_bridge(self, monkeypatch):
-        self._patch(monkeypatch, {"ask_user_timeout_secs": 33, "typewriter_mode": "fast"})
-        panel = ChatPanel()
-        try:
-            assert panel._ask_bridge.timeout_secs == 33.0, (
-                "配置读到了但没接到桥接上——这条配置就是死的"
+        self._patch(monkeypatch, table)
+        assert settings_from_config("http://127.0.0.1:18766").ask_user_timeout_secs == 0.0
+
+    def test_runtime_passes_configured_timeout_to_provider(self, monkeypatch, tmp_path):
+        """配置值必须真的进到 provider 的等参数里，否则就是死配置。"""
+        import types
+
+        from lib.agent_runtime.event_store import EventStore
+        from lib.agent_runtime.runtime_deps import settings_from_config
+        from lib.agent_runtime.runtime_manager import RuntimeApiError, RuntimeManager
+
+        self._patch(monkeypatch, {"ask_user_timeout_secs": 33})
+        recorded = {}
+
+        def fake_provider(**kwargs):
+            recorded.update(kwargs)
+            return types.SimpleNamespace(
+                cancel_pending=lambda *a, **k: 0,
+                resolve=lambda *a, **k: False,
             )
+
+        monkeypatch.setattr(
+            "lib.agent_runtime.runtime_manager.RuntimeAskUserProvider", fake_provider,
+        )
+        store = EventStore(db_path=str(tmp_path / "timeout_wiring.db"))
+        store.init()
+
+        async def _boom(*_a, **_k):
+            raise RuntimeError("deps not needed for this contract test")
+
+        manager = RuntimeManager(
+            store=store,
+            settings=settings_from_config("http://127.0.0.1:18766"),
+            deps_factory=_boom,
+        )
+
+        async def _submit():
+            with pytest.raises(RuntimeApiError):
+                await manager.submit("s-timeout", "hi")
+            return recorded
+
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                got = loop.run_until_complete(_submit())
+            finally:
+                loop.close()
         finally:
-            panel._ask_bridge.set_handlers(None)
-            panel.deleteLater()
+            store.close()
+
+        assert got["timeout_secs"] == 33.0

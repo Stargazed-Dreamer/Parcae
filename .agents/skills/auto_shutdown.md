@@ -168,13 +168,13 @@ task_type: adhoc.auto_shutdown
 
 ```
 # 触发关机
-localagent_advanced_tool(
+parcae_advanced_tool(
     tool="auto_shutdown_trigger",
     params={"task_id": "game_afk", "reason": "游戏完成", "screenshot": true, "dry_run": false}
 )
 
 # 取消关机
-localagent_advanced_tool(
+parcae_advanced_tool(
     tool="auto_shutdown_cancel",
     params={"dry_run": false}
 )
@@ -192,7 +192,7 @@ import json
 def check_game_done():
     """截图 + OCR 判断游戏是否完成"""
     # 用 MCP 工具：capture_screen + screen_ocr
-    # 或用 localagent_advanced_tool(tool='screen_ocr', params={...})
+    # 或用 parcae_advanced_tool(tool='screen_ocr', params={...})
     # 返回 True/False
     pass
 
@@ -279,6 +279,6 @@ inbox 条目标题恒为「关机已触发」，**即使 dry_run=True 也一样*
 ## 相关文件
 
 - [server/auto_shutdown.py](file:///<project_root>/server/auto_shutdown.py) — 端点实现
-- [tests/test_auto_shutdown.py](file:///<project_root>/tests/test_auto_shutdown.py) — 测试（含 autouse 安全网 fixture 防真关机）
+- [tests/approval_screen/test_auto_shutdown.py](file:///<project_root>/tests/approval_screen/test_auto_shutdown.py) — 测试（含 autouse 安全网 fixture 防真关机）
 - `temp/sdd/auto-shutdown-refactor/spec.md` — SDD 规约（含危险操作测试铁律）
 - `docs/dev-workflow.md` "危险操作测试铁律" 章节 — 测试安全规范

@@ -23,7 +23,7 @@ from lib.ui import tokens as T
 
 _QSS_TEMPLATE = Template(r"""
 /* ============================================================
-   LocalAgent 深色工程主题（由 lib/ui/theme.py 生成，禁止手改产物）
+   Parcae 深色工程主题（由 lib/ui/theme.py 生成，禁止手改产物）
    ============================================================ */
 
 QWidget {

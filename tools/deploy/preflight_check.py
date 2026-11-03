@@ -1,6 +1,6 @@
-"""LocalAgent 部署前置自检脚本。
+"""Parcae 部署前置自检脚本。
 
-一键检查 LocalAgent 部署所需的前置条件，每项输出 ✅/⚠️/❌ 状态及具体修复命令。
+一键检查 Parcae 部署所需的前置条件，每项输出 ✅/⚠️/❌ 状态及具体修复命令。
 
 用法：
     python tools/deploy/preflight_check.py
@@ -333,7 +333,7 @@ def main():
         pass
 
     print("=" * 60)
-    print("LocalAgent 部署前置自检")
+    print("Parcae 部署前置自检")
     print(f"项目根目录：{PROJECT_ROOT}")
     print("=" * 60)
     print()

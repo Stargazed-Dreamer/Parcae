@@ -17,7 +17,7 @@ from server.user_message import (
     should_inject,
 )
 
-logger = logging.getLogger("localagent.middleware")
+logger = logging.getLogger("parcae.middleware")
 
 
 # ========== MCP 工具调用统计（原 server/mcp_stats.py 归并） ==========
@@ -25,6 +25,13 @@ logger = logging.getLogger("localagent.middleware")
 _STATS_FILE = Path(__file__).parent.parent.parent / "data" / "mcp_stats.json"
 _stats: dict[str, dict] = {}
 _stats_lock = threading.Lock()
+
+# 网关入口工具名：这些工具本身只是一个转发壳，真实被调用的操作由 arguments.tool 指定。
+# 不拆出来的话，117 个网关 operation_id 的调用量全堆在壳这一个 key 上，覆盖度不可见。
+# ⛔ 真源是 server/advanced.py 的 build_registry_from_app（网关 operation_id 集合）；
+# 这里只列"壳"的名字。新增网关入口时要同步本集合，漂移由
+# workspace/tool_dojo 的 L0 契约层检测（比对 /advanced/tools 的实际入口）。
+_GATEWAY_TOOL_NAMES: frozenset[str] = frozenset({"parcae_advanced_tool"})
 
 
 def _load_mcp_stats() -> None:
@@ -51,8 +58,18 @@ def _save_mcp_stats(snapshot: dict[str, dict]) -> None:
         pass
 
 
-def record_call(tool_name: str, duration_ms: float, success: bool = True) -> None:
-    """记录一次 MCP 工具调用"""
+def record_call(
+    tool_name: str,
+    duration_ms: float,
+    success: bool = True,
+    via_gateway: bool = False,
+) -> None:
+    """记录一次 MCP 工具调用。
+
+    via_gateway=True 表示这次调用是经网关壳转发的，tool_name 已被解析为真实
+    operation_id（见 mcp_stats_middleware）。该标记只写不擦：同一操作若两种
+    通道都走过，最终为 true，用于区分"直连调过"与"只能走网关调"。
+    """
     with _stats_lock:
         if tool_name not in _stats:
             _stats[tool_name] = {
@@ -60,6 +77,8 @@ def record_call(tool_name: str, duration_ms: float, success: bool = True) -> Non
                 "last_called": "", "last_error": "",
             }
         entry = _stats[tool_name]
+        if via_gateway:
+            entry["via_gateway"] = True
         entry["count"] += 1
         entry["total_ms"] += duration_ms
         entry["last_called"] = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -288,11 +307,20 @@ def register_middleware(app):
             # 读取请求体
             body = await request.body()
             tool_name = None
+            via_gateway = False
             try:
                 data = json.loads(body)
                 # MCP JSON-RPC: {"method": "tools/call", "params": {"name": "tool_name"}}
                 if data.get("method") == "tools/call":
-                    tool_name = data.get("params", {}).get("name")
+                    params = data.get("params") or {}
+                    tool_name = params.get("name")
+                    # 网关壳：真实操作在 arguments.tool 里，拆出来单独统计
+                    if tool_name in _GATEWAY_TOOL_NAMES:
+                        arguments = params.get("arguments") or {}
+                        inner = arguments.get("tool") if isinstance(arguments, dict) else None
+                        if isinstance(inner, str) and inner:
+                            tool_name = inner
+                            via_gateway = True
             except (json.JSONDecodeError, AttributeError):
                 pass
 
@@ -302,7 +330,7 @@ def register_middleware(app):
 
             if tool_name:
                 success = 200 <= response.status_code < 400
-                record_call(tool_name, duration_ms, success)
+                record_call(tool_name, duration_ms, success, via_gateway=via_gateway)
 
                 # 记忆系统触发器：记录工具调用到三层记忆
                 try:
@@ -367,7 +395,11 @@ def register_middleware(app):
             try:
                 data = json.loads(body_bytes)
                 if isinstance(data, dict):
-                    data["_user_supplement"] = supplement
+                    # 端点自己可能已经挂了「定向给这一路」的留言（v14），别覆盖掉
+                    existing = data.get("_user_supplement")
+                    data["_user_supplement"] = (
+                        f"{existing}\n{supplement}" if existing else supplement
+                    )
                 else:
                     data = {"_original": data, "_user_supplement": supplement}
                 new_body = json.dumps(data, ensure_ascii=False).encode("utf-8")

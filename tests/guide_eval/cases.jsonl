@@ -151,3 +151,20 @@
 {"query": "实验4改名提交", "expected_top1": "recurring.homework", "source": "manual", "note": "最短形式：只靠'改名提交'一个锚点"}
 {"query": "从砺儒云更新一次状态", "expected_top1": "recurring.homework", "source": "manual", "note": "09-28 实测只有 17 分贴阈值，补'更新状态/台账重扫'后应稳定"}
 {"query": "帮我把这个文件夹改名", "expected_top1": null, "source": "manual", "note": "反向守卫：'改名'单独出现不得被'改名提交'带进 homework（防泛词污染）"}
+{"query": "查看 workspace/model_data 这个任务是不是该更新了", "expected_top1": null, "source": "manual", "note": "反向守卫（2026-10-09 补）：09-30 实测这句被 adhoc.office_xlsx 抢走 TaskGuide 并注入「用 openpyxl 现场实现」的 first_action（原句与归因存记忆 facts id=7854 key=model_data_guide_misroute）。model_data 至今无专属 task_type（GUIDE_REGISTRY 全表搜不到 model_data），正解是读它自己的 docs/README.md；此处 expected=null 即守「不得被任何 skill strong 抢走」，不是要求它必须命中某个 task_type。"}
+{"query": "详细审计本地记忆系统", "expected_top1": null, "source": "manual", "note": "反向守卫（2026-10-09 补）：temp/sdd/memory-v2/handoff.md L207 记 `agent_guide(task='详细审计本地记忆系统…')` → recurring.life_design、score 16、strong_match=true。原文在该文档里被截断，故只取引号内可见前缀，不补后半截（docs/agent-guide-keywords.md §3.6「样本不许手打」）。expected=null 守「不得被 life_design 抢」。"}
+{"query": "帮我设计一下接下来的人生", "expected_top1": "recurring.life_design", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "把这张图片上的文字提取出来", "expected_top1": "adhoc.ocr", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "最近有哪些事到期了", "expected_top1": "system.task_reminder", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "这轮干完了，走收尾流程", "expected_top1": "system.task_closure", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "temp 目录又堆满了，清一下", "expected_top1": "system.temp_cleanup", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "帮我点一下这个按钮", "expected_top1": "dev.computer_use", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "给客户端开发一个新的面板", "expected_top1": "dev.client_dev", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "写一份目标任务的说明", "expected_top1": "dev.leader", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "这事该放 temp 还是 workspace", "expected_top1": "dev.cross_workspace_advisor", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "把刚才聊的整理成需求文档", "expected_top1": "dev.to_spec", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "帮我挑挑这个计划的毛病", "expected_top1": "dev.grill_me", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "一边追问一边把决策记成 ADR", "expected_top1": "dev.grill_with_docs", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "能不能用大白话和术语各讲一遍", "expected_top1": "daily.dual_layer_explanation", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "这个结论靠谱吗", "expected_top1": "daily.fact_checking", "source": "holdout_20261021", "note": "没参与调词的留出集"}
+{"query": "看看别的行业是怎么做的", "expected_top1": "daily.cross_domain_borrowing", "source": "holdout_20261021", "note": "没参与调词的留出集"}

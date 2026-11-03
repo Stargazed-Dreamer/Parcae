@@ -6,7 +6,7 @@
 注：端点用 def（非 async），FastAPI 自动放线程池执行，避免阻塞事件循环
 （截图/键鼠/OCR 均为阻塞调用）。
 
-评估文档（docs/evaluations/2026-07-20-computer-use-vs-localagent.md）P0 改进：
+评估文档（docs/evaluations/2026-07-20-computer-use-vs-parcae.md）P0 改进：
 - 键盘动作前强制焦点校验（FOCUS_NOT_VERIFIED / FOCUS_LEAK_PREVENTED）
 - canonical window token（UWP host/child 同族）
 - 焦点证据返回（foreground_before/after）
@@ -28,7 +28,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 
-logger = logging.getLogger("localagent.screen")
+logger = logging.getLogger("parcae.screen")
 router = APIRouter(prefix="/screen", tags=["Screen"])
 
 
@@ -42,6 +42,7 @@ from server.screen.capture import (  # noqa: E402,F401
     _find_overlap_and_stitch,
     _get_fullscreen_offset,
     _images_equal,
+    is_desktop_locked,
 )
 from server.screen.focus import (  # noqa: E402,F401
     EXECUTED_UNVERIFIED,
@@ -128,6 +129,11 @@ def _ensure_takeover_approved(screen_cfg: dict, task_description: str | None) ->
     分支只在"未来某端点漏掉 403 检查"或两次调用之间授权到期的竞态下才会走到。
     唯一的授权入口是 `POST /screen/control/request`（`screen_request_control`）。
     watchdog 的"不弹窗"也在这一行实现：会话 active（含 watchdog）直接放行。
+
+    ⚠️ 提权（2026-10-22）：**调用本函数的注入类端点必须先过提权闸门**
+    （`if not _ADMIN_STATUS: return ... status=NOT_ELEVATED_STATUS`），否则未提权时会
+    先弹窗问用户、随后键鼠动作必然无效。本函数自己不做提权判断是有意的——
+    UIA 语义动作在非提权后端仍可用（不发键鼠事件），一刀切会把那条路一起堵死。
 
     Returns:
         (approved, reason)
@@ -259,6 +265,45 @@ def _enforce_session_permission() -> dict:
     return session.status()
 
 
+# ========== 提权闸门（未提权直接拒绝，不弹接管确认窗） ==========
+# 2026-10-22 用户要求：「屏幕控制在不可用时应该直接拒绝并明确未提权，而不是弹窗让用户
+# 允许之后才让 agent 发现点击无效」。
+#
+# 背景：未提权时 Windows UIPI 会**静默丢弃** SendInput / SetCursorPos / SetForegroundWindow，
+# 键鼠动作必然无效。改造前的顺序是「先弹接管确认窗 → 用户点允许 → 走完确认流程 →
+# agent 才从 _execute_action 的返回值发现『需要管理员权限』」——白问用户一次，还让用户
+# 以为「允许了就能点」。
+#
+# 现在的顺序：注入类端点**第一行**判提权（早于 403 授权引导、早于 takeover 弹窗、
+# 早于 require_confirm 确认窗），未提权直接返回 status="not_elevated"。
+# 为什么不 403/503：403 是「去请求授权」的引导，而未提权时授权也救不了（死路）；
+# 非 2xx 在 MCP 侧会被折成 "Tool failed: HTTP 503: {dict 的 repr}"，可读性反而更差。
+# 200 + status 字段是本项目副作用端点的既有约定（blocked / cancelled / emergency_stopped）。
+
+NOT_ELEVATED_STATUS = "not_elevated"
+
+_ELEVATE_HINT = (
+    "处理：由用户以管理员身份重启后端（start.bat 右键 → 以管理员身份运行）；"
+    "agent 不得替用户点 UAC，也不要重试本调用（提权前后行为不会自己变好）。"
+)
+
+_NON_INJECTION_HINT = (
+    "无需提权仍可用的能力：capture_screen / screen_ocr / screen_snapshot / list_windows / "
+    "screen_semantic_action（UIA 语义动作）/ 窗口生命周期端点。"
+)
+
+
+def not_elevated_message(action: str) -> str:
+    """未提权时的统一拒绝文案（人可读、agent 可照做）。"""
+    return (
+        f"{action}不可用：后端未以管理员权限运行（/screen/status 的 admin_privileges=false）。"
+        "非提权进程注入的键鼠事件会被 Windows UIPI 静默丢弃，用户批准接管也无法改变结果，"
+        "所以本端点直接拒绝、且不弹接管确认窗。"
+        + _ELEVATE_HINT
+        + _NON_INJECTION_HINT
+    )
+
+
 def gated_side_effect_operations() -> list[str]:
     """扫描路由表，列出 handler 开头真的调用了 `_enforce_session_permission()` 的端点。
 
@@ -325,6 +370,10 @@ class ControlRequest(BaseSchema):
     mode: str = "normal"  # "normal" | "watchdog"；watchdog 模式不因空闲撤销，硬上限到期降级到 normal
     max_duration_hours: int | None = None  # watchdog 时长（小时），范围 [watchdog_min_hours, watchdog_max_hours]；None 用默认值
     needs_shutdown: bool = False  # 任务需要关机权限；仅 mode="watchdog" 有意义（normal 无关机位）
+    # 本任务是否需要键鼠注入（点击/输入/滚动/抢焦点）。未提权时注入必然被 UIPI 丢弃，
+    # 所以默认 True 会在未提权时直接拒绝授权请求（不弹窗）；
+    # 只做 UIA 语义动作 / 窗口操作 / 剪贴板 / 截图的任务可显式传 False，此时照常弹窗授权。
+    needs_input_injection: bool = True
     # 会话已是 watchdog 但用户当初没勾"允许关机"时，带此参数属于权限升级→会重新弹窗，
     # 不必先 release（平级/低权限请求仍短路成 skipped，不改现有授权）
 
@@ -344,6 +393,8 @@ class ControlResponse(BaseSchema):
     # 曾只能靠 message 文本区分"新批准/沿用"，agent 无法机器判断
     reused_approval: bool = False
     task_authorization: dict = {}
+    # 后端是否已提权（not_elevated 时必为 False，供 agent 一次看清"不是用户拒绝"）
+    admin_privileges: bool = True
 
 
 @router.post("/control/request", response_model=ControlResponse, operation_id="screen_request_control")
@@ -356,6 +407,9 @@ def screen_request_control(req: ControlRequest, request: Request):
     平级/低权限的重复请求短路成 status="skipped"，不改现有授权；
     短路时对外 status 仍是 "authorized"（描述会话结果），是否沿用旧授权看
     reused_approval=True——它是"这次有没有新的用户批准"的机器可读判据。
+
+    未提权（admin_privileges=false）且 needs_input_injection=true 时**不弹窗**，
+    直接返回 status="not_elevated"：键鼠注入必被 UIPI 丢弃，问了也白问。
     """
     from server.config import get_screen_config
     from server.core.health import invalidate_health_cache
@@ -365,6 +419,27 @@ def screen_request_control(req: ControlRequest, request: Request):
 
     screen_cfg = get_screen_config()
     session = get_session_manager()
+
+    # 提权闸门（2026-10-22）：未提权时键鼠注入必然被 UIPI 丢弃，授权窗弹了也没用——
+    # 直接拒绝，不打扰用户。仅当调用方显式声明本任务不需要键鼠注入
+    # （needs_input_injection=false，例如只做 UIA 语义动作/窗口操作）才继续走授权流程。
+    if not _ADMIN_STATUS and req.needs_input_injection:
+        return ControlResponse(
+            success=False,
+            persistent_mode=False,
+            source="",
+            status=NOT_ELEVATED_STATUS,
+            requested_mode=req.mode,
+            mode=req.mode,
+            admin_privileges=False,
+            task_authorization=session.status(),
+            message=(
+                not_elevated_message("键鼠接管授权")
+                + " 若本任务不需要键鼠注入、只用 UIA 语义动作/窗口操作，"
+                "可带 needs_input_injection=false 重新请求授权。"
+            ),
+        )
+
     if not screen_cfg.get("takeover_persistent_enabled", True):
         status = session.status()
         return ControlResponse(
@@ -374,6 +449,7 @@ def screen_request_control(req: ControlRequest, request: Request):
             status="disabled",
             requested_mode=req.mode,
             mode=req.mode,
+            admin_privileges=bool(_ADMIN_STATUS),
             task_authorization=status,
             message="当前任务授权已被配置禁用",
         )
@@ -453,6 +529,7 @@ def screen_request_control(req: ControlRequest, request: Request):
             mode=req.mode,
             max_duration_seconds=max_duration_seconds,
             user_reason=user_reason,
+            admin_privileges=bool(_ADMIN_STATUS),
             task_authorization=authorization,
             message="用户未授予当前任务控制权限",
         )
@@ -482,6 +559,7 @@ def screen_request_control(req: ControlRequest, request: Request):
         status=status,
         reused_approval=result.get("status") == "skipped",
         user_reason=user_reason,  # ISSUE-004：成功路径也返回用户反馈
+        admin_privileges=bool(_ADMIN_STATUS),
         task_authorization=authorization,
         message=(
             (
@@ -526,6 +604,7 @@ def screen_release_control():
         persistent_mode=False,
         source="",
         status="released",
+        admin_privileges=bool(_ADMIN_STATUS),
         task_authorization=authorization,
         message=(
             "当前任务授权已收回"
@@ -760,6 +839,24 @@ def list_windows():
         raise HTTPException(status_code=500, detail=f"窗口枚举失败: {e}") from None
 
 
+def _capture_http_error(prefix: str, exc: BaseException | None = None) -> HTTPException:
+    """截图失败的统一 HTTP 错误：区分「桌面锁定 / 安全桌面」与真实故障。
+
+    与 activity_tracker 的 screen_vl loop 同口径（那边走 `skipped_locked` 第三态）：
+    桌面不可捕获属环境原因，既不刷满屏 traceback 假装是服务端内部错误，
+    也不该被埋进 500 里伪装成产品缺陷。其余原因把原始错因原样回传，不掩盖。
+    """
+    if is_desktop_locked():
+        return HTTPException(
+            status_code=503,
+            detail=f"{prefix}：检测到桌面已锁定（安全桌面下 GDI 不可捕获），解锁后重试即可",
+        )
+    return HTTPException(
+        status_code=503,
+        detail=f"{prefix}：{exc}" if exc else prefix,
+    )
+
+
 @router.post("/capture", operation_id="capture_screen")
 def capture_screen(req: CaptureRequest):
     """截图 - 全屏或指定窗口
@@ -807,7 +904,7 @@ def capture_screen(req: CaptureRequest):
                 raise HTTPException(status_code=400, detail="mode=window 必须提供 window_title 或 hwnd")
             png_bytes = _capture_window(target_hwnd, force_fullscreen_crop=req.force_fullscreen_crop)
             if png_bytes is None:
-                raise HTTPException(status_code=500, detail="窗口截图失败（可能被遮挡或最小化）")
+                raise _capture_http_error("窗口截图失败（可能被遮挡或最小化）")
             # 收集窗口几何用于 STALE_COORDINATES 检测
             window_rect_list: list[int] | None = None
             try:
@@ -817,7 +914,13 @@ def capture_screen(req: CaptureRequest):
             except Exception:
                 window_rect_list = None
         else:
-            png_bytes = _capture_fullscreen()
+            try:
+                png_bytes = _capture_fullscreen()
+            except Exception as e:
+                # _capture_fullscreen 内部已对 BitBlt 瞬时抖动做了「丢弃线程本地 mss 实例 + 重建 + 重试」；
+                # 走到这里说明重试已耗尽（或桌面不可捕获），转成可行动的 503，
+                # 而不是把一次环境抖动包装成 500 + 满屏 traceback（2026-10-17 实证）
+                raise _capture_http_error("全屏截图失败（GDI 不可用，内置重试已耗尽）", e) from None
             captured_title = None
             target_hwnd = None
             # 全屏模式：记录虚拟屏几何
@@ -855,7 +958,7 @@ def capture_screen(req: CaptureRequest):
             import os
             import tempfile
             from datetime import datetime
-            temp_dir = os.path.join(tempfile.gettempdir(), "localagent_captures")
+            temp_dir = os.path.join(tempfile.gettempdir(), "parcae_captures")
             os.makedirs(temp_dir, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             if captured_title:
@@ -995,7 +1098,7 @@ def screen_zoom(req: ZoomRequest):
         import os
         import tempfile
         from datetime import datetime
-        temp_dir = os.path.join(tempfile.gettempdir(), "localagent_captures")
+        temp_dir = os.path.join(tempfile.gettempdir(), "parcae_captures")
         os.makedirs(temp_dir, exist_ok=True)
         filename = f"zoom_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
         file_path = os.path.join(temp_dir, filename)
@@ -1123,7 +1226,7 @@ def screen_ocr(req: ScreenOcrRequest):
                 raise HTTPException(status_code=400, detail="mode=window 必须提供 window_title 或 hwnd")
             png_bytes = _capture_window(target_hwnd, force_fullscreen_crop=req.force_fullscreen_crop)
             if png_bytes is None:
-                raise HTTPException(status_code=500, detail="窗口截图失败（可能被遮挡或最小化）")
+                raise _capture_http_error("窗口截图失败（可能被遮挡或最小化）")
             # 提取窗口 rect 供 agent 计算屏幕坐标（screen_x = window_left + ocr_cx）
             try:
                 import win32gui
@@ -1132,7 +1235,13 @@ def screen_ocr(req: ScreenOcrRequest):
             except Exception:
                 window_rect_for_response = None
         else:
-            png_bytes = _capture_fullscreen()
+            try:
+                png_bytes = _capture_fullscreen()
+            except Exception as e:
+                # _capture_fullscreen 内部已对 BitBlt 瞬时抖动做了「丢弃线程本地 mss 实例 + 重建 + 重试」；
+                # 走到这里说明重试已耗尽（或桌面不可捕获），转成可行动的 503，
+                # 而不是把一次环境抖动包装成 500 + 满屏 traceback（2026-10-17 实证）
+                raise _capture_http_error("全屏截图失败（GDI 不可用，内置重试已耗尽）", e) from None
             captured_title = None
 
         from PIL import Image

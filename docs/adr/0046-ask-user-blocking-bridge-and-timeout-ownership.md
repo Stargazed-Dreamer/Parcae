@@ -1,7 +1,9 @@
 # ask_user 用「worker 同步阻塞 + 主线程卡片」桥；等待时长只归配置，中断必须绕过 worker 事件循环
 
-状态：accepted（2026-10-07，代码在 `client/core/ask_user_bridge.py`、
-`client/core/agent/builtin_tools/ask_user.py`、`client/panels/chat.py` 的 `_AskUserBlock`）
+状态：**部分取代**（2026-10-22）：同步阻塞桥的实现被 [ADR 0048](0048-butler-runtime-single-writer-projection-ledger.md)
+的 runtime 事件 + `POST /ask_user/{rid}` 取代；「等待时长只归配置」「没回答≠反对」两条继续有效。
+以下原文保留（2026-10-07，当时代码在 `client/core/ask_user_bridge.py`、
+`client/core/agent/builtin_tools/ask_user.py`、`client/panels/chat.py` 的 `_AskUserBlock`）。
 
 ## Context
 

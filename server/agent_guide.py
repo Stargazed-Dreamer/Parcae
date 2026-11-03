@@ -37,7 +37,7 @@ from server.project_structure import (
     scan_project_structure,
 )
 
-logger = logging.getLogger("localagent.agent_guide")
+logger = logging.getLogger("parcae.agent_guide")
 router = APIRouter(prefix="/guide", tags=["AgentGuide"])
 
 # ========== 使用埋点 ==========
@@ -288,8 +288,8 @@ def _load_optional_guide_entries() -> dict[str, dict]:
     主代码库不直接 import 任何 workspace 组件，删除 workspace/<component>/
     后 manifest 消失，4 个插入点自动注销。
     """
-    import importlib
-
+    from lib.component_loader import load_component_module, warm_probe
+    from server.component_manifest import _WORKSPACE_DIR as _ws_dir
     from server.component_manifest import load_manifests
 
     result: dict[str, dict] = {}
@@ -300,15 +300,31 @@ def _load_optional_guide_entries() -> dict[str, dict]:
         manifests = load_manifests()
     except Exception:
         manifests = {}
+
+    # 收齐全部入口后一次性子进程试 import：组件模块级阻塞不会卡死启动，
+    # 语法错误由 component_loader 预检拦下（原实现只 catch ImportError，
+    # SyntaxError 会穿透并让 server/main.py 启动即崩）。
+    children = sorted(_ws_dir.iterdir()) if _ws_dir.exists() else []
+    specs: dict[str, Path] = {}
+    for name, m in manifests.items():
+        if m.enabled and m.agent_guide is not None:
+            specs[f"workspace.{name}.{m.agent_guide.file[:-3]}"] = _ws_dir / name / m.agent_guide.file
+    for child in children:
+        if not child.is_dir() or child.name.startswith('_') or child.name.startswith('.'):
+            continue
+        specs[f"workspace.{child.name}.loop_actions"] = child / "loop_actions.py"
+    try:
+        warm_probe({mod: src for mod, src in specs.items() if src.exists()})
+    except Exception as exc:  # 预热失败不阻断：单模块加载仍有兜底
+        logger.warning("agent_guide 组件试 import 预热失败: %s", exc)
+
     for name, m in manifests.items():
         if not m.enabled or m.agent_guide is None:
             continue
         # 按 manifest 声明的 file 动态加载模块（去掉 .py 后缀）
         module_name = f"workspace.{name}.{m.agent_guide.file[:-3]}"
-        try:
-            mod = importlib.import_module(module_name)
-        except ImportError as e:
-            logger.warning("manifest 组件 %s agent_guide 模块加载失败 (%s): %s", name, module_name, e)
+        mod = load_component_module(module_name, component=name, path=specs.get(module_name))
+        if mod is None:
             continue
         entries = getattr(mod, m.agent_guide.entries_var, None)
         if isinstance(entries, dict) and entries:
@@ -318,17 +334,18 @@ def _load_optional_guide_entries() -> dict[str, dict]:
     # 2. 回退旧机制：扫 workspace/*/loop_actions.py，跳过已通过 manifest 加载的组件
     # 使用 component_manifest._WORKSPACE_DIR 而非 workspace.__path__，
     # 让 monkeypatch _WORKSPACE_DIR 的测试能同时影响 manifest 加载和 fallback 扫描。
-    from server.component_manifest import _WORKSPACE_DIR as _ws_dir
-    if not _ws_dir.exists():
-        return result
-    for child in sorted(_ws_dir.iterdir()):
+    for child in children:
         if not child.is_dir() or child.name.startswith('_') or child.name.startswith('.'):
             continue
         if child.name in loaded_components:
             continue
-        try:
-            mod = importlib.import_module(f'workspace.{child.name}.loop_actions')
-        except ImportError:
+        module_name = f"workspace.{child.name}.loop_actions"
+        src = specs.get(module_name)
+        if src is None or not src.exists():
+            # 组件没有 loop_actions.py（多数组件只有 SKILL.md），不是错误，静默跳过
+            continue
+        mod = load_component_module(module_name, component=child.name, path=src)
+        if mod is None:
             continue
         entries = getattr(mod, 'GUIDE_REGISTRY_ENTRIES', None)
         if isinstance(entries, dict) and entries:
@@ -355,7 +372,7 @@ def _build_mcp_tool_categories() -> dict:
         "note": (
             f"MCP 第一层工具按桶分组展示（6 桶 {total_tools} 个直连），桶间按 CATEGORY_ORDER 顺序输出。"
             "browser_legacy 4 个（open/click_element/fill_input/wait_for_load）从第一层下沉到 "
-            "localagent_advanced_tool 网关（用 localagent_list_tools 查询可访问的网关工具），"
+            "parcae_advanced_tool 网关（用 parcae_list_tools 查询可访问的网关工具），"
             "agent 优先用 browser_action / browser_session_create / browser_wait_for 新接口。"
             "UIA 语义层（screen_accessibility_snapshot / screen_semantic_action）已升入 perception 桶，"
             "与 browser_snapshot 对齐，支持 Computer Use 双语义快照（DOM + UIA）。"
@@ -820,6 +837,13 @@ _MUST_READ_RANK: dict[str | None, int] = {None: 0, "context+keyword": 1, "keywor
 # v5：全场景通配（consumption_contexts=["*"] 且本轮没有关键词/具体场景命中）在必读块里
 # 最多占几个名额。0 表示完全让位给具体命中项。
 _MUST_READ_WILDCARD_QUOTA = 1
+# guide 响应里 memory_index 的上限（2026-10-09 补）。必读块只用 _MUST_READ_MAX 条上屏，
+# 但 memory_index 是整份清单原样返回给调用方（client runner 会 JSON 塞进 ephemeral 上下文），
+# 被 consumption_contexts 通配（"*" / "adhoc.*"）灌起来时实测一次 38 条。
+# 超限时保序截断（静态声明的 memory_key/related_memory_keys 天然排在动态命中之前，
+# 不会被裁掉），并在响应里回显 memory_index_truncated 说明裁掉多少、怎么兜底——
+# 只截断不告知会让调用方以为"就这些"。
+_MEMORY_INDEX_MAX = 12
 
 
 def _select_must_read(
@@ -946,26 +970,17 @@ def _build_task_guide(
     first_action = entry.get("first_action", "")
     existing_memories = [m for m in memory_index if m.get("updated_at") is not None]
     if existing_memories:
-        # T17：进上下文前重看一眼维护器的验证状态。
-        # 判定为 archive/update 的记忆不再静默主导推理——它照样上屏（本轮明确不拦截），
-        # 但带警告且排到最后，把"这条可能已经不成立"放在模型读它之前。
-        validation_meta: dict[str, dict] = {}
-        # manager 可能没起来（后端未就绪/测试环境）；取不到 store 就跳过验证态与留痕，
+        # manager 可能没起来（后端未就绪/测试环境）；取不到 store 就跳过留痕，
         # 记忆注入本身照常工作。
         mem_store = getattr(mgr, "store", None) if mgr is not None else None
-        if mem_store is not None:
-            try:
-                validation_meta = mem_store.get_validation_meta(
-                    [str(m.get("key")) for m in existing_memories]
-                )
-            except Exception as e:
-                logger.debug(f"memory_meta 验证状态读取失败（不阻断）: {e}")
 
         def _validity_doubt(item: dict) -> str | None:
-            meta = validation_meta.get(str(item.get("key"))) or {}
-            status = meta.get("validation_status")
-            if status in ("archive", "update"):
-                return f"维护器验证状态={status}"
+            """有效性存疑的唯一来源：老化评分（`run_aging` 写的 stale_score→staleness_warning）。
+
+            2026-10-31 删除 LLM 验证器后，原 T17 里「维护器验证状态=archive/update」那一路
+            一并去掉：`memory_meta.validation_status` 不再有生产者，是冻结的历史标签，
+            拿它继续降级记忆等于让一条永远不会更新的旧判决永久主导排序。
+            """
             warning = item.get("staleness_warning")
             if warning:
                 return str(warning)
@@ -976,7 +991,7 @@ def _build_task_guide(
         # 排序后再取前 N 条。find_consumable_memories 没有 ORDER BY，返回≈写入序（旧在前），
         # 直接切片会让最旧的通配记忆长期霸占必读块、新写的记忆永远排不进去。
         # 主序=相关性（关键词命中优先于仅消费场景命中），次序=越新越前，
-        # 第三序=有效性存疑的降到最后（T17）。
+        # 第三序=有效性存疑（老化评分超阈值）的降到最后。
         # updated_at 是定长 "%Y-%m-%d %H:%M:%S"，字典序即时序，故用多次稳定排序。
         # T16：这里的重排是**显式声明**的业务档位，不是偷偷改掉检索排名——
         # 召回原序与上屏序都进了投影记录，谁改了顺序、改了谁，事后查得到。
@@ -1024,6 +1039,8 @@ def _build_task_guide(
                     # 因此没有 search_traces 可关联；留痕仍要写，因为"上了屏什么"是独立事实。
                     trace_id=None,
                     task_type=task_type,
+                    # 列名是历史命名（`context_projections.validation_flags`），
+                    # 2026-10-31 起内容只剩老化告警，不再含 LLM 验证判决。
                     validation_flags={k: v for k, v in doubts.items() if v},
                     note=(
                         "trace_id 为空：facts 定向召回不产生检索 trace"
@@ -1038,6 +1055,21 @@ def _build_task_guide(
             except Exception as e:
                 logger.debug(f"上下文投影留痕失败（不阻断）: {e}")
 
+    # memory_index 保序截断（必读块在上面已按完整清单挑过，这里只影响返回给调用方的清单）。
+    # 静态声明项（memory_key / related_memory_keys）在列表头部，截断不会动到它们。
+    memory_index_out = memory_index
+    truncated_meta: dict | None = None
+    if len(memory_index) > _MEMORY_INDEX_MAX:
+        memory_index_out = memory_index[:_MEMORY_INDEX_MAX]
+        truncated_meta = {
+            "shown": _MEMORY_INDEX_MAX,
+            "total": len(memory_index),
+            "hint": (
+                "memory_index 已保序截断：静态声明项在前而被保留，余下多为 "
+                "consumption_contexts 通配命中；需要时用 memory_search / memory_list 取全量"
+            ),
+        }
+
     result = {
         "mode": "task",
         "task_type": task_type,
@@ -1045,10 +1077,12 @@ def _build_task_guide(
         "name": entry.get("name", task_type),
         "skill_file": _resolve_skill_file(entry.get("skill_file", "")),
         "memory_key": entry.get("memory_key"),
-        "memory_index": memory_index,
+        "memory_index": memory_index_out,
         "description": entry.get("description", ""),
         "first_action": first_action,
     }
+    if truncated_meta is not None:
+        result["memory_index_truncated"] = truncated_meta
     # workflow_summary / mcp_tools_priority / key_pitfalls 按需返回：
     # 默认不返（避免匹配错误时白返 skill 概要污染上下文）。
     # agent 确认 task_type 对了之后传 include_workflow=true 获取详情。
@@ -1127,7 +1161,19 @@ def _general_response(match_hint: str | None) -> dict:
     }
     if match_hint is not None:
         resp["match_hint"] = match_hint
+    degraded = _degraded_components()
+    if degraded:
+        # 有组件被隔离时必须让调用方看见：否则 skill 静默消失，agent 只会觉得
+        # 「本来就没这个能力」，而不知道是加载失败（详情见 /health component_load）
+        resp["degraded_components"] = degraded
     return resp
+
+
+def _degraded_components() -> list[dict]:
+    """加载失败的组件清单（空列表 = 全部正常）。"""
+    from lib.component_loader import get_failures
+
+    return get_failures()
 
 
 @router.get("", operation_id="agent_guide")
@@ -1335,6 +1381,7 @@ def get_status() -> dict:
         "available": True,
         "registry_count": len(GUIDE_REGISTRY),
         "scopes": sorted({k.split(".", 1)[0] for k in GUIDE_REGISTRY}),
+        "degraded_components": _degraded_components(),
         "usage": {
             "total_calls": total_calls,
             "called_skills": called,

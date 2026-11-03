@@ -10,7 +10,7 @@ task_type: dev.code_review
 
 # Code Review Skill
 
-> 对本项目（LocalAgent）进行全量或定向代码审查的标准化工作流。
+> 对本项目（Parcae）进行全量或定向代码审查的标准化工作流。
 > 触发：用户说"code review"/"代码审查"/"review 一下" + 可选范围（全量/某模块/某文件）。
 
 ## 适用范围
@@ -233,7 +233,7 @@ Repo 中任何记录代码应该如何写的内容：
 - 标识符拼写（除非是新引入且与定义不一致）
 - 大功能删除（默认用户是有意的）
 
-## 项目特定关注点（LocalAgent）
+## 项目特定关注点（Parcae）
 
 ### 高频踩坑（来自 AGENTS.md 和 project_rules.md）
 - **相对路径**：`Path("data/xxx")` 在 cwd 错位时写错位置，应基于 `__file__`

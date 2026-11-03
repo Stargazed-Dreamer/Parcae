@@ -1,7 +1,7 @@
 [project]
-name = "localagent"
-version = "0.53.0"
-description = "LocalAgent API backend with PaddleOCR-VL"
+name = "parcae"
+version = "0.56.0"
+description = "Parcae API backend with PaddleOCR-VL"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.136.3",
@@ -50,6 +50,7 @@ dependencies = [
     "jinja2>=3.1.0",
     "truststore>=0.10.4",
     "imbox>=0.10.1",
+    "websockets>=15.0",
 ]
 
 # ============================
@@ -79,10 +80,14 @@ ocr = [
 # （2026-07-31 OmniParser 移除，torchvision/supervision/timm/accelerate/ultralytics 已删）
 inference = [
     "torch>=2.13.0",
-    "transformers>=4.45,<4.47",
-    "tokenizers>=0.20.0,<0.21",
+    # transformers>=4.57 是 Qwen3-VL（image_search_bench 建库/打标）的硬要求（config.json 声明 4.57.1）；
+    # 旧 pin <4.47 是 OmniParser 时代留的，2026-10-15 升级：bge-small / Florence 消费方不受影响
+    "transformers>=4.57,<4.58",
+    "tokenizers>=0.22,<0.23",
     "onnx>=1.22.0",
-    "onnxruntime-gpu>=1.26.0",
+    # onnxruntime-gpu 钉 1.22：1.27 要 CUDA 13，本机 torch 是 CUDA 12（README 2026-10-15 pose 过验证实）。
+    # 旧 pin >=1.26.0 会让 uv sync --all-extras 把手装的 1.22 顶掉，静默毁掉 pose 管线
+    "onnxruntime-gpu>=1.22,<1.23",
     "ctranslate2>=4.0.0",
 ]
 # 录制器语音转写（faster-whisper 官方依赖 ctranslate2/onnxruntime/av，会从 inference 组
@@ -121,11 +126,12 @@ dev = [
 ]
 
 [tool.uv]
-# 默认索引锁定为官方 PyPI：项目级配置优先于全局 uv.toml 的阿里云镜像，
-# 防止任何 re-lock（uv lock / uv run 触发重解析）把 uv.lock 的 registry 整体刷成镜像（2026-09-12 修复）
+# 默认 PyPI 索引 = 阿里云镜像（2026-10-22 用户裁决统一到阿里云）
+# ⚠️ 这是有意配置：项目级配置优先于全局 uv.toml，re-lock 会把 uv.lock 的 registry 统一为阿里云源；
+#    不要再按 2026-09-12 的旧策略改回官方 PyPI
 [[tool.uv.index]]
 name = "pypi"
-url = "https://pypi.org/simple"
+url = "https://mirrors.aliyun.com/pypi/simple/"
 default = true
 
 # PyTorch CUDA 12.6 索引（GPU 推理，驱动 610.47 兼容）

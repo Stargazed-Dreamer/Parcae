@@ -173,7 +173,7 @@ description: >
     └── report_template.md
 ```
 
-只有 `SKILL.md` 是必需的，`scripts/`/`references/`/`assets/` 按需添加。这些子文件**不会**一次性塞给 agent，而是 SKILL.md 正文里写明"需要 X 时读 scripts/collect.py"，agent 干到那一步才自己去取（渐进式披露）。
+只有 `SKILL.md` 是必需的，`scripts/`/`references/`/`assets/` 按需添加。这些子文件**不会**一次性塞给 agent，而是 SKILL.md 正文里写明"需要 X 时读 .agents/skills/gkd_signin_automation/scripts/collect.py"，agent 干到那一步才自己去取（渐进式披露）。
 
 #### 行数与分层规范
 

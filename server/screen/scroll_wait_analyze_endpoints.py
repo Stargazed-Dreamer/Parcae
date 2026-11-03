@@ -38,6 +38,7 @@ from server.screen.routes import (
     _enforce_session_permission,
     _touch_task_authorization_after_delivery,
     logger,
+    not_elevated_message,
     router,
 )
 
@@ -100,16 +101,21 @@ def scroll_capture(req: ScrollCaptureRequest):
     keyboard 模式尤其依赖焦点已在可滚动区域——若焦点在左侧导航栏，PageDown/Home
     会被导航栏拦截导致标签页乱切。mouse 模式不依赖焦点，滚轮作用于鼠标下方控件。
     """
+    # 提权闸门（2026-10-22）：滚动靠键鼠注入，未提权必被 UIPI 丢弃。
+    # 先于 403 授权引导，直接说清未提权（本端点不弹 takeover 窗，但为避免 agent 被 403 引导去
+    # 请求授权——那条路在未提权时是死路——仍在最前面拦）。
+    if not _ADMIN_STATUS:
+        return ScrollCaptureResponse(
+            success=False, segments_count=0,
+            message=not_elevated_message("滚动截图（scroll_capture）"), elapsed_ms=0,
+        )
+
     # T15：副作用端点 403 拦截（滚动窗口属副作用操作）
     _enforce_session_permission()
 
     import pyautogui
     from PIL import Image
 
-    if not _ADMIN_STATUS:
-        return ScrollCaptureResponse(
-            success=False, segments_count=0, message="需要管理员权限", elapsed_ms=0
-        )
     if not emergency.can_operate():
         return ScrollCaptureResponse(
             success=False, segments_count=0, message="紧急停止已触发", elapsed_ms=0

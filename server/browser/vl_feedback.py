@@ -20,7 +20,7 @@ import os
 from ..config import get_browser_config
 from ..vl.feedback_vl import describe_after_action
 
-logger = logging.getLogger("localagent.browser")
+logger = logging.getLogger("parcae.browser")
 
 
 async def _maybe_vl_feedback(

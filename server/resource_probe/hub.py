@@ -22,7 +22,7 @@ from collections import deque
 
 from server.resource_probe.probe import Probe, ProbeAbsent, Sample
 
-logger = logging.getLogger("localagent.resource_probe.hub")
+logger = logging.getLogger("parcae.resource_probe.hub")
 
 STATUS_UNKNOWN = "unknown"
 STATUS_OK = "ok"

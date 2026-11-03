@@ -390,8 +390,8 @@ def diag_mcp(health):
 
     out(f"  {OK} MCP 工具统计:")
     out(f"     直连工具: {direct}/{direct_limit} (白名单，免审批)")
-    out(f"     网关工具: {gateway} (localagent_advanced_tool 网关，GET 类免审批)")
-    out(f"     模板: {template_count} (localagent_template_tool 预定义工作流)")
+    out(f"     网关工具: {gateway} (parcae_advanced_tool 网关，GET 类免审批)")
+    out(f"     模板: {template_count} (parcae_template_tool 预定义工作流)")
 
     if direct >= direct_limit:
         out(f"  {WARN} 直连工具已达上限 ({direct}/{direct_limit})，新增工具需走网关")
@@ -421,7 +421,7 @@ def main():
     # 标题
     out()
     out("#" * 60)
-    out("#  LocalAgent 后端诊断报告")
+    out("#  Parcae 后端诊断报告")
     out(f"#  目标: {anonymize_text(base_url) if args.anonymize else base_url}")
     out(f"#  脱敏: {'是' if args.anonymize else '否'}")
     out("#" * 60)

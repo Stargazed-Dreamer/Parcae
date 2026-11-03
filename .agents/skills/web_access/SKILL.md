@@ -5,6 +5,9 @@ description: >
   （WebSearch / WebFetch / CDP / curl / 本地书签检索 / Jina Reader），避免选错工具浪费时间或拿到空内容。
   触发词：联网、上网查、搜一下、读网页、读链接、抓网页、web访问、搜索、fetch、爬取。
   适用范围：任何需要从网络获取信息的任务（详见正文）。
+# 元 skill：跨 skill 的联网决策层，被各任务按需引用，设计上不对应单独 task_type
+#（check_skills 见到 meta_skill: true 会放行 task_type 缺失，见 docs/agent-guide.md「元 skill」节）
+meta_skill: true
 ---
 
 # 联网工具选择决策表 (web_access)

@@ -1,4 +1,4 @@
-# localAgent 配置文件
+# Parcae 配置文件
 # 复制此文件为 config.toml 并填写实际值
 
 # ===== v9: VL provider 配置统一说明 =====
@@ -173,6 +173,10 @@ cooldown_max = 60.0                     # 退避封顶秒数（指数递增 base
 # 兼容旧 [chrome] 段：若未配置 [browser]，后端会回退读取 [chrome] 段（向后兼容）。
 debug_port = 9222                         # 远程调试端口
 user_data_dir = "<project_root>\\chrome_debug"  # 独立用户数据目录（默认沿用 chrome_debug 名）
+browser_path = ""                         # 浏览器可执行文件路径；留空 = 自动探测（Chrome → Edge → Brave → Vivaldi）。
+                                          # 本机钉 Chrome（2026-10-24 实测：Chrome 140 打开原 Edge 138 写的
+                                          # chrome_debug 正常，cookie 不丢；但扩展会被清空，需在 chrome://extensions
+                                          # 用「加载已解压的扩展程序」重新注册一次）。详见 docs/environment-constraints.md
 # 浏览器原子操作 VL 反馈闭环（browser_action/wait_for/wait_and_action）
 # agent 传 verify_prompt 时，操作后截图 + 调远程 VL 返回 ≤200 字画面描述，无论成败都反馈
 # 让 agent 据此决定下一步而非猜原因。紧急时设 false 跳过 VL 调用
@@ -184,10 +188,44 @@ feedback_vl_enabled = true
 session_idle_timeout_secs = 900           # 有主 session idle 租约（秒，默认 900=15min），owner 每次操作即续租
 session_anon_idle_timeout_secs = 300      # 无主（anonymous：内部调用/老脚本）session 租约，没人续租故更快回收
 session_max_count = 32                    # 全局 session 上限（LRU 只淘汰 anonymous；单个 caller 另有持有上限）
+# 同域导航节流（2026-10-23）：同一域名两次「刷新/初始连接」至少间隔
+# nav_guard_window_secs 秒。reload 与 goto（含 session_create(url=...) 的首次打开）都计入，
+# back/forward 不计；localhost / 内网 IP / file: 等本地目标自动豁免。
+# 违规 → 直接返回 NAV_RATE_LIMITED（不排队不自动等），窗口恒定（不按违规次数加码）。
+# 目的：掐掉"页面不合预期就刷新、任务换一步就关 tab 重开"这种机器节奏；
+# agent 应复用已有 tab（url_pattern / session_id）而不是反复重开。
+nav_guard_enabled = true                  # 总开关；false = 完全不限（不推荐，风控面会重新敞开）
+nav_guard_window_secs = 30                # 同一域名两次刷新/初始连接的最小间隔（秒，恒定）
+# 站点级豁免（默认 ["scnu.edu.cn"]）：命中该域**及其子域**的导航直接放行、不计时。
+# 适用于「一次任务内必须连续切页」的站点（砺儒云扫 N 门课 = N 次 overview 跳转 + SSO 登录链几跳），
+# 那是不同 URL 的正常业务导航，不是死循环刷同一页。
+# ⛔ 给**空列表** = 明确不要任何站点豁免（连内置默认一起取消）；整项不写 = 用内置默认。
+nav_guard_exempt_hosts = ["scnu.edu.cn"]
+# ⚠ 本机若仍在用旧的 [chrome] 段（没有 [browser] 段），把上面两项直接写进 [chrome] 即可；
+#   一旦新建 [browser] 段，[chrome] 整体不再被读取（debug_port / user_data_dir 会回落默认值），
+#   所以两项配置键（debug_port/user_data_dir 与 nav_guard_*）要放在同一个段里。
 # P2-1: browser_session_create(url=...) 时自动按域名匹配 .agents/skills/browser_lessons/sites/*.md
 # 结果存到 TabSession.site_lessons，snapshot/action 响应附带 site_lessons_hint。
 # P2-3: browser_action 每次调用记录到 stats_db_path 指向的 SQLite 库，供 /browser/selector_stats 查询成功率
 stats_db_path = "data/browser_stats.db"   # 选择器调用统计 SQLite 路径（默认 data/browser_stats.db）
+
+[browser.supervisor]
+# 浏览器进程 supervisor（2026-10-23 起）。负责启动/健康检查/停止/重启，
+# 不改现有 SessionManager 的 CDP 连接与工具面。配置项与
+# workspace/agent_browser/04_设计/2026-10-22_supervisor设计.md §11 对应。
+enabled = true
+browser_path = ""                         # 空 = 自动探测 Chrome/Edge/Brave/Vivaldi
+port = 9222                               # 0 = 动态端口（读 profile/DevToolsActivePort；现有 SessionManager 仍固定读 [browser] debug_port，动态模式尚未接线）
+port_file = "data/runtime/agent_browser.json"  # 实际端口/pid 声明文件
+user_data_dir = ""                        # 空 = <项目根>/chrome_debug
+adopt_existing = true                     # 启动前认领同 profile 的旧实例（校验通过才认领）
+health_interval_secs = 5
+health_timeout_secs = 2
+startup_timeout_secs = 10
+close_grace_secs = 6                      # Browser.close 后等自行退出
+exit_wait_secs = 3                        # kill 后等真正 exit，超时后仍关闭 Job 句柄兜底
+max_restarts = 5
+backoff_max_secs = 60
 
 [server]
 # 后端服务监听地址
@@ -204,6 +242,22 @@ port = 8766                               # 监听端口
 # 改动需重启后端生效。
 # host_whitelist = ["192.168.4.105", "mybox.local"]
 exec_python_inline_wait_secs = 10
+# 优雅关停上限（秒）：uvicorn 关闭监听后，等待「在飞连接/任务结束」的最长时间。
+# ⛔ 不要删、不要设 0：uvicorn 默认 None = 无限等待，而只要有 1 个请求不返回
+# （LLM 池排队 / 未断开的 SSE / IDE 的 MCP 长连接），进程就永久停在
+# "Waiting for connections to close. (CTRL+C to force quit)"。
+# 超时后 uvicorn 打印 "Cancel N running task(s), timeout graceful shutdown exceeded"
+# 并取消挂起任务，再照常执行清理。下限 1。
+graceful_shutdown_timeout_secs = 15
+# 关停清理链总兜底（秒）：清理（Screen/系统/视觉/记忆/Loop/浏览器/httpx 关闭）超过该
+# 时长仍未走完就强制退出，避免某一步永久阻塞进程。下限 5。
+# 排查技巧：日志里最后一条「关闭步骤: xxx」就是被阻塞的那一步。
+shutdown_cleanup_deadline_secs = 30
+
+[client]
+# 客户端不加载的面板：写 panel id 或模块名（如 "chat"），留空 = 全部加载。
+# 某个面板还在开发/暂时不用时用这个关掉，不必删代码。
+hidden_panels = []
 
 [runner]
 # v6-lite SessionRunner 配置（exec_python 统一 terminal 机制 + 3 分钟唤醒 LLM）
@@ -341,7 +395,7 @@ confirm_timeout_seconds = 180             # 屏幕操作确认弹窗超时（秒
 # 默认 30s——agent 连续操作会重置计时；若 agent 忘记调 /overlay hide，30s 后自动收起
 overlay_auto_hide_seconds = 30
 
-# 焦点安全（评估文档 P0：docs/evaluations/2026-07-20-computer-use-vs-localagent.md）
+# 焦点安全（评估文档 P0：docs/evaluations/2026-07-20-computer-use-vs-parcae.md）
 # 键盘动作（type/type_immediate/hotkey）执行前强制焦点校验：
 #   - FOCUS_LEAK_PREVENTED：前台是 ChatGPT/Codex/Trae/Cursor 等受保护进程而目标不是它 → 零按键发送
 #   - FOCUS_NOT_VERIFIED：未指定 target 且 allow_unfocused_input=false → 零按键发送
@@ -423,6 +477,8 @@ preload_on_startup = false
 enabled = true
 poll_interval_sec = 5.0         # 状态机推进周期（秒）；实际采样节奏见 [resource_probe]
 reload_fail_cooldown_sec = 30    # per-model 加载失败冷却默认值（秒）
+idle_unload_sec = 0              # 空闲回收默认阈值（秒，0=禁用）；per-model 可覆盖
+idle_tick_sec = 1.0              # 空闲回收判定间隔（秒）
 
 [model_manager.gpu]
 # GPU 显存压力监控（主动逐出唯一资源维度，design D2）
@@ -443,12 +499,24 @@ unload_timeout_sec = 15         # 卸载超时（秒，含排空 in_flight）
 enabled = false
 
 # [model_manager.models.<id>]：每模型覆盖（如要钉住/调整优先级）
-# 字段：evictable / priority / reload_fail_cooldown_sec
+# 字段：evictable / priority / reload_fail_cooldown_sec / restore_preload / idle_unload_sec / trim_working_set
+# idle_unload_sec：常驻关闭（restore_preload=false）时，空闲超过 N 秒无请求即卸载；
+#                  0=禁用。GUI「关闭常驻」后按此值自动释放显存，下次调用冷加载。
+#                  ⚠ restore_preload=true 时本字段被完全屏蔽（manager.py:_idle_sweep
+#                  第 2 条前置条件直接跳过），配了也不生效。
+#                  取值要大于"两次调用间隔"：OCR 冷加载实测 2.3-4.4s，配上 10s 会让
+#                  任何间隔超过 10s 的调用都白付一次冷加载 ⇒ 示例用 300（5 分钟）。
+# trim_working_set：OCR 卸载后是否调 Windows EmptyWorkingSet 刷回工作集。默认 false——
+#                  它只还物理内存、private 提交一分不减，闲置页本由系统按需换出；
+#                  仅在要给别的程序腾物理内存时设 true（代价：后续请求多吃 page fault）。
 # 示例：
 #   [model_manager.models.ocr]
 #   evictable = true
 #   priority = 80
 #   reload_fail_cooldown_sec = 30
+#   restore_preload = false   # 关闭常驻
+#   idle_unload_sec = 300     # 空闲 300s（5 分钟）自动卸载；常驻开启时不生效
+#   trim_working_set = false  # 卸载后刷工作集（默认 false，见上）
 #
 #   [model_manager.models.memory_embedding]
 #   evictable = false   # 默认钉住（热路径，每个 MCP 请求都会用）
@@ -542,19 +610,14 @@ hf_mirror = "https://hf-mirror.com"        # HuggingFace 镜像源（中国用�
 # summary_cleanup_days = 180                  # 孤立摘要清理阈值（天）
 
 # [memory.maintain]
-# 记忆维护器配置（自动老化 + LLM 验证）
-# v8: model_tier 字段已移除，验证用的 key 由 use_case 解析。
-# 真源是 USE_CASE_REGISTRY.memory_validate（tier (2,4)，见 server/llm_pool/types.py）；
-# memory_maintainer 这个 use_case 早在 v15 就废弃了，别再照旧注释去找它。
+# 记忆维护器配置（垃圾预过滤 + 老化评分 + 指标日聚合，**零 LLM 调用**）
+# 2026-10-31 删除 LLM 验证器，连带删除 enable_validate / preview_chars / batch_limit /
+# revalidate_days 四个开关：162 次判定 157 次 keep，唯一能执行的 archive 判决又从不执行，
+# 每天最多烧 20 万输入 token 只换来日志。形态检查已移交中枢 L7 的 G-* 判据
+# （见 workspace/local_butler/30_架构与设计/28 §2.6 与 30 §1.6）。
+# 旧配置里这几个键会被静默忽略，删不删都不影响运行。
 # interval_hours = 6                          # 维护器运行间隔（小时）
 # stale_days = 7                              # 记忆过期阈值（天），超过标记为 stale
-# enable_validate = true                      # 是否启用 LLM 验证（false 则只做老化标记）
-# preview_chars = 2400                        # 单条记忆喂给验证器的正文字数上限。
-#                                             #   旧值 800 是 72% 假归档的主因：超窗记忆只被看到
-#                                             #   前半段（常常是 JSON 元数据信封），模型据此判 archive。
-#                                             #   正文仍超窗时 archive 建议不采纳，改为延判（见 docs/memory-system.md）
-# batch_limit = 25                            # 单轮最多验证多少条（按 stale_score 从旧到新取），防止积压一次打空 cheap 池
-# revalidate_days = 30                        # 同一条记忆两次验证的最小间隔（天）。此前 keep/update 每轮被重置回 pending，等于无限重验
 
 # Evidence Ledger（A）— 证据组织层
 # 在 memory_search 与 agent 之间插入证据组织层，把多源召回（messages + facts + summaries）
@@ -702,6 +765,24 @@ interval_seconds = 432000                    # 备份间隔（秒，默认 5 天
 first_run_delay = 600                       # 首次运行延迟（秒，比 secret_backup 晚 5 分钟避免并发压力）
 fail_threshold = 3                          # 备份失败较严重，阈值低于默认 5
 
+# SSD 耐久监测：每 30 分钟记一行「设备级累计写入 + 当时的使用强度」到
+# workspace/disk_manager/ssd_wear_log.csv（工具 tools/disk_io_audit/ssd_wear_snapshot.py）
+#
+# 为什么挂在 loop 上而不是"开机跑一次"：
+#   SMART 的 Data Units Written 是**盘级累计量**，跨重启单调 ⇒ 断档只让窗口变宽、不丢数据，
+#   所以后端崩溃/频繁重启都不影响。反之"开机跑一次"拿到的是**上次会话总写入**，
+#   却配了**开机 2 分钟的空闲态**做强度指纹 ⇒ 量与活跃度配对错位，答不了
+#   「高写入是否发生在高强度时段」。
+#
+# 依赖：纯 ctypes 调 IOCTL 读 SMART，**不需要 pywin32、不需要管理员**（本机已验）。
+[loops.disk_manager]
+enabled = true
+ssd_wear_interval = 1800                    # 采样间隔（秒，30 分钟）
+ssd_wear_first_run_delay = 300               # 首次延迟 5 分钟，等开机磁盘活动平息
+skip_if_recent_secs = 600                    # 距上次快照不足 10 分钟则跳过（防与开机兜底条目重复写行）
+side_effect_tier = "read_only"               # 只读：读 SMART + 数进程，不写业务数据
+fail_threshold = 5
+
 # 场景H：headless agent session（后端自主启动 agent 会话，IDE 关了也能跑）
 # spec: temp/sdd/headless-agent-session/spec.md
 # 用途：定时触发 agent 任务（一次性 / 周期性），到时后端自主启动 SessionRunner 会话跑完，
@@ -742,8 +823,8 @@ judge_max_iterations = 10                   # judge 最大迭代数
 # B2（spec D2/D3）：删 judge_max_budget_usd，本地无法准确算 cost
 judge_wall_clock_budget_secs = 300          # judge 最大墙钟时间（秒，300=5 分钟）
 # 其他
-# base_url = "http://127.0.0.1:8766"        # 后端 base_url（默认 127.0.0.1:8766，通常不需改）
-# db_path = ""                              # EventStore DB 路径（留空用默认 data/client/agent.db）
+# runtime_url = ""                          # butler runtime 地址；留空=读 data/runtime/butler_runtime.json
+#                                           # 注意：headless 作业跑在 runtime 进程里，需先启动 start_butler_runtime.bat
 fail_threshold = 3                          # 连续失败 N 次自动暂停（headless 任务失败容忍度低）
 
 # ===== 收件箱 =====

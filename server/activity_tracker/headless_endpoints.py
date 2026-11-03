@@ -7,16 +7,15 @@ ticket: Ticket 07
 - POST /headless/sessions：直接创建一个 headless 会话（不必绕 LoopManager cron）
 - POST /headless/sessions/{session_id}/interrupt：中断 headless 会话（主会话或 judge 会话）
 
-中断行为：
-- 中断主会话 → run_main_agent 检测 interrupt_event.set() → SessionRunner 中断 →
-  HeadlessSessionAction 检测 main_result.error 或 outcome.status=interrupted → 不调 judge → 整体 failed
-- 中断 judge 会话 → run_judge_agent 检测 interrupt_event.set() → judge session 中断 →
-  outcome.status != completed → 降级 uncertain → 整体 failed
+中断行为（butler-runtime T6 起）：
+- 会话跑在 butler runtime 里，本端点只把中断转发给 runtime 的
+  `POST /sessions/{session_id}/interrupt`；后端不再维护 interrupt registry。
+- 主会话中断 → runtime 中断运行 → 本端 run_main_agent 拿到 interrupted 终态 →
+  HeadlessSessionAction 不调 judge → 整体 failed
+- judge 会话中断 → judge 终态非 completed → 降级 uncertain → 整体 failed
 
 设计要点：
-- interrupt registry 是模块级 dict（headless_runner._headless_sessions），REST 端点跨请求访问
-- asyncio.Event 必须在后端 event loop 中创建，REST 端点同 loop 内调用 event.set() 安全
-- session 不存在时返回 404（幂等：重复中断已结束的 session 也返回 404）
+- runtime 未运行时返回 503；session 不在跑（未开始/已结束）返回 404
 """
 
 from __future__ import annotations
@@ -25,13 +24,15 @@ import time
 
 from fastapi import APIRouter, HTTPException
 
+from lib.agent_runtime.runtime_client import RuntimeCallError, RuntimeClient, RuntimeUnavailable
 from lib.schema import BaseSchema
-from server.activity_tracker.headless_runner import (
-    get_interrupt_event,
-    interrupt_session,
-)
 
 router = APIRouter(prefix="/headless", tags=["headless"])
+
+
+def _runtime_client() -> RuntimeClient:
+    """构造 runtime 客户端；测试可 monkeypatch 本函数注入替身。"""
+    return RuntimeClient()
 
 
 class InterruptResponse(BaseSchema):
@@ -127,45 +128,41 @@ async def create_headless_session(
 async def interrupt_headless_session(session_id: str) -> InterruptResponse:
     """中断 headless 会话（主会话或 judge 会话）。
 
-    幂等：session 不存在或已结束时返回 404，重复调用安全。
-
     Args:
         session_id: headless 会话 ID（headless-{uuid} 或 headless-judge-{uuid}）
 
     Returns:
-        InterruptResponse：含 interrupted=True/False + message
+        InterruptResponse：interrupted=True + message
 
     Raises:
-        HTTPException 404: session 不存在（未注册或已清理）
+        HTTPException 404: 会话不在运行（未开始或已结束）
+        HTTPException 503: butler runtime 未运行
+        HTTPException 502: runtime 返回错误
     """
-    ev = get_interrupt_event(session_id)
-    if ev is None:
+    try:
+        result = await _runtime_client().interrupt(session_id)
+    except RuntimeUnavailable as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"butler runtime unavailable: {e}",
+        ) from e
+    except RuntimeCallError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"runtime interrupt failed: {e.code}: {e.message}",
+        ) from e
+
+    if not result.get("interrupted"):
         raise HTTPException(
             status_code=404,
             detail=(
-                f"headless session {session_id!r} not found "
-                "(not running or already finished)"
+                f"headless session {session_id!r} not running "
+                "(not started or already finished)"
             ),
-        )
-
-    if ev.is_set():
-        # 已中断过，幂等返回（不重复 set）
-        return InterruptResponse(
-            session_id=session_id,
-            interrupted=False,
-            message="session already interrupted",
-        )
-
-    ok = interrupt_session(session_id)
-    if not ok:
-        # 极端情况：get_interrupt_event 拿到了，interrupt_session 没拿到（并发清理）
-        raise HTTPException(
-            status_code=404,
-            detail=f"headless session {session_id!r} disappeared during interrupt",
         )
 
     return InterruptResponse(
         session_id=session_id,
         interrupted=True,
-        message="interrupt signal sent",
+        message="interrupt signal sent to runtime",
     )

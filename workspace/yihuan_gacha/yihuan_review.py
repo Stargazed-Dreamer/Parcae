@@ -221,4 +221,8 @@ def main():
 
 if __name__ == "__main__":
     main()
-    input("press any key...")
+    try:
+        input("press any key...")
+    except EOFError:
+        # 非交互（管道 / 后台终端）没有 stdin，别在这里抛 traceback 把退出码变成 1
+        pass

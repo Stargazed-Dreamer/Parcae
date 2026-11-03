@@ -21,6 +21,7 @@ from server.memory.recorder import InteractionRecorder
 from server.memory.search_tracer import SearchTracer
 from server.memory.semantic import SemanticSearch
 from server.memory.store import MemoryStore
+from server.memory.wrapup import list_pending_candidates, submit_wrapup
 
 __all__ = [
     "MemoryConfig",
@@ -35,6 +36,9 @@ __all__ = [
     "MemoryMaintainer",
     "MemoryManager",
     "get_memory_manager",
+    # v8 收尾落库（DL3）
+    "submit_wrapup",
+    "list_pending_candidates",
     # v3 可观测性组件
     "SearchTracer",
     "EvidenceLedger",

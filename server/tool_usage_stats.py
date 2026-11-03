@@ -7,7 +7,7 @@
 - tool_name: exec_python（当前只统计 exec_python）
 - call_count: 总调用次数
 - code_length_buckets: 代码长度分桶（<100, 100-1k, 1k-10k, >10k）
-- environment: 使用的 environment 分布（localagent/workspace_venv/system）
+- environment: 使用的 environment 分布（parcae/workspace_venv/system）
 - has_cwd: 是否指定了 cwd
 - avg_elapsed_ms: 平均耗时（done 状态）
 
@@ -16,7 +16,7 @@
   "exec_python": {
     "call_count": 1232,
     "code_length_buckets": {"<100": 500, "100-1k": 600, "1k-10k": 120, ">10k": 12},
-    "environment": {"localagent": 1200, "workspace_venv": 30, "system": 2},
+    "environment": {"parcae": 1200, "workspace_venv": 30, "system": 2},
     "has_cwd": true_count: 800,
     "has_cwd": false_count: 432,
     "last_updated": "2026-08-01T21:00:00"
@@ -30,7 +30,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-logger = logging.getLogger("localagent.tool_usage_stats")
+logger = logging.getLogger("parcae.tool_usage_stats")
 
 _STATS_FILE = Path(__file__).parent.parent / "data" / "tool_usage_stats.json"
 _LOCK = threading.Lock()
@@ -99,7 +99,7 @@ def record_exec_python_call(
 
     Args:
         code: 用户代码（只统计长度，不存内容）
-        environment: localagent / workspace_venv / system
+        environment: parcae / workspace_venv / system
         cwd: 工作目录（空字符串表示未指定）
         elapsed_ms: 耗时（毫秒，0=未统计/未完成）
     """

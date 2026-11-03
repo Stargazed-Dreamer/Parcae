@@ -376,7 +376,7 @@ cleanmgr /d C                                                   # 磁盘清理�
 **Chrome/Edge 隐私导出用 [HackBrowserData](https://github.com/moonD4rk/HackBrowserData)（Go 单文件，v1.1.0，实测可解 Chrome 140 的 App-Bound 加密）**：
 脚本调 `archive`(可迁移 profile 归档 zip) + `dumpkeys`(跨机解密主密钥 json) + `dump -f csv`(可读清单) 三件套。
 `archive + dumpkeys` 组合正是"新机也能解密"的关键——离开原机前先导出主密钥，到新机用 `restore` 还原。
-二进制缓存在 `%LOCALAPPDATA%\LocalAgent\bin\hbd\`，缺失时脚本自动 curl 下载（冷启动 TLS 抖动已做重试）。脚本**只打印文件名/记录数/大小，绝不回显明文密码**。
+二进制缓存在 `%LOCALAPPDATA%\Parcae\bin\hbd\`，缺失时脚本自动 curl 下载（冷启动 TLS 抖动已做重试）；旧 `%LOCALAPPDATA%\LocalAgent\bin\hbd\` 里已有的会由脚本首次使用时自动迁移。脚本**只打印文件名/记录数/大小，绝不回显明文密码**。
 
 #### 5. 已安装软件列表
 

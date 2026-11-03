@@ -8,32 +8,32 @@
 ```
 第一层：直接暴露高频工具（见 `server/mcp_whitelist.py` TOOL_CATEGORIES）  ←  IDE 直接看到
     ↓
-第二层 A：localagent_advanced_tool（网关）  ←  通过 tool 参数路由到低频/运维子工具
+第二层 A：parcae_advanced_tool（网关）  ←  通过 tool 参数路由到低频/运维子工具
     ↓
-第二层 B：localagent_template_tool（模板网关）  ←  通过 template 参数执行 11 个预定义工作流
+第二层 B：parcae_template_tool（模板网关）  ←  通过 template 参数执行 11 个预定义工作流
     ↓
-localagent_list_tools / localagent_list_templates  ←  运行时发现可用工具及参数
+parcae_list_tools / parcae_list_templates  ←  运行时发现可用工具及参数
 ```
 
 ### advanced_tool 网关（低频工具路由）
 
 - **用途**：低频/运维操作（模型管理/MindForge 运维/记账/输出查看等）
-- **调用**：`localagent_advanced_tool(tool=<name>, params={...})`
-- **发现**：`localagent_list_tools(category="ocr")` 返回该分类下所有子工具及参数定义
+- **调用**：`parcae_advanced_tool(tool=<name>, params={...})`
+- **发现**：`parcae_list_tools(category="ocr")` 返回该分类下所有子工具及参数定义
 - **未来扩展**：新增工具可加入网关，不受 MCP 工具数量限制
 
 示例：
 ```
-localagent_advanced_tool(tool="ocr_set_keep_models", params={"keep": true})
-localagent_advanced_tool(tool="mindforge_preload", params={})
-localagent_advanced_tool(tool="exec_output_full", params={"exec_id": "exec_xxx", "channel": "stdout"})
+parcae_advanced_tool(tool="ocr_set_keep_models", params={"keep": true})
+parcae_advanced_tool(tool="mindforge_preload", params={})
+parcae_advanced_tool(tool="exec_output_full", params={"exec_id": "exec_xxx", "channel": "stdout"})
 ```
 
 ### template_tool 模板网关（预定义工作流）
 
 - **用途**：常见工作流模式（截图+OCR、浏览器导航+等待、游戏等待+点击等），避免重复编写 exec_python 代码
-- **调用**：`localagent_template_tool(template=<name>, params={...})`
-- **发现**：`localagent_list_templates(category="screen")` 返回该分类下所有模板及参数定义
+- **调用**：`parcae_template_tool(template=<name>, params={...})`
+- **发现**：`parcae_list_templates(category="screen")` 返回该分类下所有模板及参数定义
 - **模板分类**：
   - `screen` (3个): screenshot_and_ocr, screenshot_inline_for_llm, screen_diff
   - `browser` (3个): browser_navigate_and_wait, browser_extract_article, browser_scroll_and_collect
@@ -44,10 +44,10 @@ localagent_advanced_tool(tool="exec_output_full", params={"exec_id": "exec_xxx",
 
 示例：
 ```
-localagent_template_tool(template="screenshot_and_ocr", params={"mode":"window","window_title":"游戏"})
-localagent_template_tool(template="browser_navigate_and_wait", params={"url":"https://example.com"})
-localagent_template_tool(template="game_wait_and_click", params={"wait_text":"确认","click_x":500,"click_y":400})
-localagent_template_tool(template="file_search_content", params={"directory":"server","pattern":"def capture","file_glob":"*.py"})
+parcae_template_tool(template="screenshot_and_ocr", params={"mode":"window","window_title":"游戏"})
+parcae_template_tool(template="browser_navigate_and_wait", params={"url":"https://example.com"})
+parcae_template_tool(template="game_wait_and_click", params={"wait_text":"确认","click_x":500,"click_y":400})
+parcae_template_tool(template="file_search_content", params={"directory":"server","pattern":"def capture","file_glob":"*.py"})
 ```
 
 ### Tool Annotations（MCP 协议语义标记）
@@ -67,16 +67,16 @@ MCP 工具列表响应中每个工具携带 `annotations` 字段（4 个 hint）
 
 仅通过 MCP 连接的 agent（无法直接读项目文件）可通过以下端点获取工具使用文档和网站方法论：
 
-**`localagent_tool_docs`** — 工具 7 段语义说明
+**`parcae_tool_docs`** — 工具 7 段语义说明
 - 返回 `data/client/tool_specs.yaml` 中手工编写的 purpose/when_to_use/when_not_to_use/inputs/outputs/errors/examples
 - 弥补 MCP `tools/list` 只有裸 docstring 的不足
-- 用法：`localagent_tool_docs(tool_name="exec_python")` 查单个；省略参数返回清单
+- 用法：`parcae_tool_docs(tool_name="exec_python")` 查单个；省略参数返回清单
 
-**`localagent_get_docs`** — 项目使用文档（9 份，2 类）
+**`parcae_get_docs`** — 项目使用文档（9 份，2 类）
 - core(5 份，如何用工具): agents / tools-guide / skills-index / computer-use-skill(桌面操作铁律) / browser-lessons-skill(浏览器方法论)
 - system(4 份，机制参考): mcp-reference / memory-system / computer-use-reference(UIA/DPI 详解) / operations-manual(浏览器经验记录强制章节)
 - 超长文档自动截断，从"外部项目仅通过 MCP 使用本系统"角度筛选，不含项目内部开发/维护文档
-- 用法：`localagent_get_docs(doc_name="browser-lessons-skill")` 查单个；`localagent_get_docs(category="core")` 按分类过滤；省略参数返回清单
+- 用法：`parcae_get_docs(doc_name="browser-lessons-skill")` 查单个；`parcae_get_docs(category="core")` 按分类过滤；省略参数返回清单
 
 ### 浏览器方法论自更新闭环
 
@@ -133,7 +133,7 @@ browser sites 和 computer_use apps 经验文件均含"最后更新"日期，mat
 
 ## REST 路径 → MCP 工具名映射规则
 
-**核心规则：MCP 工具名 = FastAPI 路由的 `operation_id` 参数**（不是路径去斜杠！）。所有路由在 `server/*.py` 中显式指定了 `operation_id`，IDE 中工具名显示为 `mcp_localagent_<operation_id>`（`mcp_localagent_` 是 server_name 前缀，调用时省略）。
+**核心规则：MCP 工具名 = FastAPI 路由的 `operation_id` 参数**（不是路径去斜杠！）。所有路由在 `server/*.py` 中显式指定了 `operation_id`，IDE 中工具名显示为 `mcp_parcae_<operation_id>`（`mcp_parcae_` 是 server_name 前缀，调用时省略）。
 
 **命名规律**：大部分 `operation_id` 遵循 `<模块>_<动作>` 模式，可直接从路径推断：
 
@@ -147,6 +147,7 @@ browser sites 和 computer_use apps 经验文件均含"最后更新"日期，mat
 | `POST /ocr/path/json` | `ocr_path` | `ocr_path` | 模块_输入方式（/json 后缀省略） |
 | `POST /exec/python` | `exec_python` | `exec_python` | 模块_动作 |
 | `GET /browser/tabs` | `browser_list_tabs` | `browser_list_tabs` | 模块_动作_对象 |
+| `POST /video/frame` | `video_frame` | `video_frame` | 模块_动作（课程视频内存取帧） |
 | `POST /mindforge/search` | `mindforge_search` | `mindforge_search` | 模块_动作 |
 
 **常见例外**（operation_id 与路径字面不一致，需查代码确认）：
@@ -171,11 +172,11 @@ browser sites 和 computer_use apps 经验文件均含"最后更新"日期，mat
 **非直连工具如何访问**：`server/main.py` 的 `_mcp_include` 是直连白名单；未进入白名单且适合 MCP 调用的 REST operation 会收录到高级网关，可通过以下方式访问：
 
 ```
-localagent_advanced_tool(tool="<operation_id>", params={...})
-# 例：localagent_advanced_tool(tool="ocr_set_keep_models", params={"keep": true})
-# 例：localagent_advanced_tool(tool="mindforge_preload", params={})
-# 例：localagent_advanced_tool(tool="apikey_history", params={})
-# 例：localagent_advanced_tool(tool="todos_get", params={"todo_id": "todo_xxx"})  # GET 类免审批
+parcae_advanced_tool(tool="<operation_id>", params={...})
+# 例：parcae_advanced_tool(tool="ocr_set_keep_models", params={"keep": true})
+# 例：parcae_advanced_tool(tool="mindforge_preload", params={})
+# 例：parcae_advanced_tool(tool="apikey_history", params={})
+# 例：parcae_advanced_tool(tool="todos_get", params={"todo_id": "todo_xxx"})  # GET 类免审批
 ```
 
 **工具选择优先级**：直连工具 → advanced_tool 网关 → template_tool → exec_python。
@@ -186,12 +187,12 @@ localagent_advanced_tool(tool="<operation_id>", params={...})
 
 **不确定时如何查询**：
 - 查 `server/<模块>.py` 中路由的 `operation_id` 参数（最准确）
-- 调用 `localagent_list_tools(category="<模块>")` 运行时发现网关子工具
-- 调用 `localagent_list_templates(category="<分类>")` 运行时发现模板
+- 调用 `parcae_list_tools(category="<模块>")` 运行时发现网关子工具
+- 调用 `parcae_list_templates(category="<分类>")` 运行时发现模板
 
 ## MCP 工具排除清单
 
-以下 REST API 端点未直接暴露为 MCP 工具（为控制直接工具总数），但**可通过 `localagent_advanced_tool` 网关或 REST API 调用**；`_form` 和 SSE 流式端点只保留 REST，不进入网关。
+以下 REST API 端点未直接暴露为 MCP 工具（为控制直接工具总数），但**可通过 `parcae_advanced_tool` 网关或 REST API 调用**；`_form` 和 SSE 流式端点只保留 REST，不进入网关。
 
 ### 模型管理（低频运维操作）
 
@@ -201,11 +202,8 @@ localagent_advanced_tool(tool="<operation_id>", params={...})
 | `ocr_unload_models` | `POST /ocr/models/unload` | 卸载 OCR 模型（委托 `manager.manual_unload("ocr")`） |
 | `vision_set_keep_models` | `POST /vision/models/keep` | 设置视觉模型常驻内存 |
 | `vision_unload_models` | `POST /vision/models/unload` | 卸载视觉模型 |
-| `mindforge_preload` | `POST /mindforge/preload` | 预加载搜索引擎（委托 `manager.manual_load("mindforge_searcher")`） |
-| `mindforge_unload` | `POST /mindforge/unload` | 卸载搜索引擎（委托 `manager.manual_unload("mindforge_searcher")`） |
-| `mindforge_convert` | `POST /mindforge/convert` | 单文档转换（守护进程，未启动时自动拉起） |
-| `mindforge_daemon_stop` | `POST /mindforge/daemon/stop` | 停止守护进程 |
-| `mindforge_daemon_status` | `GET /mindforge/daemon/status` | 守护进程状态 |
+
+> 原表里的 `mindforge_preload` / `mindforge_unload` / `mindforge_convert` / `mindforge_daemon_stop` / `mindforge_daemon_status` 已于 **2026-10-27 从网关整组摘除**（见下方「零调用工具排除」），不再可通过 `parcae_advanced_tool` 调用。
 
 ### Model Lifecycle Manager 统一控制面（`/models/*`）
 
@@ -224,24 +222,22 @@ localagent_advanced_tool(tool="<operation_id>", params={...})
 
 **支持的 model_id**：`ocr` / `memory_embedding` / `guide_embedding` / `mindforge_searcher`。
 
-**MCP 调用方式**：通过 `localagent_advanced_tool` 网关（GET 类免审批，POST 类触发审批弹窗）：
+**MCP 调用方式**：通过 `parcae_advanced_tool` 网关（GET 类免审批，POST 类触发审批弹窗）：
 
 ```
 # 列出所有模型状态（GET 免审批）
-localagent_advanced_tool(tool="models_list", params={})
+parcae_advanced_tool(tool="models_list", params={})
 
 # 查询压力态（GET 免审批）
-localagent_advanced_tool(tool="models_pressure", params={})
+parcae_advanced_tool(tool="models_pressure", params={})
 
-# 手动加载 OCR（POST 触发审批）
-localagent_advanced_tool(tool="models_load", params={"model_id": "ocr"})
-
-# 手动卸载 MindForge 搜索引擎（POST 触发审批）
-localagent_advanced_tool(tool="models_unload", params={"model_id": "mindforge_searcher"})
-
-# 暂停压力监控（POST 触发审批，PAUSED 期间准入放行且暂停逐出）
-localagent_advanced_tool(tool="models_pause", params={"resource": "gpu"})
+# 手动卸载（POST 触发审批）——2026-10-27 后这是 agent 侧唯一的手动装卸入口
+parcae_advanced_tool(tool="models_unload", params={"model_id": "mindforge_searcher"})
 ```
+
+> **2026-10-27 变更**：`models_load` 已从网关摘除（MLM 会自动按需装载，`/ocr/models/preload/json`、`/mindforge/preload` 也能预热，agent 无需手动装）。
+> `models_pause` / `models_resume` / `models_unload` **保留**：pause/resume 是压力守护的唯一手动超驰，unload 是钉住模型（memory_embedding / guide_embedding）唯一的手动释放口。
+> 上述三条仍可走 REST（`POST /models/pause|resume|{id}/unload`，approval_required）。
 
 **手动卸载记忆 embedding 的恢复步骤**（重要：默认钉住规避，手动卸载走审批门槛）：
 
@@ -270,6 +266,11 @@ localagent_advanced_tool(tool="models_pause", params={"resource": "gpu"})
 | **GUI/脚本专用** | `activity_daily_*`(4), `user_message_*`(4) | 由 GUI 面板和日报系统管理 |
 | **零调用状态** | `system_status`, `keep_awake_status`, `docviewer_status`, `memory_maintain_status` | 通过 `/health` 获取聚合状态 |
 | **入站网关** | `inbound_v1_models`, `inbound_v1_chat_completions`, `inbound_keys_list`, `inbound_keys_create`, `inbound_keys_update`, `inbound_keys_delete`, `inbound_calls_list`, `inbound_stats` | OpenAI 兼容中转端点，消费者是外部 harness（Cline/Cherry Studio）与「入站管理」GUI 面板，不进 agent 工具列表 |
+| **2026-10-27 二轮** | `models_load`, `apikey_test`, `apikey_history`, `docviewer_read`, `docviewer_read_file`, `mindforge_status/search/preload/unload/build_index/pipeline/pipeline_status/convert/daemon_status/daemon_stop`(10) | 审计窗口 2026-06-16→10-27、11,529 次调用下 MCP 零调用且全仓库无调用方。判据与逐条理由见 `temp/tool_usage_audit_20261027/端点收敛清单.md`；`models_unload/pause/resume` 因无等价端点**未收** |
+
+> 网关目录口径：**以运行时 `GET /advanced/tools` 的 `total` 为准**，不在本文写死。2026-10-27 二轮收敛摘除了上表所列零调用端点；同日重启把 DL3 记忆漏斗的 `memory_wrapup` / `memory_candidates` 一并激活。
+>
+> **DL4 已激活**：`butler_session` / `butler_context` / `butler_wrapup` / `butler_memory` 四个入口已在 `mcp_whitelist.py` 的 state 桶并随 2026-10-27 重启生效；总数以 `GET /advanced/tools` 的运行时清单为准，不在本文写死。`GET /memory/norms` 只走 REST（DL4 内部直接调 `build_norms_bundle()`），不进 MCP 工具表。
 
 ### 脚本驱动功能（非 agent 直接调用）
 
@@ -289,7 +290,7 @@ localagent_advanced_tool(tool="models_pause", params={"resource": "gpu"})
 
 ### DoomLoopDetector（D10/D11）
 
-检测 `thinking_delta` 尾重复（spec D10/D11）。`client/core/agent/doom_loop.py` `DoomLoopDetector` 在 runner `_stream_llm` 内逐 chunk 喂入 thinking_delta，命中尾重复（`pattern*N` 模式，`tail_size=2000` / `min_repeat_len=50` / `repeat_threshold=3`）时（**B1 重构后不重试**）：
+检测 `thinking_delta` 尾重复（spec D10/D11）。`lib/agent_runtime/doom_loop.py` `DoomLoopDetector` 在 runner `_stream_llm` 内逐 chunk 喂入 thinking_delta，命中尾重复（`pattern*N` 模式，`tail_size=2000` / `min_repeat_len=50` / `repeat_threshold=3`）时（**B1 重构后不重试**）：
 
 1. mid-stream abort（中断当前 SSE 流）
 2. 已收到的 partial text 落库为 `source="partial"` 消息，streaming 事件标 `invalidated`
@@ -300,7 +301,7 @@ localagent_advanced_tool(tool="models_pause", params={"resource": "gpu"})
 
 ### SessionFacade（D12/D13）
 
-`client/core/agent/facade.py` 纯 Python Facade 封装 SessionRunner（不依赖 Qt，GUI worker 通过它调用引擎）：
+`lib/agent_runtime/facade.py` 纯 Python Facade 封装 SessionRunner（不依赖 Qt，GUI worker 通过它调用引擎）：
 
 | 方法 | 行为 |
 |------|------|
@@ -316,7 +317,7 @@ ChatPanel `_ChatWorker` 改用 SessionFacade（不再直接构造 SessionRunner�
 
 **SDD 流程产物 `temp/sdd/chat-panel-v2/`（12 ticket 全部 completed）已整份归档进 `temp/planning_archive/sdd/chat-panel-v2/`（随仓库跟踪）**，设计沉淀以本节和 `docs/chat-engine.md` 为准。基于 wip_45dd436b（防关机/崩溃丢失会话）扩展为完整对话面板重设计，484 项 chat 相关测试全过。
 
-**EventStore 列扩展**（schema 版本以 `client/core/agent/event_store.py` 的 `_SCHEMA_VERSION` 为准）：
+**EventStore 列扩展**（schema 版本以 `lib/agent_runtime/event_store.py` 的 `_SCHEMA_VERSION` 为准）：
 - sessions 表有 `group_name TEXT`（NULL=未分组）+ `pinned INTEGER DEFAULT 0`（0/1）两列
 - messages 表有 `model TEXT` 列（assistant 消息模型名，气泡下方小字显示）
 - 迁移幂等：ALTER TABLE ADD COLUMN（旧 DB 自动补默认值）
@@ -415,6 +416,8 @@ ChatPanel `_ChatWorker` 改用 SessionFacade（不再直接构造 SessionRunner�
 ## 内联截图与 ImageContent（多模态 LLM 支持）
 
 `capture_screen(format=inline)` 返回 MCP 标准 `ImageContent` 块（base64 压缩 JPEG 图片，~30-200KB），多模态 LLM（Claude/GPT-4o/Gemini）可直接"看"到截图。实现方式：fastapi-mcp 0.4.0 默认只返回 TextContent，已在 `server/core/mcp_gateway.py` 中 monkey-patch `_execute_api_tool`，检测响应中的 `mcp_image_block=True` 标记并转为 ImageContent。纯文本模型仍能从 TextContent 摘要获取元信息。
+
+`video_frame`（`POST /video/frame`，perception 桶直连）复用同一机制，但**不落盘**：按 packet + 秒数用 PyAV 在内存解码，单帧返回原图，多帧拼成一张带时间标签的联络表（一次 ≤12 帧），JPEG q90 编码后以 ImageContent 返回。`packet` 必须在 `workspace/course_digest/out/` 下；视频路径取自 packet 的 `meta.json`。依赖 PyAV（可选 inference 组），缺失时返回 503。
 
 ## MCP 工具调用统计
 

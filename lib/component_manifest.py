@@ -31,7 +31,7 @@ import toml
 
 logger = logging.getLogger(__name__)
 
-# 项目根：lib/component_manifest.py → parents[1] = localAgent/
+# 项目根：lib/component_manifest.py → parents[1] = Parcae/
 # （原 server/component_manifest.py 用 parent.parent，lib 层等价为 parents[1]）
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _WORKSPACE_DIR = _PROJECT_ROOT / "workspace"

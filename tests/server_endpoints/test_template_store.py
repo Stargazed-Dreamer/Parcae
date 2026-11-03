@@ -2,7 +2,7 @@
 
 覆盖 T03 acceptance（temp/sdd/chat-panel-v2/tickets.md）：
 - [x] data/chat_templates.json 初始化默认空白模板（id="blank", name="空白", prompt="", skills=[]）
-- [x] client/core/agent/template_store.py CRUD：load_all / save_all / create / update / delete / get
+- [x] lib/agent_runtime/template_store.py CRUD：load_all / save_all / create / update / delete / get
 - [x] build_skill_path_map() 解析 .agents/skills/_index.md 构建 task_type → SKILL.md 路径映射
 - [x] resolve_skill_path() fallback 路径探测
 - [x] format_skills_prompt() task_type list → system prompt 段格式
@@ -22,7 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402  # noqa: E402
+from lib.agent_runtime import (  # noqa: E402  # noqa: E402
     Template,
     build_skill_path_map,
     format_skills_prompt,
@@ -34,7 +34,7 @@ from client.core.agent import (  # noqa: E402  # noqa: E402
     template_save_all,
     template_update,
 )
-from client.core.agent.template_store import (  # noqa: E402
+from lib.agent_runtime.template_store import (  # noqa: E402
     _BLANK_TEMPLATE_ID,
     _reset_skill_path_map_cache,
 )

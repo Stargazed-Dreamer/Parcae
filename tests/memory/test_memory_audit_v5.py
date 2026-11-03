@@ -1,13 +1,14 @@
-"""v5 记忆库体检整改的回归测试
+"""记忆库审计与召回的回归测试（v5 起；2026-10-31 随验证器删除缩编）
 
-覆盖三块（对应 2026-10-03 体检发现的三个判据错配）：
-- 指标日聚合 `server/memory/metrics.py`：`record_daily` 写出可查的漏斗/卫生指标
-- 验证器喂料与延判 `maintainer.build_validation_preview` / `run_validate`：
-  剥掉 value 内嵌的元数据信封、正文超窗时不采纳 archive
-- 老化重验门控 `run_aging`：archive 不再是永久标签
-- 无效判据拒绝 `is_invalid_archive_reason`：模型以"超出知识截止/未来未发生"为由的
-  archive 一律不采纳（反复只给这种理由则落 keep）
+覆盖：
+- 指标日聚合 `server/memory/metrics.py`：漏斗 / 归档 / 索引卫生 / 遥测指标可查
+- 老化 `run_aging`：只写 `stale_score`，**不再翻转 `validation_status`**
+  （LLM 验证器已于 2026-10-31 删除，四列冻结为历史字段）
 - 通配限槽 `agent_guide._select_must_read`：`"*"` 记忆最多占 1 个必读位
+
+被删掉的三类（不要再写回来，除非验证器也跟着回来）：`build_validation_preview`
+喂料、超窗延判、无效理由拒绝、`requeue_all_validated` —— 它们测的是「怎么判生死」，
+而那套东西已整块移除（见 `30_架构与设计/28` 的 `R-VALIDATE`）。
 """
 
 import json
@@ -22,11 +23,6 @@ import pytest
 from server.agent_guide import _MUST_READ_MAX, _select_must_read
 from server.memory import metrics as mem_metrics
 from server.memory.config import MemoryConfig
-from server.memory.maintainer import (
-    _ARCHIVE_CONFIRM_ATTEMPTS,
-    build_validation_preview,
-    is_invalid_archive_reason,
-)
 from server.memory.store import MemoryStore
 
 
@@ -66,7 +62,7 @@ def _seed_fact(store, key, value: dict, *, fact_type=None, contexts=None,
         store.conn.commit()
 
 
-# ==================== 1. schema v5 ====================
+# ==================== 1. schema ====================
 
 class TestSchemaV5:
     def test_metrics_table_exists(self, store):
@@ -75,9 +71,11 @@ class TestSchemaV5:
         ).fetchone()
         assert row is not None
 
-    def test_validate_attempts_column_exists(self, store):
+    def test_frozen_validation_columns_still_exist(self, store):
+        """验证器删了，但四列**不删**（SQLite 删列代价大，且历史判决仍可查）。"""
         cols = {r[1] for r in store.conn.execute("PRAGMA table_info(memory_meta)")}
-        assert "validate_attempts" in cols
+        assert {"validation_status", "last_validated_at",
+                "validation_note", "validate_attempts"} <= cols
 
     def test_init_is_idempotent(self, tmp_db):
         from server.memory.schema import init_db
@@ -88,206 +86,60 @@ class TestSchemaV5:
         conn2.close()
 
 
-# ==================== 2. build_validation_preview ====================
+# ==================== 2. 老化只写 stale_score ====================
 
-class TestValidationPreview:
-    def test_strips_metadata_envelope(self):
-        """旧实现把元数据信封当正文喂给模型，于是出现"乱码/无实际语义"的 archive 判决"""
-        value = json.dumps({
-            "source": "manual", "updated_at": "2026-09-16 00:41:25",
-            "access_count": 12, "confidence": 1.0, "created_at": "2026-09-16 00:41:25",
-            "fact_type": "reference", "consumption_contexts": '["*"]',
-            "trigger_keywords": '["curl"]',
-            "summary": "后端停机时用 sqlite3 直接写 facts 表的方法",
-        })
-        preview, truncated = build_validation_preview(value, 2400)
-        assert "后端停机时用 sqlite3" in preview
-        for junk in ("access_count", "confidence", "updated_at"):
-            assert junk not in preview
-        assert truncated is False
+class TestAgingWritesOnlyStaleScore:
+    """2026-10-31 验证器删除后，老化不再翻转 validation_status。
 
-    def test_keeps_business_keys(self):
-        """非信封键不能静默丢掉——丢了就变成"看不全"，会被误判成"没价值" """
-        value = json.dumps({"stock_review_output": {"no_html": True}, "rules": {"留": "材料"}})
-        preview, _ = build_validation_preview(value, 2400)
-        assert "stock_review_output" in preview
-        assert "no_html" in preview
+    这组是「删干净」的看门测试：如果哪天有人把 validation_status 的写入加回来，
+    要么是验证器真的回来了（那就该把提示词、开关、测试一起带回来），
+    要么是一次没想清楚的回归——两种都该让测试先响。
+    """
 
-    def test_marks_truncated(self):
-        value = json.dumps({"content": "x" * 5000})
-        preview, truncated = build_validation_preview(value, 2400)
-        assert truncated is True
-        assert len(preview) == 2400
-
-    def test_non_json_value_passthrough(self):
-        preview, truncated = build_validation_preview("纯文本记忆", 2400)
-        assert preview == "纯文本记忆"
-        assert truncated is False
-
-    def test_empty_value_does_not_vanish(self):
-        """空 value 要能读成"空"，而不是"内容缺失所以判死" """
-        preview, truncated = build_validation_preview("", 2400)
-        assert preview == ""
-        assert truncated is False
-
-
-# ==================== 3. 验证器的超窗延判 ====================
-
-class TestValidateTruncationPolicy:
-    def _stub(self, maintainer, action):
-        async def _fake():
-            return ({"is_accurate": action != "keep", "reason": "内容被截断",
-                     "suggested_action": action}, False)
-        return _fake
-
-    def test_archive_deferred_when_truncated(self, maintainer, store):
-        import asyncio
-
-        maintainer.config.validate_preview_chars = 50
-        _seed_fact(store, "big", {"content": "y" * 400}, fact_type="project")
-        store.conn.execute(
-            "INSERT INTO memory_meta (key, validation_status) VALUES (?, 'pending')", ("big",)
-        )
-        store.conn.commit()
-
-        with patch.object(maintainer, "_call_llm_validate_with_429_flag",
-                          return_value=({"is_accurate": False, "reason": "内容被截断",
-                                         "suggested_action": "archive"}, False)):
-            stats = asyncio.run(maintainer.run_validate())
-
-        assert stats["deferred_truncated"] == 1
-        assert stats["archive"] == 0
-        row = store.conn.execute(
-            "SELECT validation_status, validate_attempts, validation_note "
-            "FROM memory_meta WHERE key='big'"
-        ).fetchone()
-        assert row[0] == "pending"          # 没看全就不给死刑
-        assert row[1] == 1                  # 中间量可核：延判计一次
-        assert "超出" in row[2]
-
-    def test_repeated_truncation_becomes_update_not_archive(self, maintainer, store):
-        import asyncio
-
-        maintainer.config.validate_preview_chars = 50
-        _seed_fact(store, "big2", {"content": "y" * 400}, fact_type="project")
-        store.conn.execute(
-            "INSERT INTO memory_meta (key, validation_status, validate_attempts) "
-            "VALUES (?, 'pending', ?)", ("big2", _ARCHIVE_CONFIRM_ATTEMPTS - 1)
-        )
-        store.conn.commit()
-
-        with patch.object(maintainer, "_call_llm_validate_with_429_flag",
-                          return_value=({"is_accurate": False, "reason": "内容被截断",
-                                         "suggested_action": "archive"}, False)):
-            stats = asyncio.run(maintainer.run_validate())
-
-        assert stats["archive"] == 0
-        assert stats["update"] == 1
-        row = store.conn.execute(
-            "SELECT validation_status, validation_note FROM memory_meta WHERE key='big2'"
-        ).fetchone()
-        assert row[0] == "update"           # 臃肿是重写信号，不是过时信号
-        assert "压缩重写" in row[1]
-
-    def test_archive_applied_when_content_fits(self, maintainer, store):
-        import asyncio
-
-        maintainer.config.validate_preview_chars = 2400
-        _seed_fact(store, "small", {"summary": "一次性下载已完成"}, fact_type="project")
-        store.conn.execute(
-            "INSERT INTO memory_meta (key, validation_status) VALUES (?, 'pending')", ("small",)
-        )
-        store.conn.commit()
-
-        with patch.object(maintainer, "_call_llm_validate_with_429_flag",
-                          return_value=({"is_accurate": False, "reason": "一次性动作已完成",
-                                         "suggested_action": "archive"}, False)):
-            stats = asyncio.run(maintainer.run_validate())
-
-        assert stats["archive"] == 1
-        assert stats["deferred_truncated"] == 0
-
-    def test_batch_limit_caps_one_cycle(self, maintainer, store):
-        import asyncio
-
-        maintainer.config.validate_batch_limit = 2
-        for i in range(5):
-            _seed_fact(store, f"f{i}", {"summary": "x"}, fact_type="project")
-            store.conn.execute(
-                "INSERT INTO memory_meta (key, validation_status, stale_score) "
-                "VALUES (?, 'pending', ?)", (f"f{i}", 10.0 + i)
-            )
-        store.conn.commit()
-
-        with patch.object(maintainer, "_call_llm_validate_with_429_flag",
-                          return_value=({"is_accurate": True, "reason": "仍成立",
-                                         "suggested_action": "keep"}, False)):
-            stats = asyncio.run(maintainer.run_validate())
-
-        assert stats["pending_selected"] == 2
-        assert stats["validated"] == 2
-
-
-# ==================== 4. 老化的重验门控 ====================
-
-class TestAgingRevalidationGate:
-    def _set_state(self, store, key, status, validated_days_ago):
-        stamp = (datetime.now() - timedelta(days=validated_days_ago)).strftime("%Y-%m-%d %H:%M:%S")
-        store.conn.execute(
-            "UPDATE memory_meta SET validation_status=?, last_validated_at=? WHERE key=?",
-            (status, stamp, key),
-        )
-        store.conn.commit()
-
-    def _make_stale(self, store, key):
+    def _make_stale(self, store, key, status="archive"):
         _seed_fact(store, key, {"summary": "x"}, fact_type="project")
         old = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
         store.conn.execute("UPDATE facts SET updated_at=? WHERE key=?", (old, key))
-        store.conn.commit()
         store.conn.execute(
-            "INSERT OR REPLACE INTO memory_meta (key, validation_status) VALUES (?, 'pending')"
-        , (key,))
+            "INSERT OR REPLACE INTO memory_meta (key, validation_status) VALUES (?, ?)",
+            (key, status),
+        )
         store.conn.commit()
 
-    def test_archive_label_is_revisitable(self, maintainer, store):
-        """archive 此前是永久标签：修好验证器之后必须能把存量误判重判一遍"""
-        self._make_stale(store, "dead_soon")
-        self._set_state(store, "dead_soon", "archive", validated_days_ago=40)
-
-        maintainer.config.validate_revalidate_days = 30
+    def test_stale_score_written_and_frozen_label_untouched(self, maintainer, store):
+        self._make_stale(store, "old_archive")
         result = maintainer.run_aging()
 
-        status = store.conn.execute(
-            "SELECT validation_status FROM memory_meta WHERE key='dead_soon'"
-        ).fetchone()[0]
-        assert status == "pending"
-        assert result["requeued_for_revalidation"] == 1
-
-    def test_recently_validated_is_not_requeued(self, maintainer, store):
-        self._make_stale(store, "fresh_check")
-        self._set_state(store, "fresh_check", "keep", validated_days_ago=3)
-
-        maintainer.config.validate_revalidate_days = 30
-        maintainer.run_aging()
-
-        status = store.conn.execute(
-            "SELECT validation_status FROM memory_meta WHERE key='fresh_check'"
-        ).fetchone()[0]
-        assert status == "keep"   # 不再每 6 小时重验一次
-
-    def test_stale_score_updates_even_when_not_requeued(self, maintainer, store):
-        self._make_stale(store, "scored")
-        self._set_state(store, "scored", "archive", validated_days_ago=1)
-
-        maintainer.run_aging()
-
-        score = store.conn.execute(
-            "SELECT stale_score FROM memory_meta WHERE key='scored'"
-        ).fetchone()[0]
+        assert result["stale_count"] == 1
+        score, status = store.conn.execute(
+            "SELECT stale_score, validation_status FROM memory_meta WHERE key='old_archive'"
+        ).fetchone()
         assert score >= 29
+        assert status == "archive"      # 历史标签冻结，不再被翻回 pending
+
+    def test_result_has_no_revalidation_keys(self, maintainer, store):
+        self._make_stale(store, "no_gate")
+        result = maintainer.run_aging()
+        assert "revalidate_days" not in result
+        assert "requeued_for_revalidation" not in result
+
+    def test_run_has_no_validate_stage(self, maintainer, store):
+        import asyncio
+
+        self._make_stale(store, "no_stage")
+        res = asyncio.run(maintainer.run())
+        assert "validate" not in res
+        assert set(res) >= {"prefilter", "aging", "metrics"}
+
+    def test_get_status_reports_validator_removed(self, maintainer, store):
+        st = maintainer.get_status()
+        assert st["validator"] == "removed_2026-10-31"
+        assert "validate_enabled" not in st
+        assert "model_tier" not in st
+        assert "archived_total" in st
 
 
-# ==================== 5. 指标日聚合 ====================
+# ==================== 3. 指标日聚合 ====================
 
 class TestRecordDaily:
     def test_writes_funnel_metrics(self, store):
@@ -336,7 +188,8 @@ class TestRecordDaily:
         """被判 archive 却高频上屏 = 标签与使用互相打脸，必须报出来"""
         _seed_fact(store, "zombie", {"summary": "账面已死"}, contexts=["*"])
         store.conn.execute(
-            "INSERT INTO memory_meta (key, validation_status) VALUES ('zombie', 'archive')"
+            "UPDATE facts SET archived_at=? WHERE key='zombie'",
+            (datetime.now().isoformat(),),
         )
         for _ in range(25):
             store.conn.execute(
@@ -487,116 +340,7 @@ class TestIndexHygieneMetrics:
         assert snap["vector_coverage"][1]["vectors_total"] == 0
 
 
-class TestRequeueAllValidated:
-    def test_resets_labels_and_clears_revalidation_gate(self, maintainer, store):
-        _seed_fact(store, "a", {"summary": "x"}, fact_type="project")
-        _seed_fact(store, "b", {"summary": "y"}, fact_type="reference")
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        store.conn.execute(
-            "INSERT INTO memory_meta (key, validation_status, last_validated_at, validate_attempts)"
-            " VALUES ('a', 'archive', ?, 5)", (now,),
-        )
-        store.conn.execute(
-            "INSERT INTO memory_meta (key, validation_status) VALUES ('b', 'keep')"
-        )
-        store.conn.commit()
-
-        result = maintainer.requeue_all_validated()
-
-        assert result == {"requeued": 2}
-        rows = dict(store.conn.execute(
-            "SELECT key, validation_status FROM memory_meta"
-        ).fetchall())
-        assert rows == {"a": "pending", "b": "pending"}
-        gate = store.conn.execute(
-            "SELECT validate_attempts, last_validated_at FROM memory_meta WHERE key='a'"
-        ).fetchone()
-        assert gate[0] == 0        # 延判计数从零开始，否则一跑就撞第 3 次直接判 update
-        assert gate[1] is None     # 重验门控清空
-
-
-class TestInvalidReasonRejection:
-    """cheap 模型把"晚于自己知识截止的日期"读成"未来未发生 ⇒ 内容无效"。
-
-    2026-10-03 重判存量时实测到两例（`project_ruanxie_recruit_2026`、
-    `reference_opencode_zen_free_tier`），杀伤面专一：优先杀最新写入的记忆。
-    """
-
-    def _seed_pending(self, store, key, *, attempts=0, value=None):
-        _seed_fact(store, key, value or {"summary": "2026-09 招新通知排期与判据"},
-                   fact_type="project")
-        store.conn.execute(
-            "INSERT INTO memory_meta (key, validation_status, validate_attempts) "
-            "VALUES (?, 'pending', ?)", (key, attempts)
-        )
-        store.conn.commit()
-
-    def test_regex_hits_the_two_observed_verdicts(self):
-        assert is_invalid_archive_reason(
-            "时间戳显示为2026年9月，已超出模型知识库截止日期（2026年7月），属于未来未发生的事件"
-        )
-        assert is_invalid_archive_reason("记录时间2026-09-13超出知识截止期2026-07，已无持续参考价值")
-
-    def test_regex_does_not_hit_legitimate_staleness_reasons(self):
-        # 反向用例：正常的失效判据不能被误拦，否则 archive 通道形同废除
-        for reason in (
-            "一次性下载任务已完成，无可复用信息",
-            "该端点已在 v0.52 移除，被新接口取代",
-            "内容为空壳，读不出任何命题",
-            "正文存在两套重复且冲突的数据，需清理统一时间线",
-        ):
-            assert not is_invalid_archive_reason(reason), reason
-
-    def test_archive_deferred_when_reason_is_invalid(self, maintainer, store):
-        import asyncio
-
-        self._seed_pending(store, "recruit_x")
-        with patch.object(maintainer, "_call_llm_validate_with_429_flag",
-                          return_value=({"is_accurate": False,
-                                         "reason": "超出模型知识截止日期，属于未来未发生的事件",
-                                         "suggested_action": "archive"}, False)):
-            stats = asyncio.run(maintainer.run_validate())
-
-        assert stats["deferred_invalid_reason"] == 1
-        assert stats["archive"] == 0
-        row = store.conn.execute(
-            "SELECT validation_status, validate_attempts, validation_note "
-            "FROM memory_meta WHERE key='recruit_x'"
-        ).fetchone()
-        assert row[0] == "pending"          # 依据不成立 ⇒ 不动手
-        assert row[1] == 1
-        assert "无效依据" in row[2]
-
-    def test_repeated_invalid_reason_lands_keep(self, maintainer, store):
-        import asyncio
-
-        self._seed_pending(store, "recruit_y", attempts=_ARCHIVE_CONFIRM_ATTEMPTS - 1)
-        with patch.object(maintainer, "_call_llm_validate_with_429_flag",
-                          return_value=({"is_accurate": False,
-                                         "reason": "尚未发生，内容无效",
-                                         "suggested_action": "archive"}, False)):
-            stats = asyncio.run(maintainer.run_validate())
-
-        # 反复只给无效依据 = 没有成立的失效证据 ⇒ when in doubt, keep（而不是 update）
-        assert stats["keep"] == 1
-        assert stats["archive"] == 0
-        row = store.conn.execute(
-            "SELECT validation_status, validation_note FROM memory_meta WHERE key='recruit_y'"
-        ).fetchone()
-        assert row[0] == "keep"
-        assert "无有效失效证据" in row[1]
-
-    def test_prompt_grounds_today_and_bans_cutoff_reasoning(self, maintainer):
-        sys_p, user_p = maintainer._build_validate_prompt(
-            "k", json.dumps({"summary": "x"}, ensure_ascii=False),
-            fact_type="project", fact_updated_at="2026-09-30 10:00:00", stale_days=3,
-        )
-        assert "今天:" in user_p                      # 时间线由调用方给，不由模型的记忆力决定
-        assert "你的知识截止日期与本库无关" in sys_p
-        assert "不构成内容无效的证据" in sys_p
-
-
-# ==================== 6. 通配限槽 ====================
+# ==================== 4. 通配限槽 ====================
 
 class TestSelectMustRead:
     def test_wildcard_gets_only_one_slot(self):

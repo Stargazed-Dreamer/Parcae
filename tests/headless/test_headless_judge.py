@@ -12,13 +12,8 @@
 - [x] 验证 fail_count 计数正确（uncertain 算 failed）
 
 测试策略：
-- 用例 3-6：真实 SessionFacade + MockLLM + 真实 judge_runner（e2e 链路）
+- 用例 3-6：真实 HeadlessSessionAction + scripted runtime client（main/judge 的终态由替身给出）
 - 用例 7（fail_count）：mock action.execute 返回 success=False，验证 LoopManager._run_task 让 fail_count +1
-
-MockLLM 策略（callable 模式）：
-- 根据请求全文判断是 main agent 还是 judge agent 调用
-- main agent 调用：根据测试场景返回不同输出（含"不确定"等模糊词）
-- judge agent 调用：根据测试场景返回不同响应（合法 JSON / 非 JSON / 抛异常 / max_iterations）
 """
 
 from __future__ import annotations
@@ -33,71 +28,39 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
-    MockLLM,
-    MockToolExecutor,
-)
-from client.core.agent.types import LLMRequest, LLMResponse  # noqa: E402
-from server.activity_tracker.headless_runner import (  # noqa: E402
-    DEFAULT_BASE_URL,
-)
+from fake_runtime import FakeRuntimeClient, assistant  # noqa: E402
+
+from lib.agent_runtime.runtime_client import RuntimeUnavailable  # noqa: E402
+from server.activity_tracker import headless_runner as hr  # noqa: E402
 from server.activity_tracker.loop_actions import HeadlessSessionAction  # noqa: E402
 
 # ============================================================================
-# Fixtures 与辅助函数（复用 e2e 测试的 patch 模式）
+# Fixtures 与辅助函数
 # ============================================================================
 
 
-def _extract_full_text(request: LLMRequest) -> str:
-    """提取 LLMRequest 中所有可见文本（system + 所有 messages content）。"""
-    parts: list[str] = [request.system or ""]
-    for msg in request.messages:
-        content = msg.content
-        if isinstance(content, str):
-            parts.append(content)
-        elif isinstance(content, list):
-            for p in content:
-                if isinstance(p, dict) and p.get("type") == "text":
-                    parts.append(p.get("text", ""))
-    return "\n".join(parts)
-
-
-def _is_judge_call(request: LLMRequest) -> bool:
-    """判断是否为 judge agent 调用。
-
-    用 JUDGE_PROMPT_TEMPLATE 唯一标记 '你是任务成功判定' 判别，
-    不用 '判定'/'verdict' 关键词（AGENTS.md headless 段也含这些词，
-    会污染 main agent 的 system prompt 导致误判）。
-    """
-    full_text = _extract_full_text(request)
-    return "你是任务成功判定" in full_text or "【判定规则】" in full_text
-
-
-def _patch_agent_components(monkeypatch, mock_llm: MockLLM):
-    """patch client.core.agent 的 LLMPoolGateway / ToolRegistry / HttpClientToolExecutor。"""
-    class MockLLMPoolGateway:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        async def call(self, request):
-            return await mock_llm.call(request)
-        async def stream(self, request):
-            async for ev in mock_llm.stream(request):
-                yield ev
-
-    class MockToolRegistry:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        def refresh(self, *, timeout: float = 10.0) -> int:
-            return 0
-
-    class MockHttpClientToolExecutor(MockToolExecutor):
-        def __init__(self, registry=None, base_url=DEFAULT_BASE_URL, **kwargs):
-            super().__init__(**kwargs)
-
-    import client.core.agent as agent_pkg
-    monkeypatch.setattr(agent_pkg, "LLMPoolGateway", MockLLMPoolGateway)
-    monkeypatch.setattr(agent_pkg, "ToolRegistry", MockToolRegistry)
-    monkeypatch.setattr(agent_pkg, "HttpClientToolExecutor", MockHttpClientToolExecutor)
+def _patch_runtime_scripts(
+    monkeypatch,
+    *,
+    main_text: str = "任务完成",
+    judge_text: str = '{"verdict": "success", "reason": "ok"}',
+    judge_status: str = "completed",
+    judge_stop: str = "end_turn",
+    judge_error: Exception | None = None,
+) -> FakeRuntimeClient:
+    """给主/judge 会话脚本化终态，替换 headless_runner 的 runtime 客户端。"""
+    fake = FakeRuntimeClient()
+    fake.on("headless", messages=[assistant(main_text)])
+    fake.on(
+        "headless_judge",
+        messages=[assistant(judge_text)],
+        status=judge_status,
+        stop_reason=judge_stop,
+    )
+    if judge_error is not None:
+        fake.submit_error_by_mode["headless_judge"] = judge_error
+    monkeypatch.setattr(hr, "_make_runtime_client", lambda config: fake)
+    return fake
 
 
 def _patch_memory_and_wip(monkeypatch, capture: dict):
@@ -170,23 +133,11 @@ def test_judge_verdict_uncertain_main_agent_ambiguous(tmp_db_path, monkeypatch):
     - wip status=failed
     - memory judge_verdict=uncertain
     """
-    def generate(request: LLMRequest) -> LLMResponse:
-        if _is_judge_call(request):
-            return LLMResponse(
-                content='{"verdict": "uncertain", "reason": "主 agent 输出含模糊表述"}',
-                model="mock-judge",
-                usage={"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70},
-                stop_reason="end_turn",
-            )
-        return LLMResponse(
-            content="我不确定是否能完成，可能需要更多信息",
-            model="mock-main",
-            usage={"prompt_tokens": 30, "completion_tokens": 15, "total_tokens": 45},
-            stop_reason="end_turn",
-        )
-
-    mock_llm = MockLLM(callable=generate)
-    _patch_agent_components(monkeypatch, mock_llm)
+    _patch_runtime_scripts(
+        monkeypatch,
+        main_text="我不确定是否能完成，可能需要更多信息",
+        judge_text='{"verdict": "uncertain", "reason": "主 agent 输出含模糊表述"}',
+    )
 
     capture: dict = {}
     _patch_memory_and_wip(monkeypatch, capture)
@@ -229,24 +180,11 @@ def test_judge_output_non_json_degrades_to_uncertain(tmp_db_path, monkeypatch):
     - result["judge_verdict"] == "uncertain"
     - result["judge_reason"] 含 "not valid JSON" 或类似解析失败说明
     """
-    def generate(request: LLMRequest) -> LLMResponse:
-        if _is_judge_call(request):
-            # 返回非 JSON 文本
-            return LLMResponse(
-                content="我觉得任务完成了，但没按 JSON 格式输出",
-                model="mock-judge",
-                usage={"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70},
-                stop_reason="end_turn",
-            )
-        return LLMResponse(
-            content="任务完成",
-            model="mock-main",
-            usage={"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40},
-            stop_reason="end_turn",
-        )
-
-    mock_llm = MockLLM(callable=generate)
-    _patch_agent_components(monkeypatch, mock_llm)
+    _patch_runtime_scripts(
+        monkeypatch,
+        main_text="任务完成",
+        judge_text="我觉得任务完成了，但没按 JSON 格式输出",
+    )
 
     capture: dict = {}
     _patch_memory_and_wip(monkeypatch, capture)
@@ -277,26 +215,18 @@ def test_judge_agent_failure_degrades_to_uncertain(tmp_db_path, monkeypatch):
 
     MockLLM 配置：
     - main agent 正常返回
-    - judge agent 调用时抛 RuntimeError("LLM service unavailable")
+    - judge agent 自身提交/运行失败（runtime 不可达）
 
     验证：
     - result["success"] is False
     - result["judge_verdict"] == "uncertain"
     - result["judge_reason"] 含 "judge session failed" 或异常信息
     """
-    def generate(request: LLMRequest) -> LLMResponse:
-        if _is_judge_call(request):
-            # 模拟 judge LLM 调用失败
-            raise RuntimeError("LLM service unavailable")
-        return LLMResponse(
-            content="任务完成",
-            model="mock-main",
-            usage={"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40},
-            stop_reason="end_turn",
-        )
-
-    mock_llm = MockLLM(callable=generate)
-    _patch_agent_components(monkeypatch, mock_llm)
+    _patch_runtime_scripts(
+        monkeypatch,
+        main_text="任务完成",
+        judge_error=RuntimeUnavailable("LLM service unavailable"),
+    )
 
     capture: dict = {}
     _patch_memory_and_wip(monkeypatch, capture)

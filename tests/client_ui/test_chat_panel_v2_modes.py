@@ -32,7 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-
+from tests.client_ui._local_store import local_store_factory as _local_store_factory  # noqa: E402
 
 # ============================================================================
 # Fixtures
@@ -45,7 +45,7 @@ def _make_chat_panel(monkeypatch, tmp_path):
     from client.panels.chat import ChatPanel
 
     db_path = str(tmp_path / "modes_test.db")
-    monkeypatch.setattr(chat_module, "DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(chat_module, "_make_read_store", _local_store_factory(db_path))
     return ChatPanel()
 
 
@@ -129,6 +129,48 @@ class TestRunningStateTransition:
             assert not panel._mode_send_btn.isHidden()
             assert not panel._mode_queue_btn.isHidden()
             assert not panel._mode_steer_btn.isHidden()
+        finally:
+            _cleanup_panel(panel, qapp)
+
+    def test_start_page_send_enters_running_state(self, qapp, monkeypatch, tmp_path):
+        """开始页首轮发送也必须进入运行态（三 tab 可见，默认引导）。"""
+        from PySide6.QtCore import QObject, Signal
+
+        import client.panels.chat as chat_module
+
+        class _FakeWorker(QObject):
+            finished_run = Signal(object)
+            error = Signal(object)
+            session_started = Signal(str)
+
+            def __init__(self, **kwargs):
+                super().__init__(kwargs.get("parent"))
+                self.kwargs = kwargs
+
+            def isRunning(self):
+                return False
+
+            def start(self):
+                return None
+
+            def steer(self, text):
+                return None
+
+            def interrupt(self):
+                return None
+
+            def stop(self):
+                return None
+
+        monkeypatch.setattr(chat_module, "_RuntimeRunWorker", _FakeWorker)
+        panel = _make_chat_panel(monkeypatch, tmp_path)
+        try:
+            panel._start_event_stream = lambda *a, **k: None
+            panel._on_start_page_send("写一篇长文", [])
+            assert panel._is_running_state is True
+            assert not panel._mode_tabs_frame.isHidden()
+            assert not panel._mode_steer_btn.isHidden()
+            assert panel._mode_steer_btn.isChecked() is True
         finally:
             _cleanup_panel(panel, qapp)
 
@@ -498,10 +540,10 @@ class TestQueuePersistence:
 
     def test_show_queue_persists_to_event_store(self, qapp, monkeypatch, tmp_path):
         """_show_queue(text) 写入 source='queue' visible=0 消息到 EventStore。"""
-        from client.core.agent import EventStore
+        from lib.agent_runtime import EventStore
 
         db_path = str(tmp_path / "queue_persist.db")
-        monkeypatch.setattr("client.panels.chat.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("client.panels.chat._make_read_store", _local_store_factory(db_path))
         from client.panels.chat import ChatPanel
 
         panel = ChatPanel()
@@ -531,10 +573,10 @@ class TestQueuePersistence:
 
     def test_show_queue_no_session_skips_persist(self, qapp, monkeypatch, tmp_path):
         """无 current_session_id 时 _show_queue 不写库（仅 in-memory）。"""
-        from client.core.agent import EventStore
+        from lib.agent_runtime import EventStore
 
         db_path = str(tmp_path / "queue_nosess.db")
-        monkeypatch.setattr("client.panels.chat.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("client.panels.chat._make_read_store", _local_store_factory(db_path))
         from client.panels.chat import ChatPanel
 
         panel = ChatPanel()
@@ -556,10 +598,10 @@ class TestQueuePersistence:
 
     def test_clear_queue_deletes_persisted(self, qapp, monkeypatch, tmp_path):
         """_clear_queue 删除 EventStore 中的排队消息。"""
-        from client.core.agent import EventStore
+        from lib.agent_runtime import EventStore
 
         db_path = str(tmp_path / "queue_clear.db")
-        monkeypatch.setattr("client.panels.chat.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("client.panels.chat._make_read_store", _local_store_factory(db_path))
         from client.panels.chat import ChatPanel
 
         panel = ChatPanel()
@@ -586,10 +628,10 @@ class TestQueuePersistence:
 
     def test_edit_queue_deletes_persisted(self, qapp, monkeypatch, tmp_path):
         """_on_edit_queue 取消排队时删除持久化消息。"""
-        from client.core.agent import EventStore
+        from lib.agent_runtime import EventStore
 
         db_path = str(tmp_path / "queue_edit.db")
-        monkeypatch.setattr("client.panels.chat.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("client.panels.chat._make_read_store", _local_store_factory(db_path))
         from client.panels.chat import ChatPanel
 
         panel = ChatPanel()
@@ -621,7 +663,7 @@ class TestQueueRecoveryOnStartup:
 
     def test_recover_restores_latest_queue(self, qapp, monkeypatch, tmp_path):
         """启动时发现 source='queue' 消息 → 恢复到 UI + banner。"""
-        from client.core.agent import EventStore, Message
+        from lib.agent_runtime import EventStore, Message
 
         db_path = str(tmp_path / "queue_recover.db")
         # 预写一条排队消息
@@ -633,7 +675,7 @@ class TestQueueRecoveryOnStartup:
         )))
         store.close()
 
-        monkeypatch.setattr("client.panels.chat.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("client.panels.chat._make_read_store", _local_store_factory(db_path))
         from client.panels.chat import ChatPanel
 
         panel = ChatPanel()  # _init_read_store 会调 _recover_pending_queue
@@ -650,7 +692,7 @@ class TestQueueRecoveryOnStartup:
 
     def test_recover_no_queue_no_banner(self, qapp, monkeypatch, tmp_path):
         """无排队消息 → 不显示 banner。"""
-        from client.core.agent import EventStore
+        from lib.agent_runtime import EventStore
 
         db_path = str(tmp_path / "queue_none.db")
         store = EventStore(db_path=db_path)
@@ -658,7 +700,7 @@ class TestQueueRecoveryOnStartup:
         _run(store.create_session(session_id="s-noqueue-1"))
         store.close()
 
-        monkeypatch.setattr("client.panels.chat.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("client.panels.chat._make_read_store", _local_store_factory(db_path))
         from client.panels.chat import ChatPanel
 
         panel = ChatPanel()
@@ -671,7 +713,7 @@ class TestQueueRecoveryOnStartup:
 
     def test_recover_multiple_deletes_orphans(self, qapp, monkeypatch, tmp_path):
         """多条排队消息：恢复最新 + 删除孤儿（UI 只支持单条）。"""
-        from client.core.agent import EventStore, Message
+        from lib.agent_runtime import EventStore, Message
 
         db_path = str(tmp_path / "queue_multi.db")
         store = EventStore(db_path=db_path)
@@ -685,7 +727,7 @@ class TestQueueRecoveryOnStartup:
         )))
         store.close()
 
-        monkeypatch.setattr("client.panels.chat.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("client.panels.chat._make_read_store", _local_store_factory(db_path))
         from client.panels.chat import ChatPanel
 
         panel = ChatPanel()
@@ -704,7 +746,7 @@ class TestQueueRecoveryOnStartup:
 
     def test_recovered_queue_can_be_cleared(self, qapp, monkeypatch, tmp_path):
         """恢复后的排队消息可被 _clear_queue 正常清理（_queued_msg_id 正确）。"""
-        from client.core.agent import EventStore, Message
+        from lib.agent_runtime import EventStore, Message
 
         db_path = str(tmp_path / "queue_recover_clear.db")
         store = EventStore(db_path=db_path)
@@ -715,7 +757,7 @@ class TestQueueRecoveryOnStartup:
         )))
         store.close()
 
-        monkeypatch.setattr("client.panels.chat.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("client.panels.chat._make_read_store", _local_store_factory(db_path))
         from client.panels.chat import ChatPanel
 
         panel = ChatPanel()

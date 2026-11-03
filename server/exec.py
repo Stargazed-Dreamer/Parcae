@@ -28,7 +28,7 @@ from lib.agent_identity import get_caller_id as _get_caller_id
 from lib.schema import BaseSchema
 from server.command_guard import AGENT_BLOCK_MESSAGE, check_command
 
-logger = logging.getLogger("localagent.exec")
+logger = logging.getLogger("parcae.exec")
 router = APIRouter(prefix="/exec", tags=["代码执行"])
 terminal_router = APIRouter(prefix="/terminals", tags=["终端会话"])
 output_router = APIRouter(prefix="/output", tags=["执行输出"])
@@ -139,13 +139,25 @@ def reset_state() -> None:
     _output_buffers.clear()
 
 def _utf8_process_env(cwd: str | None = None) -> dict:
-    """子进程统一使用 UTF-8，降低 Windows 控制台编码影响。"""
+    """子进程统一使用 UTF-8，降低 Windows 控制台编码影响。
+
+    额外注入 `PARCAE_API`：端口可能因 Windows 保留区（WinError 10013）被
+    顺延，脚本里写死 8766 会连错。agent 写的临时脚本统一用
+    `os.environ["PARCAE_API"]`，不用自己拼端口。
+    """
     env = {
         **os.environ,
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
         "PYTHONUNBUFFERED": "1",
     }
+    if not env.get("PARCAE_API"):
+        try:
+            from lib.runtime_endpoint import resolve_base_url
+
+            env["PARCAE_API"] = resolve_base_url(probe_health=False)
+        except Exception:
+            pass  # 拿不到就让调用方自己回退，不阻断执行
     if cwd:
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = cwd if not existing else cwd + os.pathsep + existing
@@ -190,7 +202,7 @@ def _resolve_python_executable(
         if not system_python:
             raise ValueError("系统 PATH 中未找到 Python")
         return Path(system_python).resolve(), "system"
-    return Path(sys.executable).resolve(), "localagent"
+    return Path(sys.executable).resolve(), "parcae"
 
 
 def _resolve_shell(shell: str, cmd: str) -> tuple[list[str], dict]:
@@ -513,8 +525,8 @@ class ExecRequest(BaseSchema):
     长任务用 exec_inspect(tid, timeout=N) 等结果；想纯等待用 wait(N) + exec_inspect(tid, timeout=0)。
     """
     code: str
-    cwd: str = ""  # 工作目录，空=LocalAgent项目根
-    environment: Literal["localagent", "workspace_venv", "system"] = "localagent"
+    cwd: str = ""  # 工作目录，空=Parcae项目根
+    environment: Literal["parcae", "workspace_venv", "system"] = "parcae"
     python_path: str = ""  # 显式解释器路径，优先级最高
     approval_token: str = ""
 
@@ -629,7 +641,7 @@ async def exec_python(req: ExecRequest):
     - wait(seconds): pure sleep (use with exec_inspect(tid, timeout=0) for "sleep then check")
 
     Capabilities:
-    - Defaults to LocalAgent's Python environment.
+    - Defaults to Parcae's Python environment.
     - Set cwd + environment="workspace_venv" to use <cwd>/.venv automatically.
     - Set python_path for an explicit interpreter; the resolved path is returned.
     - Sync or async code both work (asyncio.run applied via -u flag in terminal).
@@ -638,7 +650,7 @@ async def exec_python(req: ExecRequest):
     Common templates:
     - Screenshot + OCR in one step (AVOID capture_screen base64 which overflows context):
         import requests, base64, os, tempfile
-        API='http://127.0.0.1:8766'
+        API=os.environ['PARCAE_API']  # 别写死端口：可能被系统保留区占用而顺延
         cap=requests.post(f'{API}/screen/capture',json={'mode':'window','window_title':'XXX','format':'base64'}).json()
         p=os.path.join(tempfile.gettempdir(),'s.png')
         open(p,'wb').write(base64.b64decode(cap['image']))

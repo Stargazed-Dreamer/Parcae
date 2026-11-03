@@ -30,7 +30,7 @@ from pydantic import Field
 
 from lib.schema import BaseSchema
 
-logger = logging.getLogger("localagent.auto_shutdown")
+logger = logging.getLogger("parcae.auto_shutdown")
 
 router = APIRouter(prefix="/auto_shutdown", tags=["自动关机"])
 
@@ -47,11 +47,11 @@ STATE_DIR = _PROJECT_ROOT / "temp" / "auto_shutdown"
 
 
 def _resolve_api_base() -> str:
-    """从 config.toml [server] 动态拼 API base（模块加载时读一次端口）。"""
+    """解析 API base：运行时声明优先（端口可能因 WinError 10013 顺延），回退 config.toml。"""
     try:
-        from server.config import get_server_config
-        cfg = get_server_config()
-        return f"http://{cfg['host']}:{cfg['port']}"
+        from lib.runtime_endpoint import resolve_base_url
+
+        return resolve_base_url(probe_health=False)
     except Exception:
         return "http://127.0.0.1:8766"
 
@@ -123,12 +123,14 @@ async def _push_inbox(
     title: str,
     description: str = "",
     payload: dict | None = None,
-    api_base: str = API_BASE,
+    api_base: str | None = None,
 ) -> bool:
     """推送到 inbox（POST /inbox），失败返回 False 不抛异常。
 
     T04：sync urllib.request → async httpx.AsyncClient，避免阻塞事件循环。
     """
+    # 端口可能已被顺延 ⇒ 每次推送时解析，不要用模块加载时的快照
+    api_base = api_base or _resolve_api_base()
     try:
         data = {
             "source": source,

@@ -1,12 +1,11 @@
 """chat-panel-v2 Ticket 02 验收测试：防关机 + 启动恢复
 
 覆盖 T02 acceptance（temp/sdd/chat-panel-v2/tickets.md）：
-- [x] client/core/app.py closeEvent 加 runner.interrupt_event.set() + update_session_status(interrupted)
-      + services.stop() + 保存窗口几何
+- [x] client/core/app.py closeEvent 不中断 runtime 会话（T7：关前端不死）+ services.stop() + 保存窗口几何
 - [x] ChatPanel._init_read_store 中 store.init() 后调 reconcile(store)
 - [x] ChatPanel 顶部 banner QFrame 显示"检测到 N 个异常退出的会话，已自动恢复"，可关闭
 - [x] closeEvent 非阻塞（毫秒级完成），不等待 runner
-- [x] 测试：模拟活跃 runner + closeEvent，断言 session.status=interrupted
+- [x] 测试：模拟活跃 worker + closeEvent，断言只断开本地监听、runtime 会话状态不变
 - [x] 测试：模拟崩溃残留（streaming 状态会话）+ 重启 _init_read_store，断言 reconcile
       转为 interrupted + banner 显示 N=1
 - [x] 测试：reconcile 幂等（已 interrupted 跳过）
@@ -14,8 +13,8 @@
 
 测试策略：
 - 模仿 tests/test_chat_panel_t06.py 模式：module-scoped qapp + 测试函数内 import
-- ChatPanel 实例化用 offscreen Qt + monkeypatch DEFAULT_DB_PATH 为临时路径
-- worker 用 MagicMock（不真启动 QThread），但 worker.interrupt() 是真实业务调用断言
+- ChatPanel 实例化用 offscreen Qt + in-process runtime（同一临时 DB）
+- worker 用 MagicMock（不真启动 QThread），断言 worker.stop()/interrupt() 的调用边界
 - closeEvent 用 MainWindow.closeEvent 真实方法（unbound method 调用），services/AppState mock
 - 业务逻辑（中断 runner + 更新 status）不 mock，UI/Qt 操作（services.stop, AppState）可 mock
 
@@ -109,23 +108,40 @@ def _run(coro):
 
 def _open_store(db_path: str):
     """打开一个独立 EventStore（用于验证测试结果）。"""
-    from client.core.agent import EventStore
+    from lib.agent_runtime import EventStore
 
     s = EventStore(db_path=db_path)
     s.init()
     return s
 
 
+_PENDING_RUNTIMES: list = []
+
+
+@pytest.fixture(autouse=True)
+def _stop_test_runtimes():
+    """每个测试结束后停掉该测试启动的 in-process runtime。"""
+    yield
+    while _PENDING_RUNTIMES:
+        cm = _PENDING_RUNTIMES.pop()
+        try:
+            cm.__exit__(None, None, None)
+        except Exception:
+            pass
+
+
 def _make_chat_panel(db_path: str, monkeypatch):
-    """构造一个 ChatPanel 实例（patch DEFAULT_DB_PATH 为临时路径）。
+    """构造 ChatPanel 实例，并起一个指向同一 DB 的 in-process runtime（T7）。
 
-    模仿 test_chat_panel_t06.py 的 ChatPanel() 实例化模式。
-    调用方负责 panel.deleteLater() + qapp.processEvents() 清理。
+    面板的读/写走 runtime HTTP；恢复类断言仍读同一个 SQLite 文件。
     """
-    import client.panels.chat as chat_module
     from client.panels.chat import ChatPanel
+    from tests.client_ui._runtime_harness import runtime_for
 
-    monkeypatch.setattr(chat_module, "DEFAULT_DB_PATH", db_path)
+    cm = runtime_for(db_path)
+    base_url = cm.__enter__()
+    _PENDING_RUNTIMES.append(cm)
+    monkeypatch.setenv("PARCAE_RUNTIME_API", base_url)
     return ChatPanel()
 
 
@@ -148,14 +164,13 @@ def _cleanup_panel(panel, qapp):
 
 
 class TestInterruptActiveSession:
-    """D24: interrupt_active_session 中断活跃 runner + 更新 session.status=interrupted。"""
+    """T7: 关前端只断开本地监听，不中断 runtime 会话（关前端不死）。"""
 
-    def test_updates_session_status_to_interrupted(self, qapp, tmp_path, monkeypatch):
-        """有活跃 worker + streaming 会话 → status 变 interrupted + worker.interrupt 被调。"""
+    def test_detach_does_not_interrupt_runtime_session(self, qapp, tmp_path, monkeypatch):
+        """有活跃 worker → worker.stop() 被调，但 runtime 会话仍是 streaming。"""
         from unittest.mock import MagicMock
 
         db_path = str(tmp_path / "test_t02_interrupt.db")
-        # 先在 DB 中创建 streaming 会话
         s = _open_store(db_path)
         _run(s.create_session(session_id="sess-test-1", mode="dialogue"))
         _run(s.update_session_status("sess-test-1", "streaming"))
@@ -163,8 +178,7 @@ class TestInterruptActiveSession:
 
         panel = _make_chat_panel(db_path, monkeypatch)
         try:
-            # ChatPanel 实例化时 _init_read_store 触发首次 reconcile，
-            # streaming 会话已被恢复为 interrupted。重新设回 streaming 模拟活跃 runner
+            # 启动恢复把残留 streaming 转 interrupted；重新设回 streaming 模拟活跃 run
             s2 = _open_store(db_path)
             _run(s2.update_session_status("sess-test-1", "streaming"))
             s2.close()
@@ -172,38 +186,36 @@ class TestInterruptActiveSession:
             panel._current_session_id = "sess-test-1"
             fake_worker = MagicMock()
             fake_worker.isRunning.return_value = True
+            fake_worker.stop = MagicMock()
             fake_worker.interrupt = MagicMock()
             panel._worker = fake_worker
 
-            panel.interrupt_active_session()
+            panel.detach_active_session()
 
-            # 断言 worker.interrupt 被调用（业务逻辑：中断 runner）
-            fake_worker.interrupt.assert_called_once()
+            fake_worker.stop.assert_called_once()
+            fake_worker.interrupt.assert_not_called()
 
-            # 断言 session.status = interrupted（业务逻辑：更新状态）
             s3 = _open_store(db_path)
             try:
                 sess = _run(s3.get_session("sess-test-1"))
             finally:
                 s3.close()
             assert sess is not None, "session should exist"
-            assert sess.status == "interrupted", (
-                f"status should be interrupted, got {sess.status}"
+            assert sess.status == "streaming", (
+                f"runtime session must keep running after frontend detach, got {sess.status}"
             )
         finally:
             _cleanup_panel(panel, qapp)
 
-    def test_no_worker_still_updates_status(self, qapp, tmp_path, monkeypatch):
-        """无活跃 worker（worker=None）时不抛异常，仍更新 session.status。"""
+    def test_no_worker_detach_no_error(self, qapp, tmp_path, monkeypatch):
+        """无活跃 worker（worker=None）时不抛异常，会话状态不变。"""
         db_path = str(tmp_path / "test_t02_no_worker.db")
         s = _open_store(db_path)
         _run(s.create_session(session_id="sess-test-2", mode="dialogue"))
-        _run(s.update_session_status("sess-test-2", "streaming"))
         s.close()
 
         panel = _make_chat_panel(db_path, monkeypatch)
         try:
-            # 重置为 streaming（首次 reconcile 已转 interrupted）
             s2 = _open_store(db_path)
             _run(s2.update_session_status("sess-test-2", "streaming"))
             s2.close()
@@ -211,7 +223,7 @@ class TestInterruptActiveSession:
             panel._current_session_id = "sess-test-2"
             panel._worker = None
 
-            panel.interrupt_active_session()  # 不应抛异常
+            panel.detach_active_session()  # 不应抛异常
 
             s3 = _open_store(db_path)
             try:
@@ -219,7 +231,7 @@ class TestInterruptActiveSession:
             finally:
                 s3.close()
             assert sess is not None
-            assert sess.status == "interrupted"
+            assert sess.status == "streaming"
         finally:
             _cleanup_panel(panel, qapp)
 
@@ -230,18 +242,17 @@ class TestInterruptActiveSession:
         try:
             panel._current_session_id = None
             panel._worker = None
-            panel.interrupt_active_session()  # 不应抛异常
+            panel.detach_active_session()  # 不应抛异常
         finally:
             _cleanup_panel(panel, qapp)
 
-    def test_worker_not_running_no_interrupt_call(self, qapp, tmp_path, monkeypatch):
-        """worker 存在但未运行（isRunning=False）时不调 interrupt，但仍更新 status。"""
+    def test_worker_not_running_no_stop_call(self, qapp, tmp_path, monkeypatch):
+        """worker 存在但未运行（isRunning=False）时不调 stop，状态也不变。"""
         from unittest.mock import MagicMock
 
         db_path = str(tmp_path / "test_t02_worker_idle.db")
         s = _open_store(db_path)
         _run(s.create_session(session_id="sess-test-3", mode="dialogue"))
-        _run(s.update_session_status("sess-test-3", "streaming"))
         s.close()
 
         panel = _make_chat_panel(db_path, monkeypatch)
@@ -253,21 +264,19 @@ class TestInterruptActiveSession:
             panel._current_session_id = "sess-test-3"
             fake_worker = MagicMock()
             fake_worker.isRunning.return_value = False
-            fake_worker.interrupt = MagicMock()
+            fake_worker.stop = MagicMock()
             panel._worker = fake_worker
 
-            panel.interrupt_active_session()
+            panel.detach_active_session()
 
-            # worker 未运行，interrupt 不应被调
-            fake_worker.interrupt.assert_not_called()
+            fake_worker.stop.assert_not_called()
 
-            # 但 status 仍应更新为 interrupted
             s3 = _open_store(db_path)
             try:
                 sess = _run(s3.get_session("sess-test-3"))
             finally:
                 s3.close()
-            assert sess.status == "interrupted"
+            assert sess.status == "streaming"
         finally:
             _cleanup_panel(panel, qapp)
 
@@ -425,10 +434,10 @@ class TestReconcileAfterInit:
 class TestCloseEventNonBlocking:
     """D24: closeEvent 非阻塞（毫秒级），不等待 runner，不抛异常。"""
 
-    def test_close_event_interrupts_session_and_calls_services_stop(
+    def test_close_event_detaches_session_and_calls_services_stop(
         self, qapp, tmp_path, monkeypatch,
     ):
-        """closeEvent 真实调用：中断 runner + 更新 status + services.stop + 不抛异常。"""
+        """closeEvent 真实调用：只断开本地监听 + services.stop + 不抛异常。"""
         from unittest.mock import MagicMock
 
         from PySide6.QtGui import QCloseEvent
@@ -448,6 +457,7 @@ class TestCloseEventNonBlocking:
         panel._current_session_id = "sess-close-1"
         fake_worker = MagicMock()
         fake_worker.isRunning.return_value = True
+        fake_worker.stop = MagicMock()
         fake_worker.interrupt = MagicMock()
         panel._worker = fake_worker
 
@@ -467,8 +477,9 @@ class TestCloseEventNonBlocking:
             # 不应抛异常
             window.closeEvent(event)
 
-            # 断言 worker.interrupt 被调用（业务逻辑：中断 runner）
-            fake_worker.interrupt.assert_called_once()
+            # T7：关前端只断开本地监听，不向 runtime 发中断
+            fake_worker.stop.assert_called_once()
+            fake_worker.interrupt.assert_not_called()
             # 断言 services.stop 被调用
             window.services.stop.assert_called_once()
             # 断言 AppState 方法被调用（保存窗口几何）
@@ -482,8 +493,8 @@ class TestCloseEventNonBlocking:
             finally:
                 s3.close()
             assert sess is not None
-            assert sess.status == "interrupted", (
-                f"session status should be interrupted after closeEvent, got {sess.status}"
+            assert sess.status == "streaming", (
+                f"session must keep running after closeEvent (T7), got {sess.status}"
             )
         finally:
             _cleanup_panel(panel, qapp)

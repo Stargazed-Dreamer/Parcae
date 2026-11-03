@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 
-logger = logging.getLogger("localagent.screen")
+logger = logging.getLogger("parcae.screen")
 
 
 # ========== 窗口枚举与查找 ==========

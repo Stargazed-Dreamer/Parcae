@@ -31,7 +31,7 @@ AGENT_BLOCK_MESSAGE = (
     "这条命令被用户的安全规则拦截。命令拦截不是为了阻碍 Agent 工作，而是应对模型幻觉或命令执行错误的最后防线。"
     "请不要尝试改写、拆分、编码、写入脚本或使用其他工具绕过。"
     "先向用户说明准备执行的完整命令、执行原因、可能影响和更安全的替代方案。"
-    "如果当前 Agent 平台提供询问用户的工具，请优先使用；否则调用 LocalAgent 的 command_guard_request_approval 弹窗工具。"
+    "如果当前 Agent 平台提供询问用户的工具，请优先使用；否则调用 Parcae 的 command_guard_request_approval 弹窗工具。"
     "先问用户通常没有害处。"
 )
 
@@ -146,7 +146,7 @@ async def check_command(command: str, shell: str, cwd: str, approval_token: str 
     dcg = find_dcg()
     if not dcg:
         if config.get("fail_closed", True):
-            return _blocked(command, shell, cwd, "dcg 未安装或不可执行，安全策略为 fail-closed", "localagent:dcg-unavailable")
+            return _blocked(command, shell, cwd, "dcg 未安装或不可执行，安全策略为 fail-closed", "parcae:dcg-unavailable")
         return GuardDecision(True, unavailable=True, reason="dcg 不可用，按配置 fail-open")
 
     try:
@@ -159,7 +159,7 @@ async def check_command(command: str, shell: str, cwd: str, approval_token: str 
         )
     except (FileNotFoundError, PermissionError, OSError) as exc:
         if config.get("fail_closed", True):
-            return _blocked(command, shell, cwd, f"dcg 启动失败: {exc}", "localagent:dcg-launch-error")
+            return _blocked(command, shell, cwd, f"dcg 启动失败: {exc}", "parcae:dcg-launch-error")
         return GuardDecision(True, unavailable=True, reason=f"dcg 启动失败，按配置 fail-open: {exc}")
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -169,7 +169,7 @@ async def check_command(command: str, shell: str, cwd: str, approval_token: str 
         proc.kill()
         await proc.communicate()
         if config.get("fail_closed", True):
-            return _blocked(command, shell, cwd, "dcg 检查超时，安全策略为 fail-closed", "localagent:dcg-timeout")
+            return _blocked(command, shell, cwd, "dcg 检查超时，安全策略为 fail-closed", "parcae:dcg-timeout")
         return GuardDecision(True, unavailable=True, reason="dcg 检查超时，按配置 fail-open")
 
     output = stdout.decode("utf-8", errors="replace").strip()
@@ -185,7 +185,7 @@ async def check_command(command: str, shell: str, cwd: str, approval_token: str 
         return _blocked(command, shell, cwd, str(reason), str(rule_id))
     if proc.returncode not in (0, None):
         if config.get("fail_closed", True):
-            return _blocked(command, shell, cwd, error or "dcg 检查失败", "localagent:dcg-error")
+            return _blocked(command, shell, cwd, error or "dcg 检查失败", "parcae:dcg-error")
         return GuardDecision(True, unavailable=True, reason=error or "dcg 检查失败，按配置 fail-open")
     return GuardDecision(True)
 

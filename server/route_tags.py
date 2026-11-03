@@ -40,7 +40,7 @@ import re
 
 from starlette.routing import compile_path
 
-logger = logging.getLogger("localagent.route_tags")
+logger = logging.getLogger("parcae.route_tags")
 
 # PUT/DELETE/PATCH 中标记为 safe 的 path 子串（数据增删改但不破坏系统）
 _SAFE_WRITE_PATTERNS: list[str] = [
@@ -251,14 +251,14 @@ def _is_agent_callable(operation_id: str | None) -> bool:
     - operation_id 为 None（路由无 operationId）→ False
     - operation_id 在 DIRECT_TOOLS 中 → True（直连暴露，优先判定）
     - operation_id 在 GATEWAY_EXCLUDE 中 → False（基础设施/GUI 专用/零调用/REST-only form）
-    - 其余 → True（经 localagent_advanced_tool 网关间接访问）
+    - 其余 → True（经 parcae_advanced_tool 网关间接访问）
 
     T09 说明：此函数采用 fail-open 策略（新端点默认暴露给 agent）。
     设计意图：加 MCP 端点的目的就是给 agent 用，新端点自动可调是 feature 不是 bug。
     安全防护靠 classify_safety → approval_level → HTTP 中间件拦截，不靠此标志。
     详见 SECURITY-RISKS.md "route_tags fail-open" 条目。
 
-    注：localagent_list_tools / localagent_advanced_tool 同时出现在 DIRECT_TOOLS 和
+    注：parcae_list_tools / parcae_advanced_tool 同时出现在 DIRECT_TOOLS 和
     GATEWAY_EXCLUDE 中——GATEWAY_EXCLUDE 在此仅表示"不重复进 advanced 网关"（去重），
     它们仍是 DIRECT_TOOLS 直连工具。因此 DIRECT_TOOLS 判定必须优先。
     """

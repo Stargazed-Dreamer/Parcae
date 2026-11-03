@@ -1,17 +1,71 @@
 """应用生命周期：启动初始化 + 关闭清理"""
 
 import logging
+import os
+import threading
 import time
 
-from server.config import validate_config
+from server.config import get_server_config, validate_config
 from server.screen import on_shutdown as screen_on_shutdown
 from server.screen import on_startup as screen_on_startup
 from server.system import on_shutdown as system_on_shutdown
 from server.vl.vision import on_shutdown as vision_on_shutdown
 
-logger = logging.getLogger("localagent.lifecycle")
+logger = logging.getLogger("parcae.lifecycle")
 
 _start_time = None
+
+
+# ========== 关停兜底：分步打点 + 总超时 ==========
+
+_watchdog_lock = threading.Lock()
+_watchdog_started = False
+
+
+def shutdown_cleanup_deadline() -> float:
+    """清理链总兜底秒数（配置项 server.shutdown_cleanup_deadline_secs，下限 5）"""
+    return float(get_server_config()["shutdown_cleanup_deadline_secs"])
+
+
+def start_shutdown_watchdog(source: str, deadline_s: float | None = None) -> None:
+    """启动关停总兜底看门狗（幂等，daemon 线程，超时后强制 os._exit(0)）。
+
+    为什么需要它：清理链的每一步（屏幕/系统/视觉/记忆/Loop/浏览器/httpx 关闭，以及
+    overlay GUI 子进程 terminate）本身都没有超时。任一步阻塞，后面的步骤与
+    ``os._exit(0)`` 都不会执行 ⇒ 进程永久滞留，且日志停在阻塞前的那一行。
+
+    为什么不做「每步线程隔离 + wait_for」：``screen_on_shutdown()`` 会 terminate
+    overlay 子进程、SessionManager 会 join worker，把它们挪到别的线程执行会改变既有
+    语义（曾踩过 multiprocessing.Queue put 后 terminate 死锁）。改为「分步打点 +
+    总兜底」：``mark_shutdown_step()`` 让日志能指出卡在哪一步，看门狗保证进程有硬上限。
+
+    Args:
+        source: 触发来源，仅用于日志（如 "lifespan" / "POST /shutdown"）。
+        deadline_s: 覆盖配置里的兜底秒数（None = 读配置）。
+    """
+    global _watchdog_started
+    with _watchdog_lock:
+        if _watchdog_started:
+            return
+        _watchdog_started = True
+
+    deadline = shutdown_cleanup_deadline() if deadline_s is None else float(deadline_s)
+
+    def _watch() -> None:
+        time.sleep(deadline)
+        logger.error(
+            f"关闭清理超过 {deadline:.0f}s 未完成（来源={source}），强制退出。"
+            "请查上面最后一条『关闭步骤: xxx』定位阻塞步骤"
+        )
+        os._exit(0)
+
+    threading.Thread(target=_watch, name="shutdown-watchdog", daemon=True).start()
+    logger.info(f"关闭看门狗已启动：最多 {deadline:.0f}s 后强制退出（来源={source}）")
+
+
+def mark_shutdown_step(step: str) -> None:
+    """打点清理链当前步骤——若某步阻塞，这条就是本次关停日志里的最后一行"""
+    logger.info(f"关闭步骤: {step}")
 
 
 def get_start_time() -> float | None:
@@ -73,6 +127,17 @@ def register_lifecycle(app):
                 logger.warning(f"配置验证: {w}")
         else:
             logger.info("配置验证通过")
+
+        # 可选组件注册表刷新：workspace/* 的外部代码已在 import 期由
+        # lib.component_loader 安全加载（语法预检 + 子进程试 import + 异常兜底）。
+        # 这里重置 manifest 缓存、把注册表补齐到磁盘现状，并把降级清单打到启动日志。
+        # 失败只降级，绝不阻断启动 —— 一个坏组件不该决定后端的生死。
+        try:
+            from server.component_bootstrap import refresh_component_registries
+
+            refresh_component_registries()
+        except Exception as e:
+            logger.warning(f"组件注册表刷新失败（沿用 import 期结果）: {e}")
 
         screen_on_startup()
 
@@ -199,12 +264,28 @@ def register_lifecycle(app):
         except Exception as e:
             logger.warning(f"terminal TTL 清理任务启动失败: {e}")
 
-        logger.info("LocalAgent API 启动完成")
+        logger.info("Parcae API 启动完成")
+        # 运行时端口声明：binding → ready。下游（客户端/外部前端）据此判断
+        # 「声明里的端口确实已经能服务」，而不是拿到一个刚 bind 还没 listen 的端口。
+        try:
+            from lib.runtime_endpoint import STATUS_READY, mark_declaration_status
+
+            mark_declaration_status(STATUS_READY)
+        except Exception as e:  # 声明失败不影响服务本身
+            logger.warning(f"运行时端口声明更新失败（不影响服务）: {e}")
 
     @app.on_event("shutdown")
     async def _on_shutdown():
-        """应用关闭：清理屏幕、系统、LLM 池统计、记忆、GUI、Loop、浏览器 session。"""
+        """应用关闭：清理屏幕、系统、LLM 池统计、记忆、GUI、Loop、浏览器 session。
+
+        每一步用 ``mark_shutdown_step()`` 打点：若某步阻塞，文件日志里最后一条「关闭步骤: xxx」
+        就是阻塞点。``start_shutdown_watchdog()`` 给出总时长上限，避免永久滞留。
+        """
+        start_shutdown_watchdog(source="lifespan")
+        _t0 = time.perf_counter()
+        logger.info("关闭清理开始")
         # 停止 keys.json 热重载守护（先停，避免关闭过程中又被 mtime 变化触发重建）
+        mark_shutdown_step("取消 keys.json 热重载守护")
         try:
             _kw = getattr(app.state, "keys_watch_task", None)
             if _kw is not None:
@@ -213,18 +294,21 @@ def register_lifecycle(app):
             pass
         # T18：先撤销 SessionManager 授权 + 停止 worker，再清理 GUI 子进程
         # （避免 worker 在 GUI 已关闭后仍 publish 事件到无人订阅的总线）
+        mark_shutdown_step("停止 SessionManager（撤销授权 + 停 worker）")
         try:
             from server.screen.session import get_session_manager
             get_session_manager().shutdown()
         except Exception:
             pass
         # T5-1：停止模型存活管理器监控循环（design §11 步骤 5）
+        mark_shutdown_step("停止 ModelLifecycleManager")
         try:
             from server.model_manager import get_model_manager
             await get_model_manager().stop()
         except Exception as e:
             logger.warning(f"ModelLifecycleManager 停止失败: {e}")
         # 停止常驻采样中枢（关 NVML 会话、取消 ticker）
+        mark_shutdown_step("停止资源采样中枢")
         try:
             from server.resource_probe import get_resource_hub, reset_resource_hub
 
@@ -232,18 +316,23 @@ def register_lifecycle(app):
             reset_resource_hub()
         except Exception as e:
             logger.warning(f"资源采样中枢停止失败: {e}")
+        mark_shutdown_step("关闭 Screen 模块（含 overlay GUI 子进程）")
         screen_on_shutdown()
+        mark_shutdown_step("关闭 System 模块")
         system_on_shutdown()
         # 批量保存模式下 shutdown 时强制落盘
+        mark_shutdown_step("落盘 LLM 池统计")
         try:
             from server.llm_pool import get_pool
             get_pool().flush_stats()
         except Exception:
             pass
+        mark_shutdown_step("关闭视觉(VL)模块")
         try:
             vision_on_shutdown()
         except Exception:
             pass
+        mark_shutdown_step("关闭记忆系统")
         try:
             from server.memory.manager import reset_memory_manager
             reset_memory_manager()
@@ -251,6 +340,7 @@ def register_lifecycle(app):
             pass
         # T18：overlay_client.shutdown() 已在 screen_on_shutdown() 内调用，此处不再重复
         # （重复调用会导致 multiprocessing.Queue put 后再 terminate，子进程可能死锁）
+        mark_shutdown_step("停止 Loop 调度器")
         try:
             from server.activity_tracker.loop_manager import get_manager as _get_loop_manager
             from server.activity_tracker.loop_manager import reset_manager as _reset_loop_manager
@@ -259,18 +349,28 @@ def register_lifecycle(app):
             _reset_loop_manager()
         except Exception:
             pass
+        mark_shutdown_step("复位收件箱存储")
         try:
             from server.inbox import reset_store as _reset_inbox_store
             _reset_inbox_store()
         except Exception:
             pass
         # 清理持久浏览器 session（评估文档 P0）：关闭长连接 Playwright
+        mark_shutdown_step("关闭浏览器 session")
         try:
             from server.browser.session.manager import reset_session_manager
             await reset_session_manager()
         except Exception as e:
             logger.warning(f"清理浏览器 session 失败: {e}")
+        # 停止 supervisor 自己启动的浏览器（adopt 的旧实例不动）
+        mark_shutdown_step("停止浏览器 supervisor")
+        try:
+            from server.browser.supervisor import reset_browser_supervisor
+            await reset_browser_supervisor()
+        except Exception as e:
+            logger.warning(f"停止浏览器 supervisor 失败: {e}")
         # Ticket 06: VL 配额批量写盘模式下 shutdown 时强制 flush，避免 dirty 状态丢失
+        mark_shutdown_step("落盘 VL 配额")
         try:
             from server.activity_tracker.vl_quota import vl_quota
             vl_quota.flush()
@@ -278,10 +378,21 @@ def register_lifecycle(app):
             logger.warning(f"VL 配额 flush 失败: {e}")
         # T07：关闭模块级 httpx client 单例（连接池复用清理）
         # close_async_client 是 async（aclose），close_sync_client 是 sync（close）
+        mark_shutdown_step("关闭 httpx 连接池")
         try:
             from lib.async_http import close_async_client, close_sync_client
             await close_async_client()
             close_sync_client()
         except Exception as e:
             logger.warning(f"httpx client 关闭失败: {e}")
-        logger.info("LocalAgent API 已关闭")
+        logger.info(f"关闭清理完成，耗时 {int((time.perf_counter() - _t0) * 1000)}ms")
+        logger.info("Parcae API 已关闭")
+        # 声明置 stopped（保留文件供事后排查）并删掉 pid 文件（start.bat 靠它杀旧实例，
+        # 残留 pid 会去杀一个可能已被系统复用的无关进程）。
+        try:
+            from lib.runtime_endpoint import STATUS_STOPPED, clear_pid_file, mark_declaration_status
+
+            mark_declaration_status(STATUS_STOPPED)
+            clear_pid_file()
+        except Exception as e:
+            logger.warning(f"运行时端口声明收尾失败: {e}")

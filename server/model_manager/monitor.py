@@ -30,7 +30,7 @@ from server.model_manager.types import PressureState
 if TYPE_CHECKING:
     from server.resource_probe.hub import SampleHub
 
-logger = logging.getLogger("localagent.model_manager.monitor")
+logger = logging.getLogger("parcae.model_manager.monitor")
 
 # 连续探测失败达到该次数后进入 PROBE_DEGRADED（保持最后保护姿态）
 _PROBE_FAIL_THRESHOLD = 3

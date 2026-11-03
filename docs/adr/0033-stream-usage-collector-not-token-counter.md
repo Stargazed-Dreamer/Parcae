@@ -49,7 +49,7 @@ accepted (2026-09-02)。是 [ADR-0031](0031-inbound-gateway-own-sqlite-stats.md)
 
 修复：`_stream_openai_sse` 改为不在 `finish_reason` break、记录后继续读到 `[DONE]`/流自然结束，循环后统一 flush tool_calls → usage → done（镜像一直正确的 `_stream_anthropic_sse` 收尾）；usage 与 finish_reason 同 chunk 时走快速路径立即 break。真实端点端到端实测（重启后端）：真流式 `usage_source=provider total=395`，同流 `reasoning_chars=529`（首思维 token 1.31s）——**逐字直播思维与精确 provider token 同时成立**。
 
-**配套（补齐当初缓冲方案想解决的"客户端要准确 token"这一真实诉求）**：入站网关真流式路径现在把 provider 的 usage 尾 chunk 原样转发给外部 OpenAI 兼容客户端（`_sse_usage_chunk`），并透传池返回的真实 `finish_reason`（此前硬写成 `"stop"`，无视 `tool_calls`/`length`）——让 provider 本已发出的数据抵达客户端，而非绕道非流式重放。池未发 usage 事件时不伪造尾 chunk、`provider_missing`（全 0）如实转发 0。LocalAgent 自带对话面板走内部 `/llm/pool/stream`（typed usage 事件），不经入站网关，不受影响。
+**配套（补齐当初缓冲方案想解决的"客户端要准确 token"这一真实诉求）**：入站网关真流式路径现在把 provider 的 usage 尾 chunk 原样转发给外部 OpenAI 兼容客户端（`_sse_usage_chunk`），并透传池返回的真实 `finish_reason`（此前硬写成 `"stop"`，无视 `tool_calls`/`length`）——让 provider 本已发出的数据抵达客户端，而非绕道非流式重放。池未发 usage 事件时不伪造尾 chunk、`provider_missing`（全 0）如实转发 0。Parcae 自带对话面板走内部 `/llm/pool/stream`（typed usage 事件），不经入站网关，不受影响。
 
 影响面：修正所有"usage 在尾部独立 chunk"型 provider 的流式记账（远不止该代理）。回归测试见 `test_pool_stream_usage_collector.py`（`..._in_trailing_empty_choices_chunk` / `..._finish_without_any_usage_marks_missing`）与 `test_inbound_gateway.py::TestChatStream`（网关转发 usage 尾 chunk / 透传真实 finish_reason / provider_missing 转发 0 / 无 usage 不伪造）。
 

@@ -1,6 +1,6 @@
 # SECURITY-RISKS.md
 
-> LocalAgent 项目已知安全风险与查证结论。
+> Parcae 项目已知安全风险与查证结论。
 > 本文件由 `temp/planning_archive/sdd/chat-engine-safety-fixes/` SDD 流程产出（该目录随仓库跟踪），对应 spec D18/D19/D25 决策。
 >
 > 风险等级：
@@ -15,7 +15,7 @@
 
 ### 描述
 
-LocalAgent 后端 FastAPI 监听 `127.0.0.1:8766`，**无任何认证**。任何能访问本机的进程都可调用全部 API（含 exec_python / exec_cmd / 文件读写 / 屏幕操控 / 关机等高危操作）。
+Parcae 后端 FastAPI 监听 `127.0.0.1:8766`，**无任何认证**。任何能访问本机的进程都可调用全部 API（含 exec_python / exec_cmd / 文件读写 / 屏幕操控 / 关机等高危操作）。
 
 ### 利用条件
 
@@ -117,9 +117,9 @@ v6-lite chat 引擎的 EventStore（SQLite）持久化所有对话消息，包�
 - `fastapi-mcp` 用 `httpx.ASGITransport` 把 MCP 工具调用转为对 FastAPI app 的内部 HTTP 请求
 - `server/core/mcp_gateway.py:51-321` 的 `_patched_execute_api_tool` 包装层在调原始 fastapi-mcp 之前先查 `_operation_safety_map[effective_op]`
 - `approval_required` 工具走三层递进审批（静态规则 → LLM → 人审）+ token 验证
-- `localagent_advanced_tool` 网关：patch 检查 `arguments.tool`（目标 op）的 safety，避免"一次网关审批解锁所有端点"提权
+- `parcae_advanced_tool` 网关：patch 检查 `arguments.tool`（目标 op）的 safety，避免"一次网关审批解锁所有端点"提权
 - handler 内 `command_guard.check_command()` 在 MCP 路径上也生效（与调用来源无关）
-- 不存在 MCP-only 工具：所有 44 个 DIRECT_TOOLS 都有 REST 后端
+- 不存在 MCP-only 工具：所有 `DIRECT_TOOLS`（白名单常量见 `server/mcp_whitelist.py`）都有 REST 后端
 
 ### 发现的非安全缺陷
 
@@ -406,7 +406,7 @@ clone 完整 git 历史可获取历史密钥。
 
 ### 影响
 
-agent 通过 `localagent_advanced_tool` 网关可调这些端点，传 `<user_home>\.ssh\id_rsa` 等敏感路径。虽然 `Image.open` 限制只能读图片格式，但攻击者可通过截图/PDF 间接泄露敏感信息。`docviewer_read`/`mindforge_convert` 可能接受更多文档格式，风险更高。
+agent 通过 `parcae_advanced_tool` 网关可调这些端点，传 `<user_home>\.ssh\id_rsa` 等敏感路径。虽然 `Image.open` 限制只能读图片格式，但攻击者可通过截图/PDF 间接泄露敏感信息。`docviewer_read`/`mindforge_convert` 可能接受更多文档格式，风险更高。
 
 ### 缓解措施
 

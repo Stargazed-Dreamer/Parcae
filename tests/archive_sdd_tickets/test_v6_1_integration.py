@@ -16,8 +16,8 @@
 import asyncio
 from pathlib import Path
 
-from client.core.agent.builtin_tool_executor import BuiltinToolExecutor
-from client.core.agent.types import (
+from lib.agent_runtime.builtin_tool_executor import BuiltinToolExecutor
+from lib.agent_runtime.types import (
     ToolCall,
     ToolResult,
     ToolResultVariant,
@@ -37,7 +37,7 @@ class TestAgentGuideURLFixed:
 
     def test_runner_uses_guide_endpoint(self, monkeypatch):
         """_call_agent_guide_http 实际请求 {base}/guide 且携带 task 参数。"""
-        import client.core.agent.runner as runner_mod
+        import lib.agent_runtime.runner as runner_mod
 
         captured = {}
 
@@ -68,7 +68,7 @@ class TestAgentGuideURLFixed:
         """请求失败（如 T01 修复前的 404）→ 返回 None 走降级，不抛异常。"""
         import requests as _requests
 
-        import client.core.agent.runner as runner_mod
+        import lib.agent_runtime.runner as runner_mod
 
         def _fake_get(url, params=None, timeout=None, headers=None):
             raise _requests.ConnectionError("connection refused")
@@ -148,40 +148,28 @@ class TestToolResultVariantsAndBuiltin:
         assert legacy.variant == ToolResultVariant.ERROR
         assert legacy.is_error is True
 
-    def test_builtin_file_read_executes_locally(self, tmp_path):
+    def test_builtin_file_read_executes_locally(self):
         """BuiltinToolExecutor 调用 file_read 不经 HTTP，返回带行号内容。
 
-        file_read 路径安全 4 重校验限制在项目根目录内（spec D8.1），
-        所以测试文件必须写到项目内 temp/ 下，不能用 pytest tmp_path（在用户 temp 目录）。
+        file_read 路径安全 4 重校验限制在项目根目录内（spec D8.1），不能用 pytest
+        tmp_path（在用户 temp 目录，会被安全校验拦下）。这里直接读测试文件自身——
+        项目内、稳定存在，无需新建任何文件（旧实现往项目 temp/tests/ 写样例文件再删）。
         """
-        # 用项目内 temp/tests/ 目录（被 .gitignore 的 temp/* 兜住，安全）
-        project_root = Path(__file__).resolve().parents[2]
-        test_dir = project_root / "temp" / "tests"
-        test_dir.mkdir(parents=True, exist_ok=True)
-        test_file = test_dir / "_v6_1_sample.txt"
-        try:
-            test_file.write_text("hello\nworld\n", encoding="utf-8")
+        test_file = Path(__file__).resolve()
+        executor = BuiltinToolExecutor(base_url="http://127.0.0.1:8766")
+        call = ToolCall(
+            id="call-1",
+            name="file_read",
+            args={"file_path": str(test_file)},
+            args_raw='{"file_path": "' + str(test_file).replace("\\", "\\\\") + '"}',
+        )
+        result = asyncio.run(executor.execute(call))
 
-            executor = BuiltinToolExecutor(base_url="http://127.0.0.1:8766")
-            call = ToolCall(
-                id="call-1",
-                name="file_read",
-                args={"file_path": str(test_file)},
-                args_raw='{"file_path": "' + str(test_file).replace("\\", "\\\\") + '"}',
-            )
-            result = asyncio.run(executor.execute(call))
-
-            assert result.variant == ToolResultVariant.SUCCESS
-            assert result.is_error is False
-            # file_read 返回带行号内容（{n}→{content}）
-            assert "hello" in result.content
-            assert "world" in result.content
-        finally:
-            try:
-                test_file.unlink(missing_ok=True)
-                test_dir.rmdir()   # 只删自己建的空目录；并发会话还在用则非空，忽略即可
-            except OSError:
-                pass
+        assert result.variant == ToolResultVariant.SUCCESS
+        assert result.is_error is False
+        # file_read 返回带行号内容（{n}→{content}）
+        assert "→" in result.content
+        assert "test_builtin_file_read_executes_locally" in result.content
 
     def test_builtin_unknown_tool_returns_error_not_found(self):
         """调用不存在的内置工具 → variant=ERROR, error_type=not_found（非抛异常）。"""

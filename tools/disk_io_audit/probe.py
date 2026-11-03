@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""LocalAgent 磁盘 I/O 审计探针。
+"""Parcae 磁盘 I/O 审计探针。
 
 用途
 ----
@@ -717,7 +717,7 @@ def build_report(path: str) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="LocalAgent 前后端磁盘 I/O 审计探针",
+        description="Parcae 前后端磁盘 I/O 审计探针",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--out", default="temp/disk_io_audit/probe.jsonl", help="JSONL 输出路径")

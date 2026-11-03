@@ -388,6 +388,10 @@ async def browser_snapshot(req: BrowserSnapshotRequest):
                 sess.last_snapshot_at = _time.time()
                 sess.last_snapshot_url = page.url
                 sess.last_snapshot_dom_hash = dom_hash
+                # 2026-11-01：记下页级版本号，供 action 判定"快照后被别的会话改过"
+                from .page_guard import get_page_guard
+
+                sess.last_snapshot_page_gen = get_page_guard().generation(page)
             elapsed = int((_time.perf_counter() - start) * 1000)
             return BrowserSnapshotResponse(
                 success=True, nodes=nodes, truncated=truncated,
@@ -402,6 +406,18 @@ async def browser_snapshot(req: BrowserSnapshotRequest):
             )
 
     # 无 session：走 exec_python 子进程模型（冷启动）
+    # 2026-11-01（G4）：先在后端消歧（多 tab 且没指定目标 ⇒ TAB_REQUIRED + 候选清单）
+    from .target_resolver import cold_guard
+
+    _cold = await cold_guard(req.tab_id, req.url_pattern, start)
+    if isinstance(_cold, str):
+        # 后端替你选定了唯一可信 tab（其余是外来者/无主页），走精确匹配
+        req.tab_id = _cold
+    elif _cold is not None:
+        return BrowserSnapshotResponse(
+            success=False, nodes=[], truncated=False,
+            elapsed_ms=_cold.elapsed_ms, error=_cold,
+        )
     # P0-1 修复：从本模块导入 ARIA JS，在子进程内通过 page.evaluate 执行
     # 修复问题②：无会话模式支持 tab_id 精确消歧。先把 CDP target id 解析为 URL，
     # 再作为精确匹配传给子进程 _find_page(tab_id=url)，避免多同域 tab 时

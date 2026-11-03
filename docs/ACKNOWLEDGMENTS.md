@@ -1,6 +1,6 @@
 # 致谢与第三方组件声明
 
-本文件是 LocalAgent 项目引用的第三方 skill、工具与设计思路的完整清单。项目站在 AI 编程社区肩膀上，所有第三方组件保留原作者著作权，按各自 License 使用。
+本文件是 Parcae 项目引用的第三方 skill、工具与设计思路的完整清单。项目站在 AI 编程社区肩膀上，所有第三方组件保留原作者著作权，按各自 License 使用。
 
 > 精简版致谢见 [README_public.md](../README_public.md) 的"致谢"段。本文件是完整清单与 License 声明。
 
@@ -19,7 +19,7 @@
 | 上游 commit | 391a270（同步到 2026-07-12） |
 | 改编程度 | 改造接入（元数据 / 路由 / issue tracker 本地化，保留原版核心工作流和渐进披露结构） |
 
-**项目内对应**（14 个 skill）：
+**项目内对应**（15 个 skill）：
 
 | # | 项目内路径 | 原版桶位 |
 |---|-----------|---------|
@@ -37,6 +37,7 @@
 | 12 | `.agents/skills/dev/grilling/` | productivity/grilling（按用途归 dev 桶） |
 | 13 | `.agents/skills/dev/grill-with-docs/` | engineering/grill-with-docs |
 | 14 | `.agents/skills/daily/teach/` | productivity/teach |
+| 15 | `.agents/skills/dev/handoff/` | productivity/handoff |
 
 **改造原则**：
 

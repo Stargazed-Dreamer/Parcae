@@ -9,7 +9,8 @@
 | 主域 | 网站名 | 文件 | 相关 skill | 触发关键词 | 登录态 |
 |------|--------|------|-----------|-----------|--------|
 | `xiaoheihe.cn` | 小黑盒 | [sites/xiaoheihe.md](file:///<project_root>/.agents/skills/browser_lessons/sites/xiaoheihe.md) | web_archive、arknights_gacha（导入） | 小黑盒、xiaoheihe、社区帖子、图文帖、文章帖 | 匿名可读，写操作需登录 |
-| `127.0.0.1` | LocalAgent 本地监控面板 | [sites/127-0-0-1.md](file:///<project_root>/.agents/skills/browser_lessons/sites/127-0-0-1.md) | browser_lessons、html-dev-debug | localhost、LocalAgent监控面板、终端卡片 | 本机后端运行时可访问 |
+| `xiaohongshu.com` | 小红书 | [sites/xiaohongshu-com.md](../sites/xiaohongshu-com.md) | web_archive（extract_xiaohongshu.py） | 小红书、xiaohongshu、xhs、笔记、rednote、笔记存档 | 游客态可读正文+图片组+~10 条评论+评论图，**全量评论需登录** |
+| `127.0.0.1` | Parcae 本地监控面板 | [sites/127-0-0-1.md](file:///<project_root>/.agents/skills/browser_lessons/sites/127-0-0-1.md) | browser_lessons、html-dev-debug | localhost、Parcae监控面板、终端卡片 | 本机后端运行时可访问 |
 | `kurogames.com` | 库洛云游戏 | [sites/kurogames.md](file:///<project_root>/.agents/skills/browser_lessons/sites/kurogames.md) | wuwa_gacha | 鸣潮、云鸣潮、唤取记录 | 需登录库洛通行证 |
 | `hypergryph.com` | 鹰角通行证与游戏记录页 | [sites/hypergryph.md](file:///<project_root>/.agents/skills/browser_lessons/sites/hypergryph.md) | arknights_gacha、endfield_gacha | 明日方舟、终末地、鹰角、寻访记录 | 需登录鹰角通行证 |
 | `feishu.cn` | 飞书云文档 | [sites/feishu.cn.md](../sites/feishu.cn.md) | web_archive（extract_feishu.py） | 飞书、飞书文档、云文档、wiki、docx | 分享链接游客态可读 |

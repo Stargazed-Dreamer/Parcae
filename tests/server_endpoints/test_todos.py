@@ -104,7 +104,7 @@ class TestGetDue:
     def test_past_next_due_is_due(self, store):
         created = store.create_todo({"title": "过期任务", "frequency": "weekly"})
         store.conn.execute(
-            "UPDATE todos SET last_done_at = ?, next_due_at = ? WHERE id = ?",
+            "UPDATE tasks SET last_done_at = ?, next_due_at = ? WHERE id = ?",
             ("2026-06-01", "2026-06-08", created["id"]),
         )
         store.conn.commit()
@@ -115,7 +115,7 @@ class TestGetDue:
         created = store.create_todo({"title": "未到期", "frequency": "weekly"})
         future = (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%d")
         store.conn.execute(
-            "UPDATE todos SET last_done_at = ?, next_due_at = ? WHERE id = ?",
+            "UPDATE tasks SET last_done_at = ?, next_due_at = ? WHERE id = ?",
             (datetime.now().strftime("%Y-%m-%d"), future, created["id"]),
         )
         store.conn.commit()

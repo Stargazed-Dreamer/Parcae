@@ -180,7 +180,7 @@ class TestToolCallBlockExpandedThreeParts:
                 "attach 前不应有 '原结果' 标题"
             )
             # attach
-            from client.core.agent import Message
+            from lib.agent_runtime import Message
 
             result = Message(
                 role="tool",
@@ -215,8 +215,8 @@ class TestToolCallBlockFormatSection:
 
     def _make_block_with_result(self, qapp, result_content):
         """构造 block 并 attach tool_result。"""
-        from client.core.agent import Message
         from client.panels.chat import _ToolCallBlock
+        from lib.agent_runtime import Message
 
         tc = {"id": "tc-1", "function": {"name": "exec_python", "arguments": "{}"}}
         block = _ToolCallBlock(tool_call_dict=tc, status="running")
@@ -442,8 +442,8 @@ class TestToolCallBlockInteraction:
         """attach_tool_result 后展开内容含原结果区。"""
         from PySide6.QtWidgets import QLabel
 
-        from client.core.agent import Message
         from client.panels.chat import _ToolCallBlock
+        from lib.agent_runtime import Message
 
         tc = {"id": "tc-1", "function": {"name": "exec_python", "arguments": "{}"}}
         block = _ToolCallBlock(tool_call_dict=tc, status="running")
@@ -516,8 +516,8 @@ class TestStickyInterfaceConsistency:
             qapp.processEvents()
 
     def test_system_block_is_collapsible(self, qapp):
-        from client.core.agent import Message
         from client.panels.chat import _SystemBlock
+        from lib.agent_runtime import Message
 
         msg = Message(role="system_reminder", content="reminder")
         block = _SystemBlock(msg)
@@ -547,8 +547,8 @@ class TestStickyInterfaceConsistency:
 
     def test_user_bubble_not_collapsible(self, qapp):
         """D42：不可折叠块（user 消息）不触发 sticky 标题。"""
-        from client.core.agent import Message
         from client.panels.chat import _UserBubble
+        from lib.agent_runtime import Message
 
         msg = Message(role="user", content="hi")
         block = _UserBubble(msg)

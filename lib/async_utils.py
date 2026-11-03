@@ -14,7 +14,7 @@ import logging
 from collections.abc import Coroutine
 from typing import Any
 
-logger = logging.getLogger("localagent.async_utils")
+logger = logging.getLogger("parcae.async_utils")
 
 # 全局强引用集合：防止 GC 回收未完成的 task
 _background_tasks: set[asyncio.Task[Any]] = set()

@@ -18,8 +18,10 @@
 """
 import concurrent.futures
 import os
+import re
 import tempfile
 import time
+import uuid
 
 import pytest
 
@@ -31,54 +33,154 @@ BASE_URL = "http://127.0.0.1:8766"
 # ========== Helpers ==========
 
 
-def create_session(sess, url=None, url_pattern=None):
-    """创建浏览器 session，返回 session_id。"""
+NAV_RATE_LIMITED = "NAV_RATE_LIMITED"
+_NAV_RETRY_AFTER_RE = re.compile(r"retry_after_secs\s*=\s*([\d.]+)")
+
+
+def _nav_retry_after_secs(resp, body=None):
+    """从一次被节流拒绝的响应里取「还需等待多少秒」，取不到按窗口上限 30s。
+
+    ⛔ 后端 nav_guard 是**硬拒绝**（不排队、不替调用方 sleep）——这是对的：后端排队
+    会让所有调用无谓变慢。但**调用方**（脚本 / 测试 / agent）撞上 NAV_RATE_LIMITED 时
+    **应当按 retry_after 等一下再重试**，而不是直接判失败：连跑套件后穿插单跑、或
+    改测试需要连续单跑确认时撞节流是必然的，等 30s 就该过，不该算用例失败。
+    （后端口径见 `docs/browser-anti-detection.md` §3.1；脚本侧同款实现见
+    `workspace/homework/tools/hw_moodle_scan.py` 的 `nav_goto()`。）
+    """
+    ra = resp.headers.get("Retry-After")
+    if ra:
+        try:
+            return max(0.0, float(ra))
+        except ValueError:
+            pass
+    if isinstance(body, dict) and body.get("nav_retry_after_secs"):
+        try:
+            return max(0.0, float(body["nav_retry_after_secs"]))
+        except (TypeError, ValueError):
+            pass
+    m = _NAV_RETRY_AFTER_RE.search(resp.text or "")
+    if m:
+        return max(0.0, float(m.group(1)))
+    return 30.0
+
+
+def _is_nav_rate_limited(resp, body=None):
+    """响应是否是被同域导航节流拒绝的（两种形态：HTTP 429 / 200+success=false）。"""
+    if resp.status_code == 429:
+        return True
+    if isinstance(body, dict):
+        if body.get("nav_retry_after_secs"):
+            return True
+        if (body.get("error") or {}).get("error_code") == NAV_RATE_LIMITED:
+            return True
+    return NAV_RATE_LIMITED in (resp.text or "")
+
+
+def create_session(sess, url=None, url_pattern=None, nav_retries=2):
+    """创建浏览器 session，返回 session_id。
+
+    撞同域节流（HTTP 429）时按 `Retry-After` **自动等待后重试**（默认再试 2 次），
+    见 `_nav_retry_after_secs()` 的说明。`nav_retries=0` 可退回「撞了就失败」。
+    """
     body = {}
     if url:
         body["url"] = url
     if url_pattern:
         body["url_pattern"] = url_pattern
-    r = sess.post(f"{BASE_URL}/browser/sessions", json=body, timeout=30)
-    assert r.status_code == 200, f"create session failed: {r.status_code} {r.text}"
-    data = r.json()
-    assert data["success"], f"create session not success: {data}"
-    return data["session_id"]
+    for attempt in range(nav_retries + 1):
+        r = sess.post(f"{BASE_URL}/browser/sessions", json=body, timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            assert data["success"], f"create session not success: {data}"
+            return data["session_id"]
+        if _is_nav_rate_limited(r) and attempt < nav_retries:
+            w = _nav_retry_after_secs(r) + 1.0
+            print(f"[nav-guard] create_session 撞同域节流，等 {w:.0f}s 后重试"
+                  f"（{attempt + 1}/{nav_retries}）…")
+            time.sleep(w)
+            continue
+        raise AssertionError(f"create session failed: {r.status_code} {r.text}")
+    raise AssertionError("create session failed: 重试耗尽")
 
 
 def close_session(sess, session_id):
     """关闭浏览器 session（容忍失败）。
 
-    close_page=True（默认）：同时关闭浏览器 tab，避免测试套件累积上百个 tab。
-    历史：曾因 close_page=True 触发 Chrome CDP "Failed to open a new tab" 而改为 False，
-    但经 2026-08-05 验证该异常在当前 Playwright/Chrome 版本已不复现，恢复 True 根治 tab 累积。
+    ⛔ 2026-11-02：这台浏览器可能被多个 agent / 多个测试进程共用。
+    同一个 page 上可能还挂着别人的 session（`url_pattern` 接管、`force=true`、
+    或另一个 pytest 进程），此时 `close_page=True` 会把别人的页一起关掉，
+    对方下一次调用直接 "session 不存在或已失效"。
+    所以先读 `/browser/sessions` 的 `page_ref_count`：共享时只解绑不关页，
+    独占时才关页（保持"跑完不留上百个 tab"的原意）。
+
+    历史：曾因 close_page=True 触发 Chrome CDP "Failed to open a new tab" 改为 False，
+    2026-08-05 验证该异常已不复现，恢复 True。
     """
+    close_page = True
+    try:
+        r = sess.get(f"{BASE_URL}/browser/sessions", timeout=5)
+        if r.status_code == 200:
+            for s in r.json().get("sessions", []):
+                if s.get("session_id") != session_id:
+                    continue
+                # page_ref_count 是 2026-11-01 新增字段；老后端没有 → 按独占处理
+                if int(s.get("page_ref_count") or 1) > 1:
+                    close_page = False
+                break
+    except Exception:  # noqa: BLE001 - 查询失败不影响关闭本身
+        pass
     try:
         sess.post(
             f"{BASE_URL}/browser/sessions/close",
-            json={"session_id": session_id, "close_page": True},
+            json={"session_id": session_id, "close_page": close_page},
             timeout=10,
         )
     except Exception:
         pass
 
 
-def navigate_to(sess, session_id, url, timeout=15.0):
-    """导航到指定 URL。"""
-    r = sess.post(
-        f"{BASE_URL}/browser/navigate",
-        json={
-            "session_id": session_id,
-            "action": "goto",
-            "url": url,
-            "wait_until": "domcontentloaded",
-            "timeout": timeout,
-        },
-        timeout=30,
-    )
-    assert r.status_code == 200, f"navigate failed: {r.status_code} {r.text}"
-    data = r.json()
-    assert data["success"], f"navigate not success: {data}"
-    return data
+def uniq_url(base_url: str, path: str) -> str:
+    """给 fixture URL 加本次调用唯一的 query，返回完整 URL。
+
+    ⛔ 只要用例会「按 URL 找 tab / 关 tab」（`/browser/close`、`url_pattern`），
+    就必须用它。裸 pattern 如 `"dialog.html"` 会命中同一台浏览器上别人的同路径
+    tab（另一个 pytest 进程 / 用户自己开的），然后把它关掉或接管。
+    加 `?e2e=<8位hex>` 后仍然验证「模糊匹配」，但只可能命中本用例自己建的 tab。
+    """
+    return f"{base_url}/{path}?e2e={uuid.uuid4().hex[:8]}"
+
+
+def navigate_to(sess, session_id, url, timeout=15.0, nav_retries=2):
+    """导航到指定 URL。
+
+    撞同域节流（200 + success=false + NAV_RATE_LIMITED）时按 `nav_retry_after_secs`
+    **自动等待后重试**（默认再试 2 次），见 `_nav_retry_after_secs()` 的说明。
+    `nav_retries=0` 可退回「撞了就失败」。
+    """
+    for attempt in range(nav_retries + 1):
+        r = sess.post(
+            f"{BASE_URL}/browser/navigate",
+            json={
+                "session_id": session_id,
+                "action": "goto",
+                "url": url,
+                "wait_until": "domcontentloaded",
+                "timeout": timeout,
+            },
+            timeout=30,
+        )
+        assert r.status_code == 200, f"navigate failed: {r.status_code} {r.text}"
+        data = r.json()
+        if data.get("success"):
+            return data
+        if _is_nav_rate_limited(r, data) and attempt < nav_retries:
+            w = _nav_retry_after_secs(r, data) + 1.0
+            print(f"[nav-guard] goto {url} 撞同域节流，等 {w:.0f}s 后重试"
+                  f"（{attempt + 1}/{nav_retries}）…")
+            time.sleep(w)
+            continue
+        raise AssertionError(f"navigate not success: {data}")
+    raise AssertionError(f"navigate not success: 重试耗尽 {url}")
 
 
 def wait_for_sessions_empty(sess, timeout=5):
@@ -95,22 +197,38 @@ def wait_for_sessions_empty(sess, timeout=5):
 
 # ========== autouse 清理 fixture ==========
 
+# 2026-11-01 事故：这个 fixture 原来无条件关闭**所有** session（close_page=True），
+# 于是"跑一遍 tests/browser"会把你正在用的真实标签页一起关掉——当天 06:37 就是这么
+# 把用户开着的 neoschool 页面关没的（Chrome 只剩一个 newtab）。
+# 现在先记下模块启动时**已存在**的 session，收尾时只关测试自己新建的。
+_PREEXISTING_SESSIONS: set[str] | None = None
+
+
 @pytest.fixture(autouse=True)
 def clean_browser_sessions(real_browser):
-    """每条用例前后清空 session 表，避免 session 泄漏干扰。
+    """每条用例结束后清空**本套件建的** session，避免 session 泄漏干扰。
 
-    close_page=True：同时关闭浏览器 tab，避免测试套件累积上百个 tab。
+    关页交给 `close_session` 判断：独占时关（避免累积上百个 tab），被共享时只解绑。
+    ⛔ 只关本套件新建的；测试开始前就存在的 session（用户真实的 tab）一律不碰。
     """
+    global _PREEXISTING_SESSIONS
+    if _PREEXISTING_SESSIONS is None:
+        try:
+            r0 = real_browser.get(f"{BASE_URL}/browser/sessions", timeout=10)
+            _PREEXISTING_SESSIONS = (
+                {s["session_id"] for s in r0.json().get("sessions", [])}
+                if r0.status_code == 200 else set()
+            )
+        except Exception:  # noqa: BLE001
+            _PREEXISTING_SESSIONS = set()
     yield
     r = real_browser.get(f"{BASE_URL}/browser/sessions")
     if r.status_code == 200:
         for s in r.json().get("sessions", []):
             sid = s.get("session_id")
-            if sid:
-                real_browser.post(
-                    f"{BASE_URL}/browser/sessions/close",
-                    json={"session_id": sid, "close_page": True}, timeout=10,
-                )
+            if sid and sid not in _PREEXISTING_SESSIONS:
+                # 共享页只解绑、不关页（close_session 内部按 page_ref_count 判断）
+                close_session(real_browser, sid)
 
 
 # ========== L1-A 状态查询端点（只读） ==========
@@ -168,15 +286,21 @@ class TestL1BTabManagement:
     """L1-B 标签页管理（close/list）。"""
 
     def test_L1_B01_close_by_url_all_matches_false(self, real_browser, browser_fixture_server):
-        """POST /browser/close 按 URL 模糊匹配（all_matches=false）。"""
+        """POST /browser/close 按 URL 模糊匹配（all_matches=false）。
+
+        2026-11-02：URL 带本次唯一 query。裸 "dialog.html" 会命中并关掉同一台
+        浏览器上别人的同路径 tab（另一个 pytest 进程 / 用户自己开的）。
+        """
         sess = real_browser
-        # 创建两个相同 fixture URL 的 tab
-        sid1 = create_session(sess, url=f"{browser_fixture_server}/dialog.html")
-        sid2 = create_session(sess, url=f"{browser_fixture_server}/dialog.html")
+        # 创建两个相同 fixture URL 的 tab（URL 含本次唯一 marker）
+        target = uniq_url(browser_fixture_server, "dialog.html")
+        pattern = target.split(f"{browser_fixture_server}/", 1)[1]
+        sid1 = create_session(sess, url=target)
+        sid2 = create_session(sess, url=target)
         try:
             r = sess.post(
                 f"{BASE_URL}/browser/close",
-                json={"urls": ["dialog.html"], "all_matches": False},
+                json={"urls": [pattern], "all_matches": False},
                 timeout=10,
             )
             assert r.status_code == 200
@@ -188,35 +312,40 @@ class TestL1BTabManagement:
             close_session(sess, sid2)
 
     def test_L1_B02_close_all_matches_true(self, real_browser, browser_fixture_server):
-        """POST /browser/close all_matches=true 批量关闭。"""
+        """POST /browser/close all_matches=true 批量关闭（只关本用例的两个 tab）。"""
         sess = real_browser
-        sid1 = create_session(sess, url=f"{browser_fixture_server}/dialog.html")
-        sid2 = create_session(sess, url=f"{browser_fixture_server}/dialog.html")
+        target = uniq_url(browser_fixture_server, "dialog.html")
+        pattern = target.split(f"{browser_fixture_server}/", 1)[1]
+        sid1 = create_session(sess, url=target)
+        sid2 = create_session(sess, url=target)
         try:
             r = sess.post(
                 f"{BASE_URL}/browser/close",
-                json={"urls": ["dialog.html"], "all_matches": True},
+                json={"urls": [pattern], "all_matches": True},
                 timeout=10,
             )
             assert r.status_code == 200
             data = r.json()
             assert data["success"] is True
-            # 至少关闭 1 个（可能 2 个，看 Chrome 状态）
-            assert "已关闭" in data["message"]
+            # 唯一 marker 保证只匹配本用例的 2 个 tab
+            assert "已关闭 2 个标签页" in data["message"]
         finally:
             close_session(sess, sid1)
             close_session(sess, sid2)
 
     def test_L1_B03_close_by_tab_ids(self, real_browser, browser_fixture_server):
-        """POST /browser/close 按 tab_ids 精确关闭。"""
+        """POST /browser/close 按 tab_ids 精确关闭（只认本用例的 tab）。"""
         sess = real_browser
-        sid1 = create_session(sess, url=f"{browser_fixture_server}/dialog.html")
+        target = uniq_url(browser_fixture_server, "dialog.html")
+        marker = target.rsplit("?e2e=", 1)[1]
+        sid1 = create_session(sess, url=target)
         try:
-            # 拿 tab_id
+            # 拿 tab_id：按本次唯一 marker 过滤，绝不取「第一个 dialog.html」——
+            # 那可能是别人的 tab，关掉就是误伤。
             tabs_r = sess.get(f"{BASE_URL}/browser/tabs", timeout=10)
             tabs = tabs_r.json()["tabs"]
-            dialog_tabs = [t for t in tabs if "dialog.html" in (t.get("url") or "")]
-            assert dialog_tabs, "no dialog.html tab found"
+            dialog_tabs = [t for t in tabs if f"e2e={marker}" in (t.get("url") or "")]
+            assert len(dialog_tabs) == 1, f"expected 1 tab for marker {marker}, got {len(dialog_tabs)}"
             target_id = dialog_tabs[0]["target_id"]
             r = sess.post(
                 f"{BASE_URL}/browser/close",
@@ -269,56 +398,80 @@ class TestL1CSessionLifecycle:
             close_session(sess, sid)
 
     def test_L1_C03_create_session_no_url_no_pattern(self, real_browser):
-        """POST /browser/sessions 无 url 和 url_pattern → attach 到现有 page。"""
+        """POST /browser/sessions 无 url 和 url_pattern → 新建专用空白 tab。
+
+        2026-09-03 起**不再复用 pages[0]**：复用会抓到用户真实 tab / 扩展窗口页，
+        配合默认 close_page=True 可能关掉别人正在用的页（2026-11-01 事故的同类风险）。
+        """
         sess = real_browser
         r = sess.post(f"{BASE_URL}/browser/sessions", json={}, timeout=30)
         assert r.status_code == 200
         data = r.json()
-        # 可能成功 attach，也可能失败（看是否有 page）
+        # 后端有 page 可建就成功；极端情况（浏览器无 context）才失败
         if data["success"]:
             close_session(sess, data["session_id"])
         else:
-            # 失败也是合法行为（无 page 时）
             assert data.get("error") is not None
 
     def test_L1_C04_create_session_url_pattern_multi_match_silent_first(self, real_browser, browser_fixture_server):
-        """POST /browser/sessions url_pattern 多匹配 → 静默选第一个（不抛 AMBIGUOUS_TAB）。"""
+        """POST /browser/sessions url_pattern 多匹配 → 静默选第一个（不抛 AMBIGUOUS_TAB）。
+
+        2026-11-02：pattern 带本次唯一 marker。裸 "dialog.html" 会优先命中别人的
+        同路径 tab —— 静默「接管」别人的页，然后 close 时把它关掉。
+        """
         sess = real_browser
-        sid1 = create_session(sess, url=f"{browser_fixture_server}/dialog.html")
-        sid2 = create_session(sess, url=f"{browser_fixture_server}/dialog.html")
+        target = uniq_url(browser_fixture_server, "dialog.html")
+        pattern = target.split(f"{browser_fixture_server}/", 1)[1]
+        sid1 = create_session(sess, url=target)
+        sid2 = create_session(sess, url=target)
         try:
             r = sess.post(
                 f"{BASE_URL}/browser/sessions",
-                json={"url_pattern": "dialog.html"},
+                json={"url_pattern": pattern},
                 timeout=30,
             )
             # 应成功（静默选第一个），不抛 AMBIGUOUS_TAB
             assert r.status_code == 200
             data = r.json()
             assert data["success"] is True
+            # 命中的是本用例两个 tab 之一 ⇒ 该页上现在挂着 2 个 session
+            assert data["page_ref_count"] == 2, data
             close_session(sess, data["session_id"])
         finally:
             close_session(sess, sid1)
             close_session(sess, sid2)
 
     def test_L1_C05_create_session_url_pattern_no_match(self, real_browser):
-        """POST /browser/sessions url_pattern 无匹配 → 回退到 pages[0]。
+        """POST /browser/sessions url_pattern 无匹配 → 新建空白 tab（不复用 pages[0]）。
 
-        实现真源（session/manager.py:117-130）：url_pattern 无匹配时，
-        page 仍为 None，代码进入第 3 步「复用第一个 page 或新建空白」。
-        因此 url_pattern 无匹配不会失败，而是 attach 到现有 page。
-        checklist 附录 C 偏差修正：原期望 HTTP 500，实际回退到 pages[0]。
+        实现真源（server/browser/session/manager.py）：「url_pattern 不命中」时
+        page 仍为 None，走第 3 步**新建专用空白 tab**；2026-09-03 起明确禁止复用
+        `pages[0]`（那会抓到用户真实 tab / 别人的页）。
+        断言点：返回的 tab_id 不属于调用前已存在的任何 session。
         """
         sess = real_browser
+        before = set()
+        try:
+            r0 = sess.get(f"{BASE_URL}/browser/sessions", timeout=5)
+            if r0.status_code == 200:
+                before = {
+                    s.get("tab_id") for s in r0.json().get("sessions", []) if s.get("tab_id")
+                }
+        except Exception:  # noqa: BLE001
+            pass
         r = sess.post(
             f"{BASE_URL}/browser/sessions",
             json={"url_pattern": "__no_such_pattern__"},
             timeout=30,
         )
-        # 实现回退到 pages[0]，返回 200 + success=True
         assert r.status_code == 200
         data = r.json()
         assert data["success"] is True
+        # 不复用别人的页：新 tab 的 target_id 不在调用前的 tab 集合里
+        assert data.get("tab_id") not in before, (
+            f"url_pattern 未命中时复用了已有 tab {data.get('tab_id')}；"
+            f"应新建专用空白 tab（避免接管用户/其他 agent 的页）"
+        )
         # 清理
         close_session(sess, data["session_id"])
 
@@ -350,7 +503,8 @@ class TestL1CSessionLifecycle:
     def test_L1_C07_close_session_close_page_false(self, real_browser, browser_fixture_server):
         """POST /browser/sessions/close close_page=false（默认）。"""
         sess = real_browser
-        sid = create_session(sess, url=f"{browser_fixture_server}/dialog.html")
+        target = uniq_url(browser_fixture_server, "dialog.html")
+        sid = create_session(sess, url=target)
         r = sess.post(
             f"{BASE_URL}/browser/sessions/close",
             json={"session_id": sid, "close_page": False},
@@ -365,11 +519,12 @@ class TestL1CSessionLifecycle:
         sessions = r.json()["sessions"]
         assert not any(s["session_id"] == sid for s in sessions)
         # 收尾：close_page=False 会留下孤儿 tab（本测试的验证目标），session 已从
-        # manager 移除、autouse 清理兜不住它——显式按 URL 关闭，避免每轮 e2e
-        # 泄漏 1 个 fixture tab（2026-09-03 泄漏追踪 temp/leak_trace_plugin.py 定位）
+        # manager 移除、autouse 清理兜不住它——显式按**本用例唯一 URL**关闭。
+        # ⛔ 不能写成裸 "dialog.html" + all_matches=True：那会把用户/并发测试进程
+        # 的同路径 tab 一起关掉（2026-11-02 排查发现）。
         r = sess.post(
             f"{BASE_URL}/browser/close",
-            json={"urls": [f"{browser_fixture_server}/dialog.html"], "all_matches": True},
+            json={"urls": [target], "all_matches": True},
             timeout=10,
         )
         assert r.status_code == 200
@@ -2092,86 +2247,129 @@ class TestL1LAuxiliary:
 @pytest.mark.browser
 @pytest.mark.network
 class TestL2AExampleCom:
-    """L2-A example.com（最简真实站点，只读）。"""
+    """L2-A example.com（最简真实站点，只读）。
 
-    def test_L2_A01_navigate_example_com(self, real_browser):
-        """browser_navigate goto example.com。"""
-        sess = real_browser
-        sid = create_session(sess)
-        try:
-            r = sess.post(
-                f"{BASE_URL}/browser/navigate",
-                json={
-                    "session_id": sid,
-                    "action": "goto",
-                    "url": "https://example.com",
-                    "wait_until": "domcontentloaded",
-                    "timeout": 15,
-                },
-                timeout=30,
-            )
-            assert r.status_code == 200
-            data = r.json()
-            assert data["success"] is True
-            assert "example.com" in data["url_after"]
-            assert data["navigation_completed"] is True
-        finally:
+    ⛔ 2026-10-23 改造：四条用例**共用一个 session、只做一次 example.com 导航**。
+    原先每条各自 `create_session(url=example.com)`，30s 内 4 次同域初始连接 ⇒
+    后 3 条撞后端 nav_guard 的 429 NAV_RATE_LIMITED。复用当前页面也正是
+    nav_guard 拒绝时给出的建议做法（而不是反复 reload 硬撞）。
+    ⛔ 因此**不给 example.com 加站点豁免**：它确实会真实出网（A01 能取回
+    "Example Domain"），豁免公网目标等于把 nav_guard 的风控面重新敞开。
+    """
+
+    @pytest.fixture(scope="class")
+    def l2a_state(self):
+        """四条用例共享的可变状态（class 级 ⇒ 不依赖 function 级的 real_browser）。"""
+        state = {}
+        yield state
+        sess, sid = state.get("sess"), state.get("sid")
+        if sess and sid:
             close_session(sess, sid)
 
-    def test_L2_A02_snapshot_example_com(self, real_browser):
+    @pytest.fixture
+    def l2a(self, real_browser, l2a_state):
+        """共享 session；首次创建时**不带 url**，不额外占用同域导航额度。"""
+        if "sid" not in l2a_state:
+            l2a_state["sess"] = real_browser
+            l2a_state["sid"] = create_session(real_browser)
+        return l2a_state
+
+    @pytest.fixture(autouse=True)
+    def clean_browser_sessions(self, real_browser, l2a):
+        """覆盖模块级同名 autouse：共享 session 中途不关，其余残留照旧清理。
+
+        不清理共享 session 是本类复用的前提；其余 session 仍清，避免影响后续套件。
+        ⛔ 只清本套件新建的（`_PREEXISTING_SESSIONS` 之外）——用户或并发测试进程的
+        session 一律不碰（模块级夹具 2026-11-01 已因此关掉过用户真实标签页）。
+        """
+        yield
+        r = real_browser.get(f"{BASE_URL}/browser/sessions")
+        if r.status_code == 200:
+            for s in r.json().get("sessions", []):
+                sid = s.get("session_id")
+                if not sid or sid == l2a["sid"]:
+                    continue
+                if _PREEXISTING_SESSIONS and sid in _PREEXISTING_SESSIONS:
+                    continue
+                # 共享页只解绑、不关页
+                close_session(real_browser, sid)
+
+    def _ensure_on_example(self, sess, sid, state):
+        """确保共享 session 已在 example.com 上；导航过就不再重复导航。
+
+        使单独跑 A02/A03/A05（跳过 A01）时也能通过 —— 此时由它承担那唯一一次导航。
+        """
+        if state.get("nav_done"):
+            return
+        navigate_to(sess, sid, "https://example.com")
+        state["nav_done"] = True
+
+    def test_L2_A01_navigate_example_com(self, real_browser, l2a):
+        """browser_navigate goto example.com（本类唯一一次导航）。"""
+        sess, sid = real_browser, l2a["sid"]
+        r = sess.post(
+            f"{BASE_URL}/browser/navigate",
+            json={
+                "session_id": sid,
+                "action": "goto",
+                "url": "https://example.com",
+                "wait_until": "domcontentloaded",
+                "timeout": 15,
+            },
+            timeout=30,
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["success"] is True
+        assert "example.com" in data["url_after"]
+        assert data["navigation_completed"] is True
+        l2a["nav_done"] = True
+
+    def test_L2_A02_snapshot_example_com(self, real_browser, l2a):
         """browser_snapshot example.com。"""
-        sess = real_browser
-        sid = create_session(sess, url="https://example.com")
-        try:
-            r = sess.post(
-                f"{BASE_URL}/browser/snapshot",
-                json={"session_id": sid, "interesting_only": True, "max_nodes": 200},
-                timeout=30,
-            )
-            assert r.status_code == 200
-            data = r.json()
-            assert data["success"] is True
-            # 应含 link "More information..." 和 heading "Example Domain"
-            has_link = any(n.get("role") == "link" for n in data["nodes"])
-            has_heading = any(n.get("role") == "heading" for n in data["nodes"])
-            assert has_link or has_heading, f"expected link/heading, nodes: {data['nodes'][:5]}"
-        finally:
-            close_session(sess, sid)
+        sess, sid = real_browser, l2a["sid"]
+        self._ensure_on_example(sess, sid, l2a)
+        r = sess.post(
+            f"{BASE_URL}/browser/snapshot",
+            json={"session_id": sid, "interesting_only": True, "max_nodes": 200},
+            timeout=30,
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["success"] is True
+        # 应含 link "More information..." 和 heading "Example Domain"
+        has_link = any(n.get("role") == "link" for n in data["nodes"])
+        has_heading = any(n.get("role") == "heading" for n in data["nodes"])
+        assert has_link or has_heading, f"expected link/heading, nodes: {data['nodes'][:5]}"
 
-    def test_L2_A03_evaluate_document_title(self, real_browser):
+    def test_L2_A03_evaluate_document_title(self, real_browser, l2a):
         """browser_evaluate document.title。"""
-        sess = real_browser
-        sid = create_session(sess, url="https://example.com")
-        try:
-            r = sess.post(
-                f"{BASE_URL}/browser/evaluate",
-                json={"session_id": sid, "expression": "document.title"},
-                timeout=10,
-            )
-            assert r.status_code == 200
-            data = r.json()
-            assert data["success"] is True
-            assert "Example Domain" in data["value"]
-        finally:
-            close_session(sess, sid)
+        sess, sid = real_browser, l2a["sid"]
+        self._ensure_on_example(sess, sid, l2a)
+        r = sess.post(
+            f"{BASE_URL}/browser/evaluate",
+            json={"session_id": sid, "expression": "document.title"},
+            timeout=10,
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["success"] is True
+        assert "Example Domain" in data["value"]
 
-    def test_L2_A05_screenshot_example_com(self, real_browser):
+    def test_L2_A05_screenshot_example_com(self, real_browser, l2a):
         """browser_screenshot example.com。"""
-        sess = real_browser
-        sid = create_session(sess, url="https://example.com")
-        try:
-            r = sess.post(
-                f"{BASE_URL}/browser/screenshot",
-                json={"session_id": sid, "shot_type": "viewport", "return_base64": True},
-                timeout=15,
-            )
-            assert r.status_code == 200
-            data = r.json()
-            assert data["success"] is True
-            assert data["data"]["width"] > 0
-            assert data["data"]["height"] > 0
-        finally:
-            close_session(sess, sid)
+        sess, sid = real_browser, l2a["sid"]
+        self._ensure_on_example(sess, sid, l2a)
+        r = sess.post(
+            f"{BASE_URL}/browser/screenshot",
+            json={"session_id": sid, "shot_type": "viewport", "return_base64": True},
+            timeout=15,
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["success"] is True
+        assert data["data"]["width"] > 0
+        assert data["data"]["height"] > 0
 
 
 # ========== L2-B bilibili.com（复杂真实站点 + site_lessons） ==========

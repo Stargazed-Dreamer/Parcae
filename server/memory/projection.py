@@ -21,7 +21,7 @@ import logging
 import sqlite3
 from typing import Any
 
-logger = logging.getLogger("localagent.memory.projection")
+logger = logging.getLogger("parcae.memory.projection")
 
 # 注入面标识（surface）——新增注入点时在这里登记，别散着写字符串
 SURFACE_AGENT_GUIDE_MUST_READ = "agent_guide.must_read"

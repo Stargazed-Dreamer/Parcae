@@ -430,6 +430,6 @@ LLM 改写时通常做：
 
 - **anthropics/skills skill-creator**：`https://github.com/anthropics/skills/blob/main/skills/skill-creator/SKILL.md`
 - **anthropics/skills 完整仓库**：`https://github.com/anthropics/skills/tree/main/skills`
-- **LocalAgent 项目强化版 skill-creator**：`<project_root>\.agents\skills\skill-creator.md`
+- **Parcae 项目强化版 skill-creator**：`<project_root>\.agents\skills\skill-creator.md`
 - **evals 模板（本工具包）**：`workspace/dev_toolkit/evals_template.json`
-- **LocalAgent 项目 _index.md**：`<project_root>\.agents\skills\_index.md`
+- **Parcae 项目 _index.md**：`<project_root>\.agents\skills\_index.md`

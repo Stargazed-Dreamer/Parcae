@@ -1,8 +1,8 @@
-# AGENTS.md - LocalAgent 项目指引
+# AGENTS.md - Parcae 项目指引
 
 ## 项目定位
 
-LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工具和日常可自动化工作流。
+Parcae 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工具和日常可自动化工作流。
 所有 Skill 定义在 `.agents/skills/` 目录，索引文件为 `_index.md`。新 skill 按 scope 分桶：`dev/`（工程化开发，借鉴 mattpocock/skills）、`daily/`（日常事务）、`_vendor/`（上游 fork 存档）、`_deprecated/`（弃用占位）；历史扁平 `.md` skill 保持原位。
 
 后端提供 OCR、LLM 对话、浏览器控制、代码执行、屏幕操控、文档处理与知识库搜索（MindForge 集成）等能力，通过 FastAPI 暴露 REST API 和 MCP 工具接口。
@@ -17,6 +17,7 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 - **浏览器**: Chromium 内核浏览器 CDP 协议（端口 9222，独立调试实例，支持 Chrome/Edge/Brave/Vivaldi 等）
 - **MCP**: fastapi-mcp，Streamable HTTP 协议，端点 `/mcp`
 - **GUI**: PySide6 子进程（覆盖层/确认窗口）
+- **对话循环**: butler runtime 独立进程（`python -m lib.agent_runtime.server --supervise`，首选端口 18766，声明 `data/runtime/butler_runtime.json`）；桌面面板 / headless / probe 都是它的客户端，8766 不再持有循环
 
 > 环境兼容性约束（PaddlePaddle/Playwright/调试浏览器实例）详见 `docs/environment-constraints.md`。
 
@@ -27,7 +28,7 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 | `AGENTS.md`（本文件） | 项目指引、会话规范、核心陷阱、关键约束 | 每次会话必读 |
 | `docs/project-intro.md` | 深度项目导览（比喻主干、由浅入深、章→模块映射表、FAQ；人类读者入口，AI 可选读） | 新维护者上手 / 想系统理解项目时 |
 | `docs/architecture.md` | 架构与设计决策（架构总览、后端模块清单、一次 agent 任务的完整数据流、关键设计决策、ADR 索引） | 理解整体架构 / 查"为什么这样设计"时 |
-| `docs/operations-manual.md` | 后端重启、终端 API、日总结、挂机关机、浏览器经验、记忆系统、工具脚本、PySide6 性能 | 触发特定任务或运维时 |
+| `docs/operations-manual.md` | 后端重启（**先判断该不该重启：改代码 ≠ 要重启**）、终端 API、日总结、挂机关机、浏览器经验、记忆系统、工具脚本、PySide6 性能 | 触发特定任务或运维时 |
 | `docs/deployment.md` | 部署与其他机器迁移（依赖安装、模型下载、部署常见故障） | 新机器部署 / 部署故障排查时 |
 | `docs/dev-workflow.md` | 功能变更检查清单、CHANGELOG 维护、发版流程、MCP 工具原则、MCP 接入、用户补充指令 | 工程开发/发版/MCP 配置时 |
 | `docs/changelog-archive.md` | 历史 release 条目归档（按版本倒序，工具自动维护） | 查完整变更历史时 |
@@ -41,15 +42,16 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 | `docs/tools-guide.md` | 所有工具脚本的详细用法、参数、安全机制 | 运行工具脚本时 |
 | `docs/memory-system.md` | 三层记忆系统架构、API、压缩、自动记录 | 读写记忆时 |
 | `docs/llm-pool.md` | LLM 并发池架构 | 脚本调用 LLM 时 |
-| `docs/environment-constraints.md` | PaddlePaddle 兼容性、**资源采样中枢（常驻 NVML；GPU 侧只支持 NVIDIA，别的卡走扩展点）**、Model Lifecycle Manager（含"无 GPU→CPU 降级"缺口）、Playwright、调试浏览器、**网络与环境查询技巧**（HF 访问/查 wheel/验证 GPU/测挂死） | OCR/Vision/浏览器操作时；改资源采样/压力监控链路时；查环境类通用技巧时 |
+| `docs/environment-constraints.md` | PaddlePaddle 兼容性、**资源采样中枢（常驻 NVML；GPU 侧只支持 NVIDIA，别的卡走扩展点）**、Model Lifecycle Manager（含"无 GPU→CPU 降级"缺口）、Playwright、调试浏览器、**端口保留区（WinNAT/Hyper-V 保留区致服务 `WinError 10013` 绑不上端口；含 8766/5037 两次事故与三档对策）**、**网络与环境查询技巧**（HF 访问/查 wheel/验证 GPU/测挂死/GitHub 访问姿势） | OCR/Vision/浏览器操作时；改资源采样/压力监控链路时；**服务报端口绑不上（10013）时**；查环境类通用技巧时 |
 | `docs/model-paths.md` | 模型路径管理（`[models]` 配置、外部目录回退） | 配置模型权重路径时 |
+| `docs/ocr-pipeline.md` | **OCR 全链路与三台状态机**（引擎生命周期四态 / 压力五态 / GPU→CPU 设备决策 / 空闲回收 / 四把锁 / 配置对照表 / 503 原因码排障 / 已知缺口） | 改 OCR 或模型生命周期链路前；排查 OCR 503、显存或内存不释放、空闲不卸载时 |
 | `docs/recorder-guide.md` | 操作录制器用户指南（L0-L4 五层架构） | 使用录制器/采集操作时 |
 | `docs/recorder-test-guide.md` | Recorder 模块端到端测试说明 | 测试录制器功能时 |
 | `docs/ui/` | UI 设计系统（风格 token/组件/图标/交互模式/agent 实操手册，配套 `lib/ui/`） | **写任何 PySide6 GUI 前必读** |
 | `tools/README.md` | 工具目录总览 | 查找工具脚本时 |
 | `docs/adr/` | ADR（架构决策记录）索引 + 决策文档（覆盖 LLM 池/对话引擎/记忆系统/屏幕操控/审批/视觉/发布工具等主题域） | 遇到"为什么这样设计"或做架构决策时 |
 | `docs/agent-guide-keywords.md` | agent_guide 关键词编写规范（match_task_candidates 五路加权打分） | 维护 GUIDE_REGISTRY 时必读 |
-| `docs/chat-engine.md` | v6-lite 对话引擎架构（SessionRunner/EventStore/Compactor 等多组件 + EventStore schema（版本以 `client/core/agent/event_store.py` 的 `_SCHEMA_VERSION` 为准）+ chat-panel-v2 关键设计 + QThread 桥接） | 理解对话引擎工作原理时 |
+| `docs/chat-engine.md` | v6-lite 对话引擎架构（SessionRunner/EventStore/Compactor 等多组件 + EventStore schema（版本以 `lib/agent_runtime/event_store.py` 的 `_SCHEMA_VERSION` 为准）+ chat-panel-v2 关键设计 + QThread 桥接） | 理解对话引擎工作原理时 |
 | `docs/agent-guide.md` | 任务路由系统（GUIDE_REGISTRY 结构/scope 分类/consumption_contexts 消费闭环/first_action 注入/workspace 动态扩展） | 维护 skill 或理解任务路由时 |
 | `docs/todos-wip.md` | 待办与 WIP 系统（三类型 todo/WIP 生命周期/task_closure 整合/API 端点表） | 使用 todos 或 WIP 功能时 |
 | `docs/periodic-task-inventory.md` | **周期任务与空闲额度跑批台账**（哪些 workspace 本质上要周期性跑、分别由谁提醒、用户说"额度很多"时该核对哪些并提议跑什么、哪些有意不周期化） | 用户问周期任务/"额度多能跑啥"、新增 workspace 判断触发方式、改 todo 到期判据时 |
@@ -61,7 +63,7 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 
 | 类型 | 存放位置 | 说明 |
 |------|----------|------|
-| **日志**（今天做了什么、排查过程、因果链） | 各端要求的位置 | WorkBuddy 写 `.workbuddy/memory/YYYY-MM-DD.md`；其他 agent 按各自约定。日志是流水账，不需要进项目文档 |
+| **日志**（今天做了什么、排查过程、因果链） | **`.agents/memory/YYYY-MM-DD.md`** | 跨 harness 共享空间，**所有 agent 一律写这里**（详见下方「记忆与日志规矩」）。⛔ 不再写 `.workbuddy/memory/`——那是 WorkBuddy 私有目录，换 harness 就没人读。历史日志保留在原处作归档 |
 | **通用知识**（环境技巧、网络访问姿势、部署坑、可复用的方法论） | 项目专题文档 | 见下表。这类知识与具体某次任务无关，下次还会用到 |
 
 通用知识的推荐落点：
@@ -75,11 +77,101 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 
 > 判断标准：**下次换个任务还用得上吗？** 用得上 → 项目专题文档；只是这次干了什么 → 日志。
 
+## 记忆与日志规矩（跨 harness，强制）
+
+> **立规矩的目的**：本机并存 ≥4 个 harness（WorkBuddy / Qoder / Claude Code / CodeBuddy），
+> 各自的记忆注入机制互不通用。若真源写进任一 harness 的私有目录，换 harness 即失忆、换机器即丢失。
+> 所以：**真源统一放跨 harness 共享空间**，各 harness 的注入文件只当**投影**。
+
+> ⛔ **与 harness 注入内容的优先级（2026-10-14 用户裁决）**：harness 会在每会话注入它自己的记忆文件
+> （如 WorkBuddy 注入项目 `.workbuddy/memory/MEMORY.md` 与全局 `~/.workbuddy/.../MEMORY.md`）。
+> 我们**无法阻止注入**，但注入内容只是**投影**，可能滞后或与现状不符——**凡与本文件（及 `docs/`、各
+> `workspace/*/AGENTS.md`）冲突，一律以项目规定与项目路径为准**。典型冲突：注入内容仍在说旧落点
+> （例如"日志写 `.workbuddy/memory/`"），**按本文件的新路径执行**。
+
+### 一、共享空间 = `.agents/memory/`（真源层）
+
+```
+.agents/memory/
+  README.md          规矩入口
+  HARNESS_SETUP.md   ★ 接入手册（换 harness / 换机时整份丢给新 agent 照做）
+  YYYY-MM-DD.md      日志（L0）⚠ 不入库
+  TOPIC_*.md         专题真源（L1，入库）：某领域的坑 / 红线 / 方法论细节
+  machine/           本机台账（L1，入库）：路径台账、环境特点、奇怪目录、结论档案
+```
+
+选它的四条理由：① 不属任何 harness 私有目录；② `.agents/` 未被 `.gitignore` 排除（入库有备份，clone 能拿回）；
+③ `AGENTS.md` 读得到 ⇒ 任何 harness 顺着本文件就找得到，无需第二处约定；
+④ 本机台账**不是子项目产物**（`workspace/` 下 33/45 个目录有 `manifest.toml`，它没有），放 `workspace/` 是错位。
+
+⛔ 反例（2026-10-14 已纠正）：`.workbuddy/memory/TOPIC_*.md` —— 既 harness 私有，又被 `.gitignore:165` 排除。
+
+**★ 全局级对应物**（跨项目）：`~/.agents/memory/`（入口 `README.md`；本机环境事实 = `TOPIC_host.md`）。
+**★ 接入手册** = `~/.agents/memory/HARNESS_SETUP.md`（本目录 `HARNESS_SETUP.md` 是它的镜像，`md5sum` 应一致）——
+**装了新 harness 就把该文件整份丢给它的 agent**，含三层模型、六条铁律 H1–H6、各 harness 落点实测表、接入 checklist 与模板。
+
+### 二、三层落点：**记住 ≠ 常驻**
+
+| 层 | 载体 | 成本 | 何时上屏 | 准入 |
+|---|---|---|---|---|
+| **L0 事件流** | `.agents/memory/YYYY-MM-DD.md` | 零 | 基本不上屏，供事后回放 | **不设门槛，随便写** |
+| **L1 检索层** | `TOPIC_*.md`、`machine/**`、后端 facts（HTTP API）、skill | 便宜 | **命中才读** | 宽 |
+| **L2 常驻层** | 各 harness 的注入文件（如 WorkBuddy 的 `MEMORY.md` / 全局 MEMORY.md） | **极贵**（每会话必读） | 每会话强制注入 | **最严** |
+
+**核心原则**：默认落 L1。只有「零上下文的 agent 不知道就会出事 / 会卡住」才够格上 L2。
+L2 是**投影**不是真源——L2 里每条都要能在 L1 找到出处，找不到就是孤儿，应降级回 L1。
+
+⛔ **H1 真源不许进 harness 私有目录**（`.workbuddy/` 等）。
+
+### 三、日志规矩
+
+- **每次实质性工作后追加一段**：建/改网站或应用、修 bug、写报告或文档、重构或架构变更、选定技术方案、用户讲明偏好或项目约定。
+- **纯问答、查资料、寒暄不写。**
+- ⚠ **同日日志会被并发会话整体重写覆盖** ⇒ 追加后**必须回读确认自己的段落还在**。
+- ⚠ **日志不入库**（`.gitignore` 排除 `YYYY-MM-DD.md`）⇒ 它是共享与追溯用，**不是备份**。
+  要长期留存的结论写进 `machine/结论档案/` 或 `TOPIC_*.md`（那些入库）。
+- 每天日志末尾写完后自查：**本次有没有产生「下次还会用到、且不可从代码推导」的东西？** 有 → 同步落 L1。
+
+### 四、升 L2 的准入四问（按序，任一答否不许升）
+
+1. **不可推导？** 能从仓库 grep / 读 `AGENTS.md` / 读 `docs/` 得到的，一律不进（会随重构腐烂）。
+2. **会重复发生？** 只此一次的事件留 L0/L1 即可。
+3. **零上下文会踩？** 不知道这条就会出事、或会卡住。
+4. **有消费场景？** 说得出「什么任务会用到它」。
+
+**L2 只准四类**：带代价标注的红线 / 不可推导的环境事实 / 有引用证据的高频经验 / 指向 L1 的指针（不复制正文）。
+**八类禁入**：代码结构、配置值、仓库内路径、一次性事件、纯流水账、可从文档推导的规则、凭据与个人信息、无消费场景的冷知识。
+
+### 五、配额与置换
+
+两份注入文件都有硬上限（WorkBuddy 这一档是全局 4000 字符 / 项目 8000 字符，换 harness 按比例缩放）。
+⛔ **总上限已失效**——两份都常年卡在 3999 / 7998，因为它逼你删，而没人舍得删"每条都对"的东西。
+改为**分区配额 + 强制置换**：新条目进 L2 必须报**挤掉了谁**，被挤的**降级回 L1 不删除**（内容不丢，只是不再每会话注入）。单条 ≤3 行。
+
+### 六、与后端 facts 的关系
+
+后端 facts（`memory_set`，经 8766 HTTP API 读写）也是 **L1 真源**——它 harness 无关（任何能调 8766 的客户端都行），
+且支持 `consumption_contexts` / `trigger_keywords` 定向召回，见下方「记忆消费闭环」段。
+**但默认优先写文件**：文件零依赖、任何 harness 直接 Read，facts 需要后端在跑。
+⛔ 现状告警：facts 表 161 条但 `updated_at` 停在 2026-10-11 ⇒ 实际写入几乎全走文件，facts 处于半荒废状态。
+
+> 详细版（含落点表、回收三机制、跨 harness 三条硬规矩 H1–H3）：
+> `workspace/local_butler/40_盘点与证据/10_上下文供给/02_记忆准入规矩_什么该进记忆.md`
+
 ## 提交前机械防线（强制）
 
-对 `server/` / `client/` / `lib/` 的任何代码变更，声称"完成"前**必须**跑两道检查：① `uv run python -m pytest tests/server_endpoints/test_smoke_endpoints.py -q`（GET 端点冒烟，≥500 即失败）；② `uv run pyright` 与基线 0 错误对比（不允许新增）。⚠️ `pyrightconfig.json` 的 `include` 只列这三个目录，`workspace/` / `tools/` 脚本仓库级运行**从不被检查**，改这类脚本必须显式 `uv run pyright workspace/.../xxx.py`。注册表类改动（GUIDE_REGISTRY/manifest/白名单/config）另跑 `tools/audit/drift_detector.py`（该脚本自写报告到 `temp/audit/drift_report.md`）。详见 `docs/dev-workflow.md` "提交前机械防线"章节。
+对 `server/` / `client/` / `lib/` 的任何代码变更，声称"完成"前**必须**跑四道检查：① `uv run python -m pytest tests/server_endpoints/test_smoke_endpoints.py -q`（GET 端点冒烟，≥500 即失败）；② `uv run pyright` 与基线 0 错误对比（不允许新增）；③ `uv run ruff check server client lib tests`（**pyright 不查 `[tool.ruff.lint]` 的 B/SIM/C4/C901 规则**，漏这道会让违规一路潜伏到发版全量——2026-10-31 一次拦下 17 处）；④ 硬化规则（`tools/check_hard_rules.py`）由 pre-commit 自动跑。⚠️ `pyrightconfig.json` 的 `include` 只列这三个目录，`workspace/` / `tools/` 脚本仓库级运行**从不被检查**，改这类脚本必须显式 `uv run pyright workspace/.../xxx.py`。注册表类改动（GUIDE_REGISTRY/manifest/白名单/config）另跑 `tools/audit/drift_detector.py`（该脚本自写报告到 `temp/audit/drift_report.md`）。详见 `docs/dev-workflow.md` "提交前机械防线"章节。
 
 ## 会话启动检查清单（每次新会话第一步，必须执行）
+
+### 第 0 步：读共享记忆（跨 harness 领路，不依赖任何 harness 的注入）
+
+开工前先读 **`.agents/memory/README.md`**（三层落点索引）；再按需读同目录的 `TOPIC_*.md`（专题细节）、
+`machine/`（本机台账：常用路径 / 环境特点 / 奇怪目录 / 排查结论档案）、最近几天的 `YYYY-MM-DD.md`（日志）。
+
+- 这是**真源**，任何 harness 都能读；**各 harness 注入的 `MEMORY.md` 只是它的投影，可能滞后**。
+- ⛔ **本 harness 没有记忆注入时（换了 harness，或注入被关），这一步是唯一能把你领到真源的动作**——不许跳。
+- 读到的东西与 `AGENTS.md`（或 `docs/`、各 `workspace/*/AGENTS.md`）冲突时，**一律以项目文件为准**。
 
 > ## ⛔ 最高优先级铁律：每个用户任务都必须先调 `agent_guide`，禁止跳过直接干活
 >
@@ -93,6 +185,8 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 >
 > **自检规则**：如果你接下来要直接执行任何动作（WebSearch / 写代码 / 调 MCP 工具 / 读文件 / 截图），而本回合还没有调过 `agent_guide` → **停下来，先调 `agent_guide(task='用户原始任务描述')`**。
 >
+> **⚠️ 反向触发（2026-10-14 用户追加）：查不到文档 / 听不懂黑话，就是该调 guide 的信号。** 当你找不到相关流程说明，或遇到不认识的口语 / 缩写 / 内部叫法（"按流程""老规矩""那个 XX 流程"），或拿不准该走哪套流程时，**禁止靠猜或硬搜** —— 先调 `agent_guide(task='用户原话')`。实测反例（2026-10-13）：用户说"把椰社群里面对我就业有帮助的**按流程**记录一下"，agent 自以为懂、跳过 guide 直接搜，完全错过该项目已跑 11 批的「群聊秋招情报摘录」流程；且当时的 guide 还会把它**错配到不相干 skill**。
+>
 > **唯一例外**：纯事实查询（如"Python 版本是多少"）、闲聊、或用户明确说"别走流程直接做"——这些可以跳过。拿不准时，宁可调。
 >
 > 具体调用方式见下方"第 1 步"第 5 条。
@@ -102,29 +196,44 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 **在执行任何任务之前，先确认 MCP 工具是否可用。** 如果 MCP 不可用，所有后端功能都无法使用。
 
 1. 尝试调用任意 MCP 工具（如 `memory_status` 或 `exec_status`）
-2. 如果调用失败或工具列表中没有 `mcp_localagent_*` 工具：
+2. 如果调用失败或工具列表中没有 `mcp_parcae_*` 工具：
    - **不要用 curl/Invoke-RestMethod 替代**——后端也没启动，curl 会卡住
-   - 提醒用户启动后端：`start.bat` 或 `.venv\Scripts\python.exe -m server.main`
-   - 等用户确认启动后再继续
+   - **agent 自启动一律非提权**：用 `.venv\Scripts\python.exe -m server.main`（沙箱 shell 前面加 `env -u PYTHONPATH`），**不要运行 `start.bat`**——它会弹 UAC，是用户手动启动的入口。非提权后端的 MCP/REST/浏览器/截图/OCR 都正常，只有键鼠与 UIA 激活窗口会被 UIPI 拦（`screen.admin=false`）
+   - **需要键鼠/UIA 提权时，请用户自己运行 `start.bat`**，agent 不替用户点 UAC；等用户确认后再继续
 3. MCP 可用后，用 `exec_status` 确认后端正常
-4. **MCP 工具名前缀**：两个 IDE 中工具名均显示为 `mcp_localagent_<operation_id>`（如 `mcp_localagent_exec_python`），调用时使用完整名称或简称均可
+4. **MCP 工具名前缀**：两个 IDE 中工具名均显示为 `mcp_parcae_<operation_id>`（如 `mcp_parcae_exec_python`），调用时使用完整名称或简称均可
 5. **调 `agent_guide` 获取任务指导（强制前置，禁止跳过！见上方最高优先级铁律）**：`agent_guide(task='用户任务描述')` 返回决策摘要 + 候选清单，无需读 _index.md 全量索引。无参调用返回全量分类清单（scope：recurring/adhoc/system/dev/daily/recording；内置 task_type 见 `server/agent_guide_data.py` GUIDE_REGISTRY，workspace 动态扩展见 `workspace/*/manifest.toml`）。返回中含 `environment_notes`（双屏/管理员权限/Computer Use 铁律）和 `session_startup`（含新会话首次任务的 skill 多选询问机制）
    - **为什么不能跳过（即使任务看起来很简单）**：以"今日股票分析"为例，agent 直觉是"搜一下行情就行"——但 `agent_guide(task='今日股票分析')` 会返回 `recurring.stock_analysis` skill 的 `first_action`、注入上次分析的股票清单和用户偏好、给出数据源工具优先级。跳过它你就丢了这些，做出的分析和上次完全脱节。**任何具体任务都必须先调 guide，再按 guide 的 `first_action` 执行。**
    - **可选 `include_structure=true`**：若任务涉及项目目录布局（如新增模块/查找文件位置），传此参数获取当前项目结构映射（替代下方"项目结构"章节的静态描述）
    - **开发任务先看 `dev_entry_points` 决策树**：GeneralGuide 响应含 `dev_entry_points` 字段，按目标清晰度选入口（`goal_clear_full_flow`→`dev.goal_engineering` 三阶段编排 / `goal_unclear`→`dev.grill_me` 追问 / `small_fix`→`dev.anti_hallucination`）。dev 桶 skill 按 role 分层（entry/method/support/tool），entry 是第一步。**禁止跳过入口直接走执行类 skill**（implement/to_tickets 响应会附 `prerequisite_check` 前置提示）
 6. **屏幕操控前置检查（涉及截图/点击/输入时必读）**：
-   - **管理员权限**：调 `/health` 检查 `screen.admin=true`。无权限时键鼠操作被 Windows UIPI 阻止（`SetCursorPos`/`SetForegroundWindow` 静默失败），用 `start.bat` 重启（自动 UAC 提权）
+   - **管理员权限**：调 `/health` 检查 `screen.admin=true`。无权限时键鼠操作被 Windows UIPI 阻止（`SetCursorPos`/`SetForegroundWindow` 静默失败）。⛔ agent 不要自行运行 `start.bat` 提权——请用户手动运行它（会弹 UAC），重启后确认 `screen.admin=true` 再继续
    - **双屏配置**：用户有时双屏有时单屏。`mode=fullscreen` 截图默认拼接所有显示器（mss.monitors[0]），OCR 可能返回多屏内容。需要窗口内容时用 `mode=window` + `force_fullscreen_crop=True`（DirectX 全屏游戏尤其重要，PrintWindow 会假成功返回错误内容）
    - **先读 Computer Use 说明**：`.agents/skills/computer_use/SKILL.md` 包含窗口操作铁律、DPI 缩放、坐标系统、同名窗口冲突处理。任何屏幕操控任务必须先读此文件
    - **定位优先级**：浏览器 DOM locator > UIA 语义层 > 桌面/截图 OCR bbox > `vision_locate`。OCR bbox 已修复，可直接承担文字定位；远程 VL 默认只做布局/状态描述，避免普通文字点击消耗昂贵且慢的 VL 配额
    - **OCR 坐标转换**：`screen_ocr(mode="window", engine="ocr")` 返回窗口截图内 bbox；中心点加 `list_windows` 返回的窗口 `left/top` 后再传 `execute_action`。`screen_snapshot` 只返回 OCR 文本摘要，不返回 bbox
 7. **浏览器（调试浏览器实例）自主启动（涉及浏览器操作时必读）**：
+   - **⛔⛔ 先读 `docs/browser-profile-safety.md`（2026-10-24 立，三次事故换来的）**：`chrome_debug/` 里是**用户真实的日常数据**（6872 条历史、300+ 登录 cookie、34 个扩展），不是沙盒。七条铁律浓缩成三句：**① 一个 profile 只许 Chrome 打开**（换浏览器 = MAC 校验失败 → 静默删扩展文件）；**② 动之前先 `python tools/browser/profile_guard.py backup --profile chrome_debug` 且自检通过**，运行中的实例必须先停；**③ 扩展丢了从工作 profile 克隆**（`Default/Extensions` + `Secure Preferences` + `Preferences`，⛔ 不动 `Local State`/`Cookies`），不要丢给用户去 `chrome://extensions` 手点。⛔ 不许随手造测试 profile，确需则 `temp/bp_<用途>_<时间戳>` 用完整删并自检
+   - **⛔ 选型与路径必须实测，禁止凭记忆断言**：不许说「Chrome 没装 / 找不到 / 只能用 Edge」——先查官方安装路径 + 注册表（`HKCU\Software\Google\Chrome\BlBeacon`）+ `/json/version` 的 `Browser` 字段，文档与实机冲突以实机为准并当场改文档。⛔ 报告「数据丢了」之前必须先查备份、先试 `profile_guard.py restore`
    - **项目有专用调试浏览器**，agent 应自主启动和管理，**不要问用户"要我来开还是你来开"**——直接开
    - **检查**：`browser_status` 看调试浏览器（CDP 9222）是否已运行
-   - **未运行时启动**：`exec_python` 执行 `tools/browser/start_debug_browser.py`（非交互模式，自动用空白配置或已有 `chrome_debug/` 数据）。启动脚本支持 `--copy-user-data`（从源浏览器复制登录态）、`--no-copy`（默认，非交互）、`--browser-path`（显式指定浏览器路径，默认自动探测 Chrome/Edge/Brave/Vivaldi）、`--port` 和 `--user-data-dir`
+   - **⛔ 未运行时启动——唯一合法通道 = 后端常驻终端**：`exec_terminal_spawn`（等价 `POST /terminals/spawn`，`cmd_list` 传 `[<venv python>, "tools/browser/start_debug_browser.py"]`、`cwd` 传项目根）执行启动脚本（非交互模式，自动用空白配置或已有 `chrome_debug/` 数据）。启动脚本支持 `--copy-user-data`（从源浏览器复制登录态）、`--no-copy`（默认，非交互）、`--browser-path`（显式指定浏览器路径，默认自动探测 Chrome/Edge/Brave/Vivaldi）、`--port` 和 `--user-data-dir`
+   - **⛔⛔ 禁止用 harness 侧通道拉起调试浏览器（此错一而再再而三地犯，特别强调）**：harness 的 Bash / `run_in_background` / `Start-Process` / PowerShell 作业起的浏览器会**随 harness 会话/任务清理被自动回收**（2026-09-30 实测：9222 消失、登录流程被打断）；`exec_python` 里裸 `Popen` 起的同样不经常驻终端托管，不允许。自检判据：**凡是"执行完那条命令就没人再管它"的起法都是错的**；起完必须 `browser_status` 或 `GET http://127.0.0.1:9222/json/version` 验证
+   - **⛔⛔ 后端自身也不许挂在 harness 会话下（2026-10-24 新增，实际踩过）**：上面只禁了"用 harness 起浏览器"，但**后端自己**若由 harness 的 Bash / `run_in_background` 拉起（如 `(python -m server.main &)`），会话/任务清理时后端被**硬杀**（日志戛然而止、无 shutdown 记录）→ shutdown `close_all()` 关光 session page → 最后一个 tab 关掉时 Chrome 整体退出 → 9222 消失，看起来像"浏览器神秘死亡"，真因却在后端。**判据：后端日志最后一行没有 shutdown / `close_all` 记录 = 被外部杀掉，不是崩溃。** 冷启动后端必须脱离 harness 作业（一次性计划任务跑 `temp/backend_boot_detached.bat`，`schtasks /Create /SC ONCE` → `/Run` → `/Delete`），起完用 `/health` + 父进程链自证（父应是 `cmd.exe` ← `taskeng/svchost`，不是 harness 的 bash）。启动命令用 `cmd_list` 数组（`["<venv>\\Scripts\\python.exe","tools/browser/start_debug_browser.py"]`）——**不要为了绕引号去写临时 bat**，`cmd_list` 本来就是为此设计的
+   - **9222 消失 ≠ 浏览器神秘死亡**：后端对空闲 session 有租约回收（有主 900s / 匿名 300s，回收连 tab 一起关，关掉最后一个 tab 时 Chrome 整体退出）——这是必要管理。排查姿势与保活方法见 `docs/environment-constraints.md`「调试浏览器实例」回收机制小节
    - **隔离**：调试浏览器用独立 `chrome_debug/` 用户数据目录（可在 config.toml `[browser] user_data_dir` 配置），**绝不影响用户的工作浏览器**
    - **禁止**：不要打开用户的工作浏览器；不要执行 `playwright install`（已装好）；所有浏览器操作必须 `connect_over_cdp("http://127.0.0.1:9222")` 连接已运行实例，禁止启动新浏览器
+   - **⛔ 导航节流 + 复用优先（2026-10-23）**：同一域名 **30s 内只允许一次 `reload`/`goto`**（含 `browser_session_create(url=...)` 首次打开；localhost/内网豁免），超频返回 `NAV_RATE_LIMITED` + `nav_retry_after_secs`（窗口恒定 30s，不随违规次数加码）。**撞限流别原地硬重试**——当前页能用在现页面上继续，要已有 tab 就用 `url_pattern` 复用；确需重试的调用方（脚本/测试）按 `nav_retry_after_secs` / `Retry-After` **等够再试**（客户端自动等，后端不排队）。**任务中途别关 session**（有 idle 租约自动回收，关掉再开 = 多一次冷启动 + 再吃一次节流）。详见 `docs/browser-anti-detection.md` §3.1
+   - **⛔ 冷路径必须指定目标（2026-11-01）**：不带 `session_id` 调 action / snapshot / evaluate / wait_for / console_logs / navigate / screenshot 时，若浏览器有 ≥2 个 tab，**或**唯一那个正被别的会话持有 ⇒ `TAB_REQUIRED` + 候选清单（tab_id / 标题 / URL / 持有者）；只有"恰好 1 个且无主"才自动兜底。**脚本直连 CDP 开的页算外来者**（`/browser/tabs` 的 `origin=unknown`），**不参与**这个判定，别把它们当障碍。详情 `docs/api-reference.md` 浏览器节
+   - **关 session 不连坐（2026-11-01）**：多个 session 共享同一 tab 时（`url_pattern` 复用 / `force=true` 加入共享），关掉其中一个**只解绑不关页**（响应 `page_kept=true` + `page_kept_by`）；共享关系看 `/browser/sessions` 的 `page_ref_count` / `page_shared_with`
+   - **进程托管 supervisor（2026-10-23 第一版，尚未自动接管）**：新增 `/browser/supervisor/{status,ensure,stop,restart}`（agent 走 `parcae_advanced_tool` 调用），只管浏览器进程的启动/探活/停止/重启，不替代 session 工具面。**默认启动流程仍是上面的 `start_debug_browser.py`**；supervisor 尚未接入自动启动，配置见 `[browser.supervisor]`（`config.example.toml`）
+   - **⛔ supervisor 只处置自己启的进程（2026-11-01 修）**：接管来的实例（`owned=false`）连续不健康时**只 detach、绝不 `stop(force=True)`**；存活判据按「端口上 LISTEN 的浏览器 pid」认，因为 **Popen 拿到的 pid 只是启动器，Chrome 会 relaunch 自己**（实测 1s 内 exit 0）。别再给启动器 assign Job Object——kill-on-close 会连坐真身。下面那条「关最后一个 page 会让 Chrome 整体退出」的坑仍在，清理 tab 时先开新页再关旧的
    - 详见 `docs/environment-constraints.md`「调试浏览器实例」章节
+8. **butler runtime（对话循环宿主）是否在跑（涉及对话 / headless / probe 时必查）**：
+   - 判据：`data/runtime/butler_runtime.json` 有 `status=ready`，且 `curl.exe -s http://127.0.0.1:<port>/health` 返回 `ok:true`。端口从声明文件读（首选 18766，被占或落进 WinNAT 保留区会顺延）
+   - 没在跑 → 让用户或 agent 运行 `start_butler_runtime.bat`（非提权即可）。**不要用 `start.bat` 起停它**——那是 8766 后端的入口
+   - **8766 在跑 ≠ runtime 在跑**：桌面面板的会话读写、headless 作业、probe 现在都经 runtime；只有 8766 时面板会读不到会话、提交报 runtime unavailable
+   - 重启 runtime 会先跑启动恢复（残留 streaming 会话转 interrupted，经 `GET /admin/recovery` 可查）；架构与运维见 `docs/chat-engine.md`、`docs/operations-manual.md`「butler runtime」，本切片的裁决见 `temp/sdd/butler-runtime/spec.md`
 
 ### 第 2 步：读取相关记忆（按需）
 
@@ -176,6 +285,32 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 
 > 路径规范、SDD 文件夹内文件组织表、与 SDD 流程的衔接、`planning_notes/` 现状、历史教训详见 `docs/dev-workflow.md` 的"功能规划文档存档路径"章节。
 
+### 预研 / 长期规划类例外（2026-10-18 用户授权，强制）
+
+**预研项目**（如 `workspace/local_butler/` = 管家计划 + 记忆改造）的**规划层、决策台账、用户原话归档、调研产出、决策面板 HTML** 属**长期资产**，落 `workspace/<项目>/`，**不走 `temp/sdd/`**——`temp/` 会被清理，当轮 SDD 产物不值得长期跟踪。
+
+**分界线 = 长期资产 vs 当轮产物**：
+- 长期资产（规划/决策/调研/原话）→ `workspace/<项目>/`（入 git）
+- 当轮 SDD 产物（`spec.md` / `tickets.md` / `checklist.md`）→ **仍走 `temp/sdd/`，不例外**
+
+> 规矩真源：**`workspace/README.md`**（三档存放、预研项目标准结构、**规划层六类粒度**、命名规范、项目 README 必备四块）。
+
+### ★ 用户原话归档（强制，2026-10-18）
+
+用户给的原话文档、拍板导出件（决策面板导出的 `.md` / `.json`），**agent 必须当场自己复制一份到 `workspace/<项目>/50_原话归档/`**：
+
+- **只复制不移动**（原件留在下载文件夹，用户可能还要再打开）
+- **不许**只留在下载文件夹、不许落 `temp/`、不许等用户提醒
+- 文件名沿用导出原名（保证能和用户手里的文件对上）
+- `50_原话归档/README.md` 要登记来源面板/导出时间/拍了几条/是否缺失
+
+⚠ **教训（真实案例，2026-10-18 更正）**：2026-10-13 第一轮记忆决策导出件 `记忆决策_20261013_0549.md/.json`（55 条）**在 10-15 20:31 被误删进回收站，直到 10-18 用户提醒「检查回收站」才找回**——中间三天无人察觉。两条教训：
+
+1. **归档必须当场做**：这次靠回收站兜底（解析 `$I*` 元数据拿 UTF-16 原路径，配 `$R*` 取内容），下次可能真没了。
+2. **宣布「已丢失」之前必须查回收站**：我 10-18 04:00 已把「彻底丢失、不可恢复」写进本文件，**5 分钟后被证伪** ⇒ **「找不到」≠「不存在」**。本机还有 `.bak`、早版副本、其他盘的回收站，都该先排除再下结论。
+
+> 完整过程与恢复方法：`workspace/local_butler/50_原话归档/README.md` §2。
+
 ## 工作结束后的动作（任务完成/中断/会话结束前，必须执行）
 
 **任务结束时不等用户说"收尾"，agent 主动调 `agent_guide(task_type='system.task_closure')` 获取收尾指引。** 这与开始时的 `agent_guide(task='...')` 对称——开始有 guide，结束也有 guide。
@@ -189,7 +324,7 @@ LocalAgent 是一个个人 AI Agent 项目，集合了电脑操控、Agent 工�
 ### 收尾 6 步流程（task_closure skill）
 
 1. **评估任务状态**：完成？中断？无实质产出？决定后续步骤集
-2. **WIP 处理**：完成→`wip_update(status=completed)`；中断→`wip_create` 或 `wip_update` 留档（next_steps 必须可执行）。⚠️ **写操作不是直接 MCP 工具**：MCP 侧只有 `wip_get` / `wip_list` / `wip_get_many`，`wip_create` / `wip_update` / `wip_delete` 与 `todos_create` / `todos_update` / `todos_mark_done` 要走 `localagent_advanced_tool(tool="wip_create", params={...})`（REST `POST /wip`）。按 `mcp__localagent__wip_create` 调会直接 not found
+2. **WIP 处理**：完成→`wip_update(status=completed)`；中断→`wip_create` 或 `wip_update` 留档（next_steps 必须可执行）。⚠️ **写操作不是直接 MCP 工具**：MCP 侧只有 `wip_get` / `wip_list` / `wip_get_many`，`wip_create` / `wip_update` / `wip_delete` 与 `todos_create` / `todos_update` / `todos_mark_done` 要走 `parcae_advanced_tool(tool="wip_create", params={...})`（REST `POST /wip`）。按 `mcp__localagent__wip_create` 调会直接 not found
 3. **经验提炼 + 可消费性自检**：识别值得保留的经验（preference/project/reference），**必须填 `consumption_contexts`（哪些 task_type 应读取）+ `trigger_keywords`（任务描述出现什么词时读取）**，无法明确消费场景的候选跳过——避免"存了没人用"
 4. **查重 + 写入**：`memory_list` 查重 → `memory_set` 写入结构化记忆。参数形状是**平铺**的：`memory_set(key=..., data={...}, merge=true, fact_type=..., consumption_contexts=[...], trigger_keywords=[...])`——`fact_type` / `consumption_contexts` / `trigger_keywords` 是**顶层字段**（写进 facts 表独立列供 SQL 过滤），不是塞在 `data` 里；同名时顶层覆盖 `data` 内的值
 5. **文档自查（不询问用户）**：agent 自行对照 `.agents/rules/project_rules.md` 检查清单，检查本轮变更是否需要文档同步（路由注册/Pydantic模型/`/health`/硬编码/`_index.md`/`AGENTS.md`/`CHANGELOG.md`/`config.example.toml`/`tools_manifest.json`）。**ADR 评估（强制）**：本轮若有架构层变更或 SDD 产出 design-decisions，按 `project_rules.md` "ADR 评估"段三项标准打分，3/3 通过则写 ADR 并更新 `docs/adr/README.md` 索引（详见"关键约束 → ADR 维护"段）。完整 neat-freak 审查由用户主动触发。**若是浏览器操作任务**，额外检查"浏览器经验记录"（见 `docs/operations-manual.md` "浏览器操作经验记录"章节）：本次是否遇到非显然行为？若是，写入 `.agents/skills/browser_lessons/sites/<domain>.md`，无对应文件时按 `sites/_template.md` 创建，并同步更新 `.agents/skills/browser_lessons/references/site_index.md`
@@ -320,12 +455,12 @@ ADR 是项目架构决策的真源，位于 `docs/adr/`（索引见 `docs/adr/RE
   - 截图给多模态 LLM：用 `capture_screen(format="inline")`（返回 ImageContent，由 MCP 协议处理，不进文本上下文）
   - **浏览器截图**：`browser_screenshot` 默认已改为只返回 `path`（`return_base64=False`）。要看图就把 path 交给 `understand_image` / `ocr_path`；**不要**为了省事传 `return_base64=True`——2026-09-21 曾因网关只认顶层/`result` 两种形状、而本端点把标记放在 `data` 下，一次调用往上下文塞了 181424 字符
   - 截图特征分析：用 `screen_analyze`（返回纯文本的颜色/亮度/异常分析，无 base64）
-  - 截图+OCR：优先 `localagent_advanced_tool(tool="screen_ocr", params={...})`，直接返回文字和 bbox，不经过 base64
+  - 截图+OCR：优先 `parcae_advanced_tool(tool="screen_ocr", params={...})`，直接返回文字和 bbox，不经过 base64
   - 文件读取：用 `docviewer_read` 或 `exec_python` 提取文本，绝不返回 base64
   - **违反此规则会导致上下文窗口被数 MB 的 base64 字符串撑爆，LLM 无法继续工作**
 - **截图+OCR 的正确流程（重要！）**：优先调用高级工具 `screen_ocr`，一步截图并返回 `text + details[].box`，不返回图片数据：
   ```
-  localagent_advanced_tool(
+  parcae_advanced_tool(
       tool="screen_ocr",
       params={"mode":"window", "hwnd":123, "engine":"ocr"}
   )
@@ -393,7 +528,7 @@ install 绕路**（2026-09-03 教训：为删测试垃圾先装 send2trash 被�
 项目分一二级目录，**完整映射由程序维护**，避免静态文档过时：
 
 - **后端**：`server/`（FastAPI + MCP，模块详见 `_index.md` 后端模块表）
-- **GUI 客户端**：`client/`（PySide6 面板式架构：主窗口内置面板 + workspace manifest 声明的组件面板，**数量与清单由 PanelRegistry 扫描 `client/panels/` 得到，不在这里写死**；另有独立进程审批面板 `client/approval_panel/`（`python -m client.approval_panel`，托盘驻留，不在主窗口侧边栏）；`client/core/agent/` 是 v6-lite 对话引擎的**纯 Python 核心库，不依赖 Qt**，ChatPanel 经 SessionFacade 通过 QThread 调引擎。引擎与 chat-panel-v2 的实现细节见 `docs/chat-engine.md`，UI 规范见 `docs/ui/`）
+- **GUI 客户端**：`client/`（PySide6 面板式架构：主窗口内置面板 + workspace manifest 声明的组件面板，**数量与清单由 PanelRegistry 扫描 `client/panels/` 得到，不在这里写死**；另有独立进程审批面板 `client/approval_panel/`（`python -m client.approval_panel`，托盘驻留，不在主窗口侧边栏）；`lib/agent_runtime/` 是 v6-lite 对话引擎的**纯 Python 核心库，不依赖 Qt**，ChatPanel 经 SessionFacade 通过 QThread 调引擎。引擎与 chat-panel-v2 的实现细节见 `docs/chat-engine.md`，UI 规范见 `docs/ui/`）
 - **Skill/规则/文档**：`.agents/`（`skills/` skill 定义、`wip/` 任务留档、`rules/` 规则文件；**无 documents/ 子目录**，文档走 `docs/`）
 - **通用工具脚本**：`tools/`（browser/debug/deploy/llm/file_classifier 等，详见 `tools/README.md`；**任务专属脚本写到 `workspace/<task>/`，不写到 `tools/`**）
 - **任务工作区**：`workspace/`（按任务分目录，**子目录数量随工作增减，实际清单看 `workspace/` 目录本身或 `data/project_structure.json`**；新建子目录**按需**——`SKILL.md` + `manifest.toml` + `loop_actions.py` 三件套不是强制要求，临时/一次性脚本可省；常驻/loop 任务建议有 `manifest.toml` + `loop_actions.py` 让 agent_guide 路由）。**特殊子目录**：`dev_toolkit/`（独立 dev toolkit 项目，有自己的 `.agents/` `specs/` `wip/`，写入前看其 `AGENTS.md`）、`maa-patch/`（自写文件 `MAINTENANCE.md`/`LESSONS.md`/`mumu-keepalive.patch`/`sync-maa-patch.ps1`/`UPSTREAM_ISSUE_RECORD.md` 进仓库（白名单见 .gitignore），`maa-upstream/` 是上游 MAA 仓库副本不碰）
@@ -439,7 +574,7 @@ install 绕路**（2026-09-03 教训：为删测试垃圾先装 send2trash 被�
 
 **根目录其他文件**：
 - `todo.txt` — 根目录的旧待办笔记（非项目内维护的产物）
-- `start.bat` / `start_client.bat` — 后端启动脚本（含 UAC 提权+杀端口）/ GUI 启动脚本
+- `start.bat` / `start_client.bat` — 后端启动脚本（用户手动启动；含 UAC 提权+杀端口）/ GUI 启动脚本。**agent 自启动后端请不要用 `start.bat`**，改走 `.venv\Scripts\python.exe -m server.main`（非提权）
 - `tools_manifest.json` — 工具清单（GUI 自动读取）
 - `LICENSE` / `NOTICE.md` — Apache-2.0 版权 + 版权声明
 - `SECURITY-RISKS.md` — 已知安全风险登记
@@ -466,11 +601,22 @@ install 绕路**（2026-09-03 教训：为删测试垃圾先装 send2trash 被�
 1. **高频**：这类任务会反复发生，不是一次性的。
 2. **有坑**：是没有指导就会反复踩坑、试错多次才走通的经验。一次就成功、照着通用知识就能做的，不记。
 
-只满足一条、或两条都不满足 → 记到 `docs/` 专题文档或 `.workbuddy/memory/YYYY-MM-DD.md` 日志，或干脆留在对话里，**不要建 skill**。已有 skill 能覆盖 → 先路由到它，不重复造轮子（`agent_guide(task='...')` 或 `.agents/skills/_index.md`）。
+只满足一条、或两条都不满足 → 记到 `docs/` 专题文档或 `.agents/memory/YYYY-MM-DD.md` 日志，或干脆留在对话里，**不要建 skill**。已有 skill 能覆盖 → 先路由到它，不重复造轮子（`agent_guide(task='...')` 或 `.agents/skills/_index.md`）。
 
 Skill 编写规范（目录结构、frontmatter、同步清单）见 `.agents/skills/skill-creator.md`，创建新功能后的必做清单见 `.agents/rules/project_rules.md`（Trae 镜像副本在 `.trae/rules/project_rules.md`）。
 
 ## 测试
+
+> **先读手册再跑（强制）**：下面三个脚本入口和分批器都装了「已读手册」闸门——**不先声明已读就拒绝执行**（退出码 2）。
+> 而报错**故意只写"去读手册"**：既不点手册名，也不点缺哪个参数。**别照报错去试参数，那是绕过闸门。**
+>
+> **这不是故意刁难，是不许照抄参数。** 测试脚本的参数、marker 排除项、产出路径、分批与内存口径全写在手册里，
+> 凭感觉敲命令必然踩坑——2026-10-12 实测：`-q` 叠加导致收集判据静默失效（`grep "::"` 恒为 0
+> 且不报错），白跑 4 遍全量才发现问题。闸门只有一个作用：
+> **确保执行者确实读过手册里的测试使用方法，而不是凭印象敲命令。**
+>
+> 手册 = `docs/dev-workflow.md` 的「测试运行入口（agent 必读，禁止乱调用）」节；闸门的正式声明在它的
+> 「参数一致性」全局参数块，**位置固定：后续任何改动不得挪动、不得改写。**
 
 **测试运行入口（禁止乱调用，详见 `docs/dev-workflow.md` "测试运行入口" 段）**：
 

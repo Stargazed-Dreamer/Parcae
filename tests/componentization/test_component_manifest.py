@@ -8,6 +8,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from server.component_manifest import (
     AgentGuideEntry,
     BackupEntry,
@@ -24,6 +26,17 @@ from server.component_manifest import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STOCK_ADVISOR_DIR = PROJECT_ROOT / "workspace" / "stock_advisor"
+
+
+@pytest.fixture(autouse=True)
+def _clear_manifest_cache_after_test():
+    """monkeypatch 改过 _WORKSPACE_DIR 的用例会留下自定义缓存，跨用例污染。
+
+    monkeypatch 在 teardown 里先还原目录，本 fixture 再清缓存；顺序由 fixture
+    teardown 逆序保证（autouse 先建、后拆）。
+    """
+    yield
+    reset_cache()
 
 
 def _reload_manifests() -> dict[str, Manifest]:

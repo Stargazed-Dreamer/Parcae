@@ -63,6 +63,6 @@ class EventBus:
                 # 订阅者异常不阻塞发布，但记录到 logging
                 import logging
 
-                logging.getLogger("localagent.session.events").exception(
+                logging.getLogger("parcae.session.events").exception(
                     "Session event subscriber failed: type=%s", event.type
                 )

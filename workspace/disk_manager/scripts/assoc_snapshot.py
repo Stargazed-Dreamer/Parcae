@@ -30,12 +30,15 @@ def _reg_export(key: str, dst: str, label: str) -> bool:
     恢复走 assoc_restore 的 reg add + reg delete（哈希无关）；此文件仅作取证/极端回退。
     """
     try:
+        # ⛔ reg.exe 输出是 GBK：text=True 会 UnicodeDecodeError
         r = subprocess.run(
             ["reg", "export", key, dst, "/y"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, timeout=120,
         )
+        err_bytes = r.stderr or b""
+        err = err_bytes.decode("gbk", "replace").strip()
         ok = r.returncode == 0
-        print(f"  [{'已快照' if ok else '失败'}] {label}" + ("" if ok else f": {r.stderr.strip()}"))
+        print(f"  [{'已快照' if ok else '失败'}] {label}" + ("" if ok else f": {err}"))
         return ok
     except Exception as e:  # noqa: BLE001
         print(f"  [失败] {label}: {e}")

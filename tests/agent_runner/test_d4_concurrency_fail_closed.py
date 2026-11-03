@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent.tool_registry import ToolEntry  # noqa: E402
+from lib.agent_runtime.tool_registry import ToolEntry  # noqa: E402
 
 
 class TestToolEntryDefaultConcurrencySafe:
@@ -54,7 +54,7 @@ class TestBuiltinToolsExplicitConcurrencySafe:
 
     def test_builtin_tools_are_concurrency_safe(self):
         """BuiltinToolExecutor 注册的工具应显式 is_concurrency_safe=True。"""
-        from client.core.agent.builtin_tool_executor import BuiltinToolExecutor
+        from lib.agent_runtime.builtin_tool_executor import BuiltinToolExecutor
 
         executor = BuiltinToolExecutor()
         entries = executor.list_tool_entries()

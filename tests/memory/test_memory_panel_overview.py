@@ -86,8 +86,8 @@ def _mock_healthy_status() -> dict:
             "last_run": "2099-01-01T00:00:00",  # 未来时间，永远新鲜
             "stale_threshold_days": 30,
             "interval_hours": 24,
-            "validate_enabled": True,
-            "status_counts": {"archive": 0, "keep": 100, "pending": 0},
+            "archived_total": 0,
+            "validator": "removed_2026-10-31",
             "stale_total": 0,
         },
         "db_size_history": [
@@ -107,8 +107,8 @@ def _mock_unhealthy_status() -> dict:
             "last_run": "2020-01-01T00:00:00",  # 维度 4 yellow（很久没运行）
             "stale_threshold_days": 30,
             "interval_hours": 24,
-            "validate_enabled": False,
-            "status_counts": {"archive": 50, "keep": 30, "pending": 20},
+            "archived_total": 50,
+            "validator": "removed_2026-10-31",
             "stale_total": 50,  # 维度 1 red（rate=0.5 > 0.2）
         },
         "db_size_history": [
@@ -147,16 +147,21 @@ class TestOverviewRendering:
         assert overview_page._concerns_container.count() == 5
 
     def test_maintainer_labels_chinese(self, overview_page):
-        """维护状态卡片 labels 应中文化（过时阈值 / 运行间隔 / 归档数 / 保留数 / 待处理数 / 过时总数）"""
+        """维护状态卡片 labels 应中文化（过时阈值 / 运行间隔 / 验证器 / 归档数 / 过时总数）
+
+        2026-10-31 验证器删除后，卡片不再显示「保留数 / 待处理数」（那两个数来自
+        `memory_meta.validation_status` 的冻结分布），改为显示 `archived_total`
+        与验证器状态，避免把历史标签读成当前状态。
+        """
         overview_page._on_status_done(_mock_healthy_status())
         text = overview_page._maintainer_label.text()
         assert "上次运行" in text
         assert "过时阈值" in text
         assert "运行间隔" in text
-        assert "LLM 验证" in text
+        assert "LLM 验证器" in text
         assert "归档数" in text
-        assert "保留数" in text
-        assert "待处理数" in text
+        assert "保留数" not in text
+        assert "待处理数" not in text
         assert "过时总数" in text
 
     def test_stale_total_red_highlight(self, overview_page):

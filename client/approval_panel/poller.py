@@ -12,7 +12,7 @@ import threading
 import requests
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from client.core.constants import SERVER_URL  # 8-9: 端口单一真源
+from client.core.constants import get_server_url  # 8-9: 端口单一真源（运行时解析，支持端口顺延）
 
 POLL_INTERVAL_MS = 2_000  # 2s
 POLL_TIMEOUT_S = 3.0
@@ -57,7 +57,7 @@ class Poller(QObject):
         def _do_poll() -> None:
             try:
                 resp = requests.get(
-                    f"{SERVER_URL}/approvals/pending",
+                    f"{get_server_url()}/approvals/pending",
                     timeout=POLL_TIMEOUT_S,
                 )
                 if resp.status_code != 200:

@@ -25,7 +25,7 @@ wip_list(status='completed')  # 默认轻量模式：已完结条目只给 id/�
 这里**只用于拿 id**——默认轻量模式下已完结条目的标题被截断（超 24 字加 `…`），不能靠它读内容。
 若没有 completed 的，告知用户无需归档并结束。
 
-> `wip_list` / `wip_get_many` 是直连 MCP 工具，免审批。`wip_delete` 走 `localagent_advanced_tool` 网关。
+> `wip_list` / `wip_get_many` 是直连 MCP 工具，免审批。`wip_delete` 走 `parcae_advanced_tool` 网关。
 
 ### step_2: 逐条提炼经验
 
@@ -71,7 +71,7 @@ memory_set(key="<拟用 key>", data={...结构化记忆...}, merge=true)
 写入记忆后，物理删除 WIP 记录：
 
 ```
-localagent_advanced_tool(tool="wip_delete", params={"task_id": "<id>"})
+parcae_advanced_tool(tool="wip_delete", params={"task_id": "<id>"})
 ```
 
 返回 `success=true, status_code=200` 即删除成功。
@@ -113,7 +113,7 @@ active ──暂停──> paused
 | 待办模块 | `wip_list(status='completed')`（MCP 直连，免审批） | 取已完结清单（默认轻量，标题截断，仅用于拿 id） |
 | 待办模块 | `wip_get_many`（MCP 直连，免审批） | 按 id 批量取回完整详情 |
 | 记忆模块 | `memory_set`（MCP 直连） | 写入结构化记忆 |
-| 待办模块 | `localagent_advanced_tool(wip_delete)`（网关，DELETE） | 物理删除 WIP 记录 |
+| 待办模块 | `parcae_advanced_tool(wip_delete)`（网关，DELETE） | 物理删除 WIP 记录 |
 
 ## 注意事项
 

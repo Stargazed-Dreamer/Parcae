@@ -16,12 +16,14 @@ from server.config import (
     get_vision_config,
 )
 
-logger = logging.getLogger("localagent.health")
+# 唯一权威来源是 server/version.py（main 显式传参覆盖此默认值）。
+# ⛔ 不要写 `from server.main import VERSION`：以 `-m server.main` 启动时
+# server.main 名为 __main__，该 import 会把整个入口模块（建 app/挂路由/挂 MCP）
+# 再执行一遍。历史注释说 health→main 会循环依赖，现在两者都指向 server.version，
+# 无循环。
+from server.version import VERSION
 
-# 回退默认值：唯一权威来源是 server/main.py 的 VERSION（main 显式传参覆盖此默认，
-# 且 health→main 导入会循环依赖，故此处仅保持同步 + 注明来源）
-VERSION = "0.53.0"
-
+logger = logging.getLogger("parcae.health")
 
 # ========== 模块错误注册表（last_error 追踪）==========
 
@@ -85,6 +87,7 @@ class HealthResponse(BaseSchema):
     auto_shutdown: dict = {}  # 自动关机端点状态（trigger_count 等）
     guard: dict = {}  # 审批闸门自身状态：开着还是关着 + 放行来源分布（T14）
     model_manager: dict = {}  # Model Lifecycle Manager 状态（design §10，低频枚举）
+    component_load: dict = {}  # 组件模块加载降级：{failed: n, components: [{component,module,kind,detail}]}
     last_errors: dict = {}  # 各模块最近一次错误（模块名 → {error, exc_type, timestamp}）
 
 
@@ -115,6 +118,10 @@ def _get_ocr_status() -> dict:
         "last_inference_ms": ocr_models._last_inference_ms,
         "inference_count": ocr_models._inference_count,
         "last_error": ocr_models._last_error,
+        # 空闲回收可见性：keep_models=False 时 GUI 显示"还有 N 秒卸载"倒计时
+        "idle_unload_sec": ocr_models.idle_unload_sec,
+        "idle_remaining_sec": ocr_models.idle_remaining_sec,
+        "last_active_at": ocr_models.last_used_at,
         # design §10 兼容委托：附加 ModelLifecycleManager 状态摘要
         "mlm_state": _get_model_manager_status(),
     }
@@ -466,9 +473,8 @@ def _get_component_health_status() -> dict[str, dict]:
     返回 {component_name: status_dict}，单个组件健康检查失败时
     返回 {"error": "..."}，不影响其他组件和整个 /health 端点。
     """
-    import importlib
-
-    from server.component_manifest import get_components_by_capability
+    from lib.component_loader import load_component_module
+    from server.component_manifest import _WORKSPACE_DIR, get_components_by_capability
 
     result = {}
     for m in get_components_by_capability("health_check"):
@@ -478,13 +484,42 @@ def _get_component_health_status() -> dict[str, dict]:
             # 动态导入组件的健康检查模块
             # manifest file 字段形如 "health.py"，去掉 .py 后缀作为模块名
             module_name = f"workspace.{m.name}.{m.health_check.file.replace('.py', '')}"
-            mod = importlib.import_module(module_name)
+            # probe=False：/health 是运行期调用，加载失败只落到 error 字段，
+            # 不在这里起子进程探测（启动期防护由 loop_manager / agent_guide 承担）
+            mod = load_component_module(
+                module_name,
+                component=m.name,
+                path=_WORKSPACE_DIR / m.name / m.health_check.file,
+                probe=False,
+            )
+            if mod is None:
+                failures = {f["module"]: f for f in _component_load_failures()}
+                detail = failures.get(module_name, {}).get("detail", "模块加载失败")
+                result[m.name] = {"error": detail}
+                continue
             func = getattr(mod, m.health_check.function, None)
             if func and callable(func):
                 result[m.name] = func()
         except Exception as e:
             result[m.name] = {"error": str(e)}
     return result
+
+
+def _component_load_failures() -> list[dict]:
+    """组件模块加载失败清单（供 /health 的 component_load 段）。"""
+    from lib.component_loader import get_failures
+
+    return get_failures()
+
+
+def _component_load_status() -> dict:
+    """组件模块加载降级摘要：failed=0 表示所有可选组件都正常加载。
+
+    这里是「外部组件是否拖累核心」的唯一观测点：failed>0 说明有组件被隔离，
+    后端仍在运行，但对应的 skill / loop 不可用，原因见 components 明细。
+    """
+    failures = _component_load_failures()
+    return {"failed": len(failures), "components": failures}
 
 
 def _get_docviewer_status() -> dict:
@@ -785,6 +820,7 @@ def register_health_routes(app: FastAPI, version: str = VERSION):
             auto_shutdown=_get_auto_shutdown_status(),
             guard=_get_guard_status(),
             model_manager=_get_model_manager_status(),
+            component_load=_component_load_status(),
             last_errors=get_module_errors(),
         )
 

@@ -51,13 +51,25 @@ def _strip_quotes(s: str) -> str:
     return s
 
 
+def _is_meta_skill(fm: dict | None) -> bool:
+    """元 skill 判定：frontmatter 标 `meta_skill: true`。
+
+    元 skill = 跨 skill 的决策层/方法论层（如 web_access 联网决策表），被其他任务按需引用，
+    **设计上不对应单独 task_type**（2026-09-14 起即是既定状态）。标了这个字段就不再要求
+    task_type；未标且缺 task_type 仍按原样报警告，避免把「漏写」混成「元 skill」。
+    """
+    if not fm:
+        return False
+    return str(fm.get("meta_skill", "")).strip().lower() in ("true", "1", "yes")
+
+
 def parse_frontmatter(content: str) -> dict | None:
     """解析 YAML frontmatter（轻量级，不依赖 PyYAML）。
 
     返回 dict（可能为空）或 None（无 frontmatter）。
-    只提取 name、description、task_type 三个字段，description 支持多行（> 或 |）。
-    容忍文件开头多个 UTF-8 BOM（\ufeff，某些历史文件有重复 BOM）。
-    单行值会去除首尾引号。
+    收集所有 `key: value` 字段（name/description/task_type/meta_skill 是校验用到的那些），
+    description 支持多行（> 或 |）。容忍文件开头多个 UTF-8 BOM（\ufeff，某些历史文件有重复 BOM）。
+    单行值会去除首尾引号；整行 `#` 注释跳过（行尾注释不剥）。
     """
     m = _FRONTMATTER_RE.match(content)
     if not m:
@@ -147,6 +159,7 @@ def scan_skill_files() -> list[dict]:
             "has_name": bool(fm and fm.get("name")),
             "has_description": bool(fm and fm.get("description")),
             "has_task_type": bool(fm and fm.get("task_type")),
+            "is_meta": _is_meta_skill(fm),
         })
     return skills
 
@@ -303,6 +316,7 @@ def check_all() -> dict:
 
     errors: list[str] = []
     warnings: list[str] = []
+    meta_skills: list[str] = []
 
     # 1. 核心 skill frontmatter 完整性
     for s in skills:
@@ -313,7 +327,11 @@ def check_all() -> dict:
         elif not s["has_description"]:
             warnings.append(f"frontmatter 缺 description: {s['rel_path']}")
         elif not s["has_task_type"]:
-            warnings.append(f"frontmatter 缺 task_type: {s['rel_path']}")
+            if s["is_meta"]:
+                # 元 skill（frontmatter 标 meta_skill: true）设计上无 task_type ⇒ 记信息，不告警
+                meta_skills.append(s["rel_path"])
+            else:
+                warnings.append(f"frontmatter 缺 task_type: {s['rel_path']}")
 
     # 2. 核心 skill task_type 唯一性
     tt_to_files: dict[str, list[str]] = {}
@@ -370,11 +388,13 @@ def check_all() -> dict:
             "component_skill_files": len(component_skills),
             "index_entries": len(index),
             "registry_entries": len(registry),
+            "meta_skills": len(meta_skills),
             "errors": len(errors),
             "warnings": len(warnings),
         },
         "errors": errors,
         "warnings": warnings,
+        "meta_skills": meta_skills,
     }
 
 
@@ -394,6 +414,7 @@ def main():
         print(f"  组件化 skill 文件:      {s['component_skill_files']}")
         print(f"  _index.md 核心段条目:   {s['index_entries']}")
         print(f"  GUIDE_REGISTRY 源文件条目: {s['registry_entries']}")
+        print(f"  元 skill（无 task_type，设计如此）: {s['meta_skills']}")
         print(f"  错误: {s['errors']}")
         print(f"  警告: {s['warnings']}")
         print()
@@ -406,6 +427,11 @@ def main():
             print("=== 警告 ===")
             for w in report["warnings"]:
                 print(f"  [W] {w}")
+            print()
+        if report["meta_skills"]:
+            print("=== 元 skill（frontmatter 标 meta_skill: true，不要求 task_type）===")
+            for p in report["meta_skills"]:
+                print(f"  [M] {p}")
             print()
         if s["errors"] == 0 and s["warnings"] == 0:
             print("✓ 全部通过")

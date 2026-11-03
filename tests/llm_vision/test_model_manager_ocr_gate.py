@@ -245,6 +245,9 @@ class TestEnhancedUnload:
         m, _, _ = _make_manager(monkeypatch)
         recorder = []
         monkeypatch.setitem(sys.modules, "paddle", _fake_paddle_module(cuda=True, recorder=recorder))
+        # 2026-10-24 起 CPU 路径有意短路（device=cpu 碰 CUDA 会白涨显存），释放只在设备决策为
+        # gpu 时发生 ⇒ 必须显式置 gpu，否则本机 OCR 走 CPU 时该分支恒不触发、测试假红。
+        monkeypatch.setattr(m, "_active_device", "gpu")
         m._release_paddle_cache(forced=False)
         assert recorder == ["empty_cache"]
 
@@ -276,7 +279,8 @@ class TestOcrDriver:
         from server.model_manager.drivers import OcrDriver
         d = OcrDriver()
         assert d.model_id == "ocr"
-        assert d.resource == "gpu"
+        # resource 是跟随 OCR 实际设备的动态属性（本机决策为 cpu 时即 "cpu"），不按静态值断言
+        assert d.resource in ("gpu", "cpu")
         assert d.evictable is True
         assert d.priority > 0
         assert d.footprint_mb > 0

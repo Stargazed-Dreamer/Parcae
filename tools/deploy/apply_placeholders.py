@@ -12,14 +12,14 @@ apply_placeholders.py - 占位符自动替换脚本
 
     命令行（必填通过参数提供）：
         python tools/deploy/apply_placeholders.py <export_dir> ^
-            --project-root D:\\code\\localAgent ^
+            --project-root D:\\code\\Parcae ^
             --username your_name ^
             --data-drive D ^
             [--dry-run] [--skip-optional]
 
     预演模式（只输出将修改的文件清单和替换次数，不实际写入）：
         python tools/deploy/apply_placeholders.py <export_dir> --dry-run ^
-            --project-root D:\\code\\localAgent --username your_name --data-drive D
+            --project-root D:\\code\\Parcae --username your_name --data-drive D
 
 注意：
     <data_drive> 应传盘符字母（如 D），不要带冒号。导出包中占位符已含冒号
@@ -50,7 +50,7 @@ PLACEHOLDERS = [
     {"placeholder": "<username>", "required": True,
      "prompt": "本地 Windows 用户名 (例: your_name)"},
     {"placeholder": "<project_root>", "required": True,
-     "prompt": "LocalAgent 项目根目录的绝对路径 (例: D:\\code\\localAgent)"},
+     "prompt": "Parcae 项目根目录的绝对路径 (例: D:\\code\\Parcae)"},
     {"placeholder": "<data_drive>", "required": True,
      "prompt": "数据盘盘符字母 (例: D，不要带冒号)"},
     # 可选占位符
@@ -102,6 +102,27 @@ PLACEHOLDERS = [
      "prompt": "虚拟机存放目录 (例: Virtual Machines)"},
     {"placeholder": "<copyright_holder>", "required": False,
      "prompt": "版权持有人名称 (例: Your-Name)"},
+    # 2026-11-03：`path_mapping` 新增的 8 个目标占位符。缺了它们，部署者按提示
+    # 跑完 `apply_placeholders.py` 后这些路径仍留在占位符状态（test_apply_placeholders_sync
+    # 专门拦这条：脚本认不出的占位符 = 部署后无法落地）。
+    {"placeholder": "<sandbox_root>", "required": False,
+     "prompt": "沙箱/虚拟机内的用户目录 (例: Sandbox\\your_name)"},
+    {"placeholder": "<apps_root_x86>", "required": False,
+     "prompt": "32 位应用安装根目录 (例: System_Programes_x86)"},
+    {"placeholder": "<green_apps_root>", "required": False,
+     "prompt": "绿色/便携软件目录 (例: GreenSoftware_Workspace)"},
+    {"placeholder": "<course_library>", "required": False,
+     "prompt": "课程资料库目录 (例: 课程库)"},
+    {"placeholder": "<media_staging>", "required": False,
+     "prompt": "媒体待整理暂存目录 (例: 未整理)"},
+    {"placeholder": "<media_inbox>", "required": False,
+     "prompt": "媒体下载收件目录 (例: 未下载)"},
+    {"placeholder": "<game_library_root>", "required": False,
+     "prompt": "游戏库根目录（Steam 等，其下为 steamapps）(例: Steam)"},
+    {"placeholder": "<emulator_root>", "required": False,
+     "prompt": "安卓模拟器安装目录 (例: YXArkNights-12.0)"},
+    {"placeholder": "<phone_sync_root>", "required": False,
+     "prompt": "手机同步目录 (例: .phone)"},
 ]
 
 # 只处理这些扩展名的文本文件
@@ -274,10 +295,10 @@ def main():
         "    python apply_placeholders.py <export_dir>\n"
         "  命令行:\n"
         "    python apply_placeholders.py <export_dir> "
-        "--project-root D:/code/localAgent --username your_name --data-drive D\n"
+        "--project-root D:/code/Parcae --username your_name --data-drive D\n"
         "  预演模式:\n"
         "    python apply_placeholders.py <export_dir> --dry-run "
-        "--project-root D:/code/localAgent --username your_name --data-drive D\n"
+        "--project-root D:/code/Parcae --username your_name --data-drive D\n"
         "\n"
         "注意：--project-root 可用单反斜杠（D:\\code）、双反斜杠（D:\\\\code）或正斜杠\n"
         "（D:/code），脚本会自动规范化为正斜杠，避免 TOML 转义问题。\n"

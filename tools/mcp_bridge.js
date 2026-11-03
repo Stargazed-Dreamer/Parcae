@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * ChatGPT MCP Bridge
- * 将 ChatGPT 的 STDIO 协议桥接到 LocalAgent 的 Streamable HTTP MCP 端点。
+ * 将 ChatGPT 的 STDIO 协议桥接到 Parcae 的 Streamable HTTP MCP 端点。
  *
  * 背景：ChatGPT 桌面客户端的"流式 HTTP"类型强制要求 OAuth 流程，
  * 本地 MCP 服务无法满足。本脚本通过 mcp-remote 将 STDIO 翻译为
@@ -14,7 +14,7 @@
  *   工作目录：项目根目录（<project_root>）
  *
  * 环境变量：
- *   LOCALAGENT_MCP_URL  自定义 MCP 端点（默认 http://127.0.0.1:8766/mcp）
+ *   PARCAE_MCP_URL  自定义 MCP 端点（默认 http://127.0.0.1:8766/mcp）
  *
  * 原有的 Trae/CatPaw 流式 HTTP 直连配置不受影响。
  */
@@ -22,7 +22,7 @@ const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const MCP_HTTP_URL = process.env.LOCALAGENT_MCP_URL || 'http://127.0.0.1:8766/mcp';
+const MCP_HTTP_URL = process.env.PARCAE_MCP_URL || 'http://127.0.0.1:8766/mcp';
 
 // 候选 mcp-remote 安装路径（按优先级尝试）
 function resolveProxyJs() {

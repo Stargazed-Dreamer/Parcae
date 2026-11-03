@@ -91,7 +91,8 @@ class SemanticSearch:
 
     def search(self, query: str, top_k: int = 10,
                since: float | None = None, until: float | None = None,
-               source: str | None = None) -> list[dict]:
+               source: str | None = None,
+               exclude_sources: set[str] | None = None) -> list[dict]:
         """混合语义搜索
 
         Args:
@@ -100,6 +101,8 @@ class SemanticSearch:
             since: 起始时间戳
             until: 结束时间戳
             source: 消息来源过滤
+            exclude_sources: 检索前排除的消息来源（如 {"tool"}）。由调用方决定策略，
+                检索层只负责在 BM25/向量取候选前生效。
 
         Returns:
             [{"message_id", "score", "content", "timestamp", "source"}, ...]
@@ -111,6 +114,7 @@ class SemanticSearch:
                 query=query,
                 params={
                     "top_k": top_k, "since": since, "until": until, "source": source,
+                    "exclude_sources": sorted(exclude_sources) if exclude_sources else None,
                 },
             )
         # 暴露给 EvidenceLedger 关联（单线程安全）
@@ -118,10 +122,14 @@ class SemanticSearch:
 
         try:
             if self.embedding.ready and self.alpha > 0:
-                results = self._hybrid_search(query, top_k, since, until, source, trace_id)
+                results = self._hybrid_search(
+                    query, top_k, since, until, source, trace_id, exclude_sources
+                )
                 mode = "hybrid"
             else:
-                results = self._bm25_search(query, top_k, since, until, source, trace_id)
+                results = self._bm25_search(
+                    query, top_k, since, until, source, trace_id, exclude_sources
+                )
                 mode = "bm25_only"
 
             if self.tracer and trace_id:
@@ -135,11 +143,14 @@ class SemanticSearch:
     def _hybrid_search(self, query: str, top_k: int,
                        since: float | None, until: float | None,
                        source: str | None,
-                       trace_id: int | None = None) -> list[dict]:
+                       trace_id: int | None = None,
+                       exclude_sources: set[str] | None = None) -> list[dict]:
         """向量 + BM25 混合搜索"""
-        # BM25 检索
+        # BM25 检索（排除来源在 SQL 侧生效，避免先占满 top_k）
         t0 = time.perf_counter()
-        bm25_results = self.bm25.search(query, self.bm25_top_k)
+        bm25_results = self.bm25.search(
+            query, self.bm25_top_k, exclude_sources=exclude_sources
+        )
         bm25_latency = int((time.perf_counter() - t0) * 1000)
         if self.tracer and trace_id:
             self.tracer.record_subsearch(trace_id, "bm25", bm25_results, bm25_latency)
@@ -147,7 +158,9 @@ class SemanticSearch:
 
         # 向量检索
         t0 = time.perf_counter()
-        vector_results = self._vector_search(query, self.vector_top_k)
+        vector_results = self._vector_search(
+            query, self.vector_top_k, exclude_sources=exclude_sources
+        )
         vec_latency = int((time.perf_counter() - t0) * 1000)
         if self.tracer and trace_id:
             self.tracer.record_subsearch(trace_id, "vector", vector_results, vec_latency)
@@ -214,7 +227,8 @@ class SemanticSearch:
             self.tracer.record_fusion(trace_id, combined)
         return combined[:top_k]
 
-    def _vector_search(self, query: str, top_k: int) -> list[dict]:
+    def _vector_search(self, query: str, top_k: int,
+                       exclude_sources: set[str] | None = None) -> list[dict]:
         """向量相似度搜索"""
         if not self.embedding.ready:
             return []
@@ -229,6 +243,8 @@ class SemanticSearch:
         # 计算余弦相似度
         scores = []
         for row in rows:
+            if exclude_sources and row.get("source") in exclude_sources:
+                continue
             vec = self.embedding.blob_to_vector(row["vector"])
             if len(vec) != len(query_vec):
                 continue
@@ -246,10 +262,13 @@ class SemanticSearch:
     def _bm25_search(self, query: str, top_k: int,
                      since: float | None, until: float | None,
                      source: str | None,
-                     trace_id: int | None = None) -> list[dict]:
+                     trace_id: int | None = None,
+                     exclude_sources: set[str] | None = None) -> list[dict]:
         """BM25-only 搜索（降级模式）"""
         t0 = time.perf_counter()
-        results = self.bm25.search(query, top_k * 2)  # 多取一些再过滤
+        results = self.bm25.search(
+            query, top_k * 2, exclude_sources=exclude_sources
+        )  # 多取一些再过滤
         bm25_latency = int((time.perf_counter() - t0) * 1000)
         if self.tracer and trace_id:
             self.tracer.record_subsearch(trace_id, "bm25", results, bm25_latency)

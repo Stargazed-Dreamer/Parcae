@@ -34,7 +34,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
+from lib.agent_runtime import (  # noqa: E402
     EventStore,
     MockLLM,
     MockToolExecutor,
@@ -42,7 +42,7 @@ from client.core.agent import (  # noqa: E402
     RunnerDeps,
     SessionFacade,
 )
-from client.core.agent.types import LLMResponse  # noqa: E402
+from lib.agent_runtime.types import LLMResponse  # noqa: E402
 
 # ============================================================================
 # Helpers
@@ -248,8 +248,11 @@ class TestFacadeInterrupt:
         finally:
             store.close()
 
-    def test_interrupt_without_runner_is_noop(self, tmp_path):
-        """facade.interrupt 在 start 之前调用 → no-op（runner 未创建）。"""
+    def test_interrupt_before_runner_sets_event_for_loop_start(self, tmp_path):
+        """facade.interrupt 在 start 之前调用 → 仍 set event，runner 启动后主循环顶部看到。
+
+        T5 修掉"submit 后立即 interrupt 被静默丢弃"的竞态后，提前中断不再 no-op。
+        """
         store = _new_store(tmp_path)
         try:
             interrupt_ev = asyncio.Event()
@@ -259,7 +262,7 @@ class TestFacadeInterrupt:
             )
             # 不调 start，直接 interrupt
             _run(facade.interrupt("s-int-noop"))
-            assert not interrupt_ev.is_set()  # 未触发
+            assert interrupt_ev.is_set()  # T5: 提前中断留给 runner 启动时消费
         finally:
             store.close()
 

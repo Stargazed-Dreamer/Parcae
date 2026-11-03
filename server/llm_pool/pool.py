@@ -19,7 +19,7 @@ from server.llm_pool.stats import _resolve_default_stats_file
 # v12: USE_CASE_REGISTRY 从 types.py 导入（原从 key_store.py lazy import，引发循环依赖）
 from server.llm_pool.types import USE_CASE_REGISTRY, CallRecord, KeyStats, LLMKey, ProviderPolicy, _infer_is_free
 
-logger = logging.getLogger("localagent.llm_pool")
+logger = logging.getLogger("parcae.llm_pool")
 
 # 近期调用历史的最大保留条数（环形缓冲）
 RECENT_CALL_HISTORY_MAX = 200

@@ -125,9 +125,9 @@ USE_CASE_REGISTRY: dict[str, UseCaseDef] = {
     "agent_chat":          UseCaseDef("agent_chat",          "llm", False, (3, 5), "Agent 对话/评分端点"),
     "community_summarize": UseCaseDef("community_summarize", "llm", False, (3, 5), "社群帖子批量总结"),
     # v15：memory_compress / memory_validate 统一 tier (2,4)，retries=1（调用方传入）
-    # 废弃 memory_maintainer use_case，拆分为 memory_validate（验证单条记忆 facts）
+    # 2026-10-31：memory_validate 已随 LLM 验证器一起删除（用户 D7），
+    # 记忆维护器现在零 LLM 调用；memory_compress 仍在使用。
     "memory_compress":   UseCaseDef("memory_compress",   "llm", True,  (2, 4), "记忆压缩（处理个人对话历史）"),
-    "memory_validate":   UseCaseDef("memory_validate",   "llm", True,  (2, 4), "记忆验证（处理个人记忆 facts）"),
     "hourly_summarize":    UseCaseDef("hourly_summarize",    "llm", False, (3, 5), "每小时活动总结（tier 放宽到 3-5，让 deepseek-v4-flash-free 作为 tier 4-5 quota 耗尽时的 fallback）"),
     "download_watcher":   UseCaseDef("download_watcher",   "llm", True,  (4, 5), "下载文件分类（含文件内容，敏感）"),
     "command_guard":      UseCaseDef("command_guard",      "llm", False, (3, 5), "命令审批 LLM 预审"),

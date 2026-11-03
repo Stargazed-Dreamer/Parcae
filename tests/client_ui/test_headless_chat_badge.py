@@ -120,6 +120,12 @@ class TestBadgeRendering:
             assert "[后端]" in text, f"headless 会话应含 [后端] badge，实际: {text!r}"
             assert "测试后端任务" in text
         finally:
+            # 2026-10-24：_switch_session 会 _start_event_stream，起一个以 panel 为 parent 的
+            # _RuntimeEventStream(QThread)。不先停线程就 deleteLater ⇒ reaper 收割时 C++ 父对象
+            # 先销毁、QThread 仍在跑 ⇒ Qt qFatal「QThread: Destroyed while thread is still running」
+            # → 0xC0000409 进程崩溃（合跑必崩在 83% 的那条；单跑该条同样必崩）。
+            # 与生产 closeEvent 同路径：先 detach（停流 + 停 worker）再销毁。无流时是 no-op。
+            panel.detach_active_session()
             panel.deleteLater()
             qapp.processEvents()
 
@@ -141,6 +147,12 @@ class TestBadgeRendering:
             assert "[判定]" in text, f"headless_judge 会话应含 [判定] badge，实际: {text!r}"
             assert "判定任务" in text
         finally:
+            # 2026-10-24：_switch_session 会 _start_event_stream，起一个以 panel 为 parent 的
+            # _RuntimeEventStream(QThread)。不先停线程就 deleteLater ⇒ reaper 收割时 C++ 父对象
+            # 先销毁、QThread 仍在跑 ⇒ Qt qFatal「QThread: Destroyed while thread is still running」
+            # → 0xC0000409 进程崩溃（合跑必崩在 83% 的那条；单跑该条同样必崩）。
+            # 与生产 closeEvent 同路径：先 detach（停流 + 停 worker）再销毁。无流时是 no-op。
+            panel.detach_active_session()
             panel.deleteLater()
             qapp.processEvents()
 
@@ -163,6 +175,12 @@ class TestBadgeRendering:
             assert "[判定]" not in text, f"dialogue 会话不应有 [判定] badge: {text!r}"
             assert "普通对话" in text
         finally:
+            # 2026-10-24：_switch_session 会 _start_event_stream，起一个以 panel 为 parent 的
+            # _RuntimeEventStream(QThread)。不先停线程就 deleteLater ⇒ reaper 收割时 C++ 父对象
+            # 先销毁、QThread 仍在跑 ⇒ Qt qFatal「QThread: Destroyed while thread is still running」
+            # → 0xC0000409 进程崩溃（合跑必崩在 83% 的那条；单跑该条同样必崩）。
+            # 与生产 closeEvent 同路径：先 detach（停流 + 停 worker）再销毁。无流时是 no-op。
+            panel.detach_active_session()
             panel.deleteLater()
             qapp.processEvents()
 
@@ -195,6 +213,12 @@ class TestBadgeRendering:
             assert "[后端]" not in texts_by_id["sess-1"]
             assert "[判定]" not in texts_by_id["sess-1"]
         finally:
+            # 2026-10-24：_switch_session 会 _start_event_stream，起一个以 panel 为 parent 的
+            # _RuntimeEventStream(QThread)。不先停线程就 deleteLater ⇒ reaper 收割时 C++ 父对象
+            # 先销毁、QThread 仍在跑 ⇒ Qt qFatal「QThread: Destroyed while thread is still running」
+            # → 0xC0000409 进程崩溃（合跑必崩在 83% 的那条；单跑该条同样必崩）。
+            # 与生产 closeEvent 同路径：先 detach（停流 + 停 worker）再销毁。无流时是 no-op。
+            panel.detach_active_session()
             panel.deleteLater()
             qapp.processEvents()
 
@@ -217,6 +241,12 @@ class TestBadgeRendering:
             assert "[判定]" not in text
             assert "旧会话" in text
         finally:
+            # 2026-10-24：_switch_session 会 _start_event_stream，起一个以 panel 为 parent 的
+            # _RuntimeEventStream(QThread)。不先停线程就 deleteLater ⇒ reaper 收割时 C++ 父对象
+            # 先销毁、QThread 仍在跑 ⇒ Qt qFatal「QThread: Destroyed while thread is still running」
+            # → 0xC0000409 进程崩溃（合跑必崩在 83% 的那条；单跑该条同样必崩）。
+            # 与生产 closeEvent 同路径：先 detach（停流 + 停 worker）再销毁。无流时是 no-op。
+            panel.detach_active_session()
             panel.deleteLater()
             qapp.processEvents()
 
@@ -261,6 +291,12 @@ class TestBadgeRendering:
             assert not text_a.startswith("[后端]") and not text_a.startswith("[判定]")
             assert not text_b.startswith("[后端]") and not text_b.startswith("[判定]")
         finally:
+            # 2026-10-24：_switch_session 会 _start_event_stream，起一个以 panel 为 parent 的
+            # _RuntimeEventStream(QThread)。不先停线程就 deleteLater ⇒ reaper 收割时 C++ 父对象
+            # 先销毁、QThread 仍在跑 ⇒ Qt qFatal「QThread: Destroyed while thread is still running」
+            # → 0xC0000409 进程崩溃（合跑必崩在 83% 的那条；单跑该条同样必崩）。
+            # 与生产 closeEvent 同路径：先 detach（停流 + 停 worker）再销毁。无流时是 no-op。
+            panel.detach_active_session()
             panel.deleteLater()
             qapp.processEvents()
 
@@ -304,6 +340,12 @@ class TestHeadlessSessionSwitch:
             # 验证 _poll_session_state 被调用（触发历史记录加载）
             assert panel._poll_session_state.called
         finally:
+            # 2026-10-24：_switch_session 会 _start_event_stream，起一个以 panel 为 parent 的
+            # _RuntimeEventStream(QThread)。不先停线程就 deleteLater ⇒ reaper 收割时 C++ 父对象
+            # 先销毁、QThread 仍在跑 ⇒ Qt qFatal「QThread: Destroyed while thread is still running」
+            # → 0xC0000409 进程崩溃（合跑必崩在 83% 的那条；单跑该条同样必崩）。
+            # 与生产 closeEvent 同路径：先 detach（停流 + 停 worker）再销毁。无流时是 no-op。
+            panel.detach_active_session()
             panel.deleteLater()
             qapp.processEvents()
 

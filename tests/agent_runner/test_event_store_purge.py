@@ -23,7 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pytest  # noqa: E402
 
-from client.core.agent import EventStore  # noqa: E402
+from lib.agent_runtime import EventStore  # noqa: E402
 
 
 def _run(coro):

@@ -10,15 +10,33 @@ Windows 10/11 一个后缀的默认程序由三层决定（优先级从高到低
 
 UserChoice 的 Hash 绑定「SID+后缀+ProgID+时间+开机密钥」，普通 reg import 导回旧值会被
 Windows 判哈希失败而忽略——所以本模块把「采集/对比」和「恢复」分开设计，恢复层见 assoc_restore。
+
+★ 2026-10-11~10-14 实证补充（详见 settings_watch/FILE_ASSOCIATION.md）：
+  - ⛔ 旧说「『设经典层 + 删 UserChoice』对文档类后缀有效、对音视频/图像无效」**已作废**
+    （2026-10-12 单变量实验更正，见 FILE_ASSOCIATION.md §9.1）：修完会不会弹「你要如何打开这个文件?」
+    与"是不是文档类"**无关**，只取决于有没有踩这两个条件——
+      ① 声明冲突：`HKCU\Software\Classes\<ext>` 与 `HKLM\Software\Classes\<ext>` 都存在且值不同
+         （⛔ 还须 HKLM 侧能解析出 `shell\open\command`，否则冲突不成立、照样不弹）；
+      ② 多程序歧义：`HKCU\...\Explorer\FileExts\<ext>\OpenWithProgids` 含指向**另一个 exe** 的 ProgID。
+    两条任一成立就弹，都不成立就不弹（与 ProgID 写法无关）。当年音视频/图像那批失败，是因为脚本
+    顺手往 OWP 里塞了异项、踩中 ②，不是因为类别竞争。
+  - ★ **修复正路 = 走路 ①（官方路）**：双击该类型文件 → 选应用 → 勾「始终使用」→ 确定，
+    Windows 自写带 Hash 的 UserChoice，立即生效且不动经典层 / 不动 OWP（副作用≈0）。
+    ⛔ 别走"删 HKCU 经典层值 + 清 OWP"的注册表批量路——治 ① 只能二选一，会把生效程序换成 HKLM 那个。
+  - 所以这里补了一组判定原语：effective_app()（看真正生效的是谁）、perceived_type()（判有无
+    类别竞争）、delete_userchoice_key()（winreg 删键，reg.exe 会被 ACL 拒）、progid_alive()
+    （目标程序还在不在）。恢复层用它们决定「能修 / 该引导 / 该跳过」，不再制造假成功。
 """
 
 from __future__ import annotations
 
 import os
 import re
+import ctypes
 import json
 import subprocess
 import winreg
+from ctypes import wintypes
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime
@@ -246,9 +264,10 @@ def build_inventory() -> dict[str, Any]:
 def _current_sid() -> str:
     try:
         out = subprocess.run(
-            ["whoami", "/user"], capture_output=True, text=True, timeout=8
+            ["whoami", "/user"], capture_output=True, timeout=8
         )
-        for line in out.stdout.splitlines():
+        # 同上：本机 exe 中文输出不能用 text=True 兜
+        for line in (out.stdout or b"").decode("gbk", "replace").splitlines():
             if line.strip().upper().startswith("SID"):
                 return line.split(":", 1)[1].strip()
     except Exception:
@@ -321,3 +340,143 @@ def diff_inventories(base: dict[str, Any], cur: dict[str, Any]) -> list[dict[str
         elif rb.get("effective_progid") != rc.get("effective_progid"):
             changes.append({"ext": ext, "kind": "changed", "before": rb, "after": rc})
     return changes
+
+
+# ==================== 以下为 2026-10-11 实证改造新增 ====================
+# 全部只读或「只在明确调用时才写」，采集链路不会触发任何写入。
+
+ASSOCSTR_COMMAND = 1
+ASSOCSTR_EXECUTABLE = 2
+ASSOCSTR_FRIENDLYAPPNAME = 4
+# 实测校准（2026-10-11）：22 = APPPUBLISHER（发行者名），曾经被我误当成「默认 ProgID」
+ASSOCSTR_PROGID = 20
+ASSOCSTR_APPPUBLISHER = 22
+
+_shlwapi = ctypes.WinDLL("shlwapi", use_last_error=True)
+_shlwapi.AssocQueryStringW.restype = ctypes.c_long  # 用 c_long，失败 HRESULT 不被 ctypes 当异常
+_shlwapi.AssocQueryStringW.argtypes = [
+    wintypes.DWORD, ctypes.c_int, wintypes.LPCWSTR, wintypes.LPCWSTR,
+    wintypes.LPWSTR, ctypes.POINTER(ctypes.c_ulong),
+]
+_shlwapi.AssocGetPerceivedType.restype = ctypes.c_long
+_shlwapi.AssocGetPerceivedType.argtypes = [
+    wintypes.LPCWSTR,                  # pszExt
+    ctypes.POINTER(ctypes.c_int),      # pType
+    ctypes.POINTER(ctypes.c_int),      # pFlag
+    ctypes.POINTER(wintypes.LPWSTR),   # ppszType（传 None）
+]
+
+# AssocGetPerceivedType 的 PERCEIVED 枚举（节选）
+# PERCEIVED 枚举（实测校准：.txt=1 / .mp4=4 / .docx=6 / .jpg=2，起点是负数）
+_PERCEIVED = {
+    -3: "custom", -2: "unspecified", -1: "folder", 0: "unknown", 1: "text", 2: "image",
+    3: "audio", 4: "video", 5: "compressed", 6: "document", 7: "system",
+    8: "application", 9: "gamemedia", 10: "contacts",
+}
+# ★ 有「类别默认 AppX」竞争的三类：UserChoice 一空就会被 电影和电视/媒体播放器/照片 补位
+CONTENDED_PERCEIVED = {"video", "audio", "image"}
+
+
+def assoc_query(what: int, ext: str) -> str:
+    """Windows 官方判定：这条后缀真正会用什么打开。
+    assoc 命令和 winreg 读出来的层可能与 Explorer 实际用的不一致，以这个为准。"""
+    buf = ctypes.create_unicode_buffer(1024)
+    n = ctypes.c_ulong(1024)
+    hr = _shlwapi.AssocQueryStringW(0, what, ext, None, buf, ctypes.byref(n))
+    return buf.value.strip() if hr == 0 else ""
+
+
+def effective_app(ext: str) -> dict[str, Optional[str] | bool]:
+    """返回该后缀当前真正生效的程序（Explorer 双击用的判定）。"""
+    friendly = assoc_query(ASSOCSTR_FRIENDLYAPPNAME, ext)
+    exe = assoc_query(ASSOCSTR_EXECUTABLE, ext)
+    return {
+        "progid": assoc_query(ASSOCSTR_PROGID, ext) or None,
+        "exe": exe or None,
+        "friendly": friendly or None,
+        # ⛔ 别用「exe 是否为空」判会不会弹窗：AppX（照片等）查不到 exe 是正常的，
+        #    照那个判会把「有默认应用」全误报成「会弹选取应用」（2026-10-11 实测 .jpg/.png 全中）。
+        #    正确判据：友好名 == 选取应用，或 exe == OpenWith.exe
+        "prompts": friendly.startswith("选取应用")
+        or (bool(exe) and exe.lower().endswith("openwith.exe")),
+    }
+
+
+def perceived_type(ext: str) -> str:
+    """Windows 自己认为这条后缀属于什么类别（用于预判有无 AppX 补位竞争）。"""
+    pt = ctypes.c_int(0)
+    flag = ctypes.c_int(0)
+    hr = _shlwapi.AssocGetPerceivedType(ext, ctypes.byref(pt), ctypes.byref(flag), None)
+    if hr != 0:
+        return "unknown"
+    return _PERCEIVED.get(pt.value, f"code{pt.value}")
+
+
+def is_contended(ext: str) -> bool:
+    """True = 删掉 UserChoice 后会被系统用 AppX 接管，注册表手段修不了，只能让目标程序自己关联。"""
+    return perceived_type(ext) in CONTENDED_PERCEIVED
+
+
+def progid_alive(progid: str) -> tuple[bool, str]:
+    """目标 ProgID 还能不能真的打开东西（避开「程序早就没了」的白修）。"""
+    if not progid:
+        return False, "无目标 ProgID"
+    info = resolve_command(progid)
+    exe = info.get("exe")
+    if not exe:
+        return True, ""  # 浏览器类/AppX 类反查不到 exe，不算失效
+    exe_clean = exe.replace('"', "").strip()
+    for cand in (exe_clean, _expand(exe_clean)):
+        if cand and os.path.exists(cand):
+            return True, ""
+    return False, f"目标程序已不存在: {exe_clean}"
+
+
+def delete_userchoice_key(ext: str) -> tuple[bool, str]:
+    """删除 UserChoice。
+
+    ⛔ 两条都不能用：
+      1. reg.exe —— 这些键的 ACL 会直接「拒绝访问」（2026-10-07 实测 103 个删不掉）。
+      2. winreg 以 KEY_ALL_ACCESS 打开 —— Windows 给自己写的 UserChoice 加了一条
+         `Deny <user> SetValue`，而 KEY_ALL_ACCESS 的权限集**含 SET_VALUE** ⇒ 整个
+         OpenKey 就被拒（WinError 5），压根轮不到删（2026-10-11 在 .db 上实测到）。
+    ✅ 正确做法：该 DENY **只挡「写值」，不挡「删除」**（FullControl 里 DELETE 仍在）。
+       所以以 KEY_READ 判存在即可，再用 winreg.DeleteKey 直接删掉——DeleteKey 只需
+       DELETE 权限。实测掩码证据：KEY_ALL_ACCESS 失败；KEY_READ / READ|DELETE / DELETE
+       单独 均打开成功（见 temp/assoc_loss_probe_20261007/probe26_mask.py）。
+    """
+    parent = FILEEXTS_SUBKEY + "\\" + ext
+    sub = parent + "\\UserChoice"
+    try:
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, parent, 0, winreg.KEY_READ)
+        winreg.CloseKey(k)
+    except OSError:
+        return True, "后缀不存在，无需删除"
+    try:
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, sub, 0, winreg.KEY_READ)
+        winreg.CloseKey(k)
+    except FileNotFoundError:
+        return True, "UserChoice 本就不存在"
+    except OSError as e:
+        return False, f"读取失败: {e}"
+    try:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, sub)
+        return True, "已删除"
+    except FileNotFoundError:
+        return True, "UserChoice 本就不存在"
+    except PermissionError as e:
+        return False, f"删除仍被拒（DELETE 权限被剥夺）: {e}"
+    except OSError as e:
+        return False, f"删除失败: {e}"
+
+
+def run_reg_gbk(*args: str, timeout: int = 20) -> tuple[int, str]:
+    """⛔ reg.exe 输出是 GBK。用 text=True 会 UnicodeDecodeError 并把中文报错吞干净
+    （2026-10-07 因此把 114 条成功误判成失败）。"""
+    try:
+        r = subprocess.run(["reg", *args], capture_output=True, timeout=timeout)
+        out = (r.stdout or b"").decode("gbk", "replace")
+        err = (r.stderr or b"").decode("gbk", "replace")
+        return r.returncode, (out + err).strip()
+    except Exception as e:  # noqa: BLE001
+        return 1, str(e)

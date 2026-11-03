@@ -28,6 +28,18 @@ task_type: adhoc.browser_automation
 
 任何涉及浏览器的任务，在 `agent_guide` 返回指导后、第一次 `browser_session_create` / `browser_navigate`（或 Playwright `page.goto`）之前：
 
+0. **先看有没有开着的 tab（2026-10-23，最省时间的捷径）**：调 `browser_list_tabs`，
+   目标网站已开着就直接 `browser_session_create(url_pattern="<主域>")` 复用。
+   - 若那个 tab 正被别的 agent 使用，会 `409 TAB_OWNED`；带 `force=true` 的语义是
+     **加入共享**（对方 session 保留、双方操作同一份 DOM、互相可见），不是把它抢过来。
+     只想独占就别共享——改用 `url=` 新开一个（要付一次导航额度）。
+   - ⛔ 不要 `url=` 新开，也不要用 `reload` 去"确认页面还在"——同一域名
+     **30s 内只允许一次 `reload`/`goto`**，超频返回 `NAV_RATE_LIMITED`
+     （窗口恒定，重试不会让它变长也不会变短）；复用已有 tab 完全不占这个额度。
+   - ⛔ 任务中途**别关 session**：有 idle 租约（有主 900s / 无主 300s）会自动回收，
+     主动关掉再开 = 多付一次冷启动 + 再吃一次导航节流。确实结束才
+     `browser_session_close(close_page=True)`。
+   - 写自动化脚本同理：一个域名一个 page 复用到底，⛔ 别在循环里对同一站 `goto`/`reload`。
 1. **识别目标网站主域**：从用户给的 URL 或任务描述提取。主域 = eTLD+1（如 `https://www.xiaoheihe.cn/community/123` → 主域 `xiaoheihe.cn`）
 2. **查站点经验**（两种方式，推荐第一种）：
    - **推荐**：调 `browser_match_site(domain="xiaoheihe.cn")` MCP 工具，一键返回命中文件的正文
@@ -148,6 +160,9 @@ page.mouse.move(x, y) + page.mouse.click(x, y)  （真实鼠标，需先获取�
 | Python 写 JS 的 `split('\n')` 转义层级易错 | `"split('\\n')"` → JS `split('\n')`；改 JS 后单样本必跑 |
 | `innerText` 跳过 `display:none`，`innerHTML` 含它们 | 不要 clone 容器再删元素，而是只拼接需要的元素 |
 | 动态页面 `networkidle` 前查 DOM 得到不完整结构 | 用 `wait_for_load_state('networkidle')` **或** `domcontentloaded` + 固定等待；⚠ **有长连接/长轮询的站点（如 js.design）`networkidle` 永不触发**（实测 `goto(wait_until="networkidle")` 45s 超时）→ 这类站点一律用 `domcontentloaded` + `wait_for_timeout(3000~6000)` |
+| **反复刷新 / 用完就关 tab**（风控面破绽 + 白等冷启动） | 后端强制同域节流：30s 一次 `reload`/`goto`（`NAV_RATE_LIMITED`）。正确姿势是复用：`browser_list_tabs` → `url_pattern` 复用；当前页能用就在现页面 `snapshot`/`action`；中途不关 session。详见 `docs/browser-anti-detection.md` §3.1 |
+| **脚本里 `for` 循环 `new_page()` + `close()`**（同一站多条） | 一个 page 复用到底——换条目只是换目标 URL。⚠ 节流管不到直连 CDP 的脚本，只能靠这条自我约束。**例外**：确实需要"单篇故障隔离"才分页，且要留证据注释（如 `workspace/web_archive/extract_web.py:1339`：整批复用会抛 `Connection closed`） |
+| **拿 `reload()` 当"清场 / 等待 / 重试"** | 清场→`page.evaluate("window.scrollTo(0,0)")`；等加载→`wait_for_selector`；只有"滚动到底仍找不到元素"才允许**有限次**兜底 reload（≤2 次）。2026-10-23 已按此清理 `bilibili_gacha` / `bilibili_cleanup` / `official_gacha` / `arknights_gacha` / `save_community` |
 | 跨子域同名组件 DOM 结构可能不同 | 永远加回退：`document.querySelector('.A') \|\| document.querySelector('.B')` |
 | **误判"CDP 浏览器还活着"** | 后端 `/browser/tabs` 秒回是**缓存列表，不算证据**。判活必须做**真实往返**（`/browser/evaluate` 或 playwright `evaluate`） |
 | 浏览器进程持端口但 `tasklist`/`wmic` 查不到、`taskkill` 报权限不足（rc=128） | 见下方「调试浏览器 CDP 假死：诊断与恢复」 |

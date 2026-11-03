@@ -62,7 +62,7 @@
 
 - **经池调用**：`/llm/pool/call*`、后端内部 `call_llm*`、外部脚本 `call_via_backend*` → 进 LLMPool，享受多 key 并发/重试/冷却/token 统计
 - **不经池直连**：`agent_chat` / `agent_score` → 用 `resolve_key(use_case, model_tier)` 路由层直接选 key 发请求，不进池。原因：这些端点对单次调用延迟敏感，且需要按 `use_case`/`allowed_uses`/`privacy_warning` 做细粒度筛选，与 pool 的 round-robin 调度模型不匹配。`resolve_key` 是统一路由层（见下方"USE_CASE_REGISTRY 与路由层"小节），sensitive/allowed_uses/scope 过滤在路由层统一完成
-- **memory 调用走池**：`memory_compress` / `memory_validate` 走 `pool.call()` / `pool.call_simple()`，统一享受 model 级降级 / cooldown / 429 不计 consecutive_fails 等保护机制。详见下方"Model 级降级"章节
+- **memory 调用走池**：`memory_compress` 走 `pool.call()` / `pool.call_simple()`，统一享受 model 级降级 / cooldown / 429 不计 consecutive_fails 等保护机制。详见下方"Model 级降级"章节（`memory_validate` 已于 2026-10-31 随 LLM 验证器删除，见 `docs/memory-system.md`）
 
 ### 使用方式
 
@@ -205,12 +205,14 @@ Fail-Open：配置加载失败时用默认值（不阻断主流程）。
 
 #### memory 调用统一走 pool
 
-`memory_compress` / `memory_validate` 走 `pool.call()` / `pool.call_simple()`：
+`memory_compress` 走 `pool.call()` / `pool.call_simple()`：
 
 - `server/memory/compress.py::_llm_compress()` → `pool.call_simple(use_case="memory_compress", retries=1)`
-- `server/memory/maintainer.py::_call_llm_validate_with_429_flag()` → `pool.call(use_case="memory_validate", retries=1)`
 
-统一享受 v15 model 级降级 / cooldown / 429 不计 consecutive_fails 等保护。memory 模块保留 `consecutive_429` 批量熔断逻辑（连续 N 条记忆都 429 时跳过剩余，避免无谓重试），但单条调用的重试 / 退避 / disabled 全部由 pool 内部处理。
+统一享受 v15 model 级降级 / cooldown / 429 不计 consecutive_fails 等保护。
+
+> `memory_validate` 已于 2026-10-31 随 LLM 验证器一起删除（use_case 19 → 18）：记忆维护器现在
+> **零 LLM 调用**，形态类问题由确定性查询承担。原来那条 `consecutive_429` 批量熔断也随之消失。
 
 ### Token 统计
 
@@ -252,11 +254,13 @@ uv run python tools/llm/llm_token_stats.py --import
 `vl` scope 的模型（历史上为 `Qwen/Qwen3-VL-*` 系列）是图像理解模型。LLM 池（`/llm/pool/*`）仅支持文本对话（`/chat/completions`），不处理图像输入。**图像理解已通过独立的远程 VL 模块接入**：
 - 模块：`server/vl/remote_vl.py`（`RemoteVLClient` 单例）
 - 配置：v9 起，VL provider 配置（`base_url`/`api_key`/`model`/`max_concurrency`/`timeout`/`rate_limit_cooldown`）统一存放在 `data/llm/keys.json` 中含 `vl` scope model 的 key 记录的 `vision` 段；`config.toml [vision]` 段只保留全局开关和编码参数
-- 默认模型：由 `_pick_model_for_tier` 决定 —— 取 key 内 `vl` scope 中 **tier 最低**的启用模型（省 cost 优先，同 tier 按数组顺序），**不是**"质量最佳"那个。当前值查 `GET /vision/status` 的 `vl_model`；想换默认模型就调 tier/enabled，别改代码。注意魔搭会下架模型 ID（下架后 400 `has no provider supported`），详见 `docs/environment-constraints.md`「远程 VL」章节
+- 默认模型：由 `pick_model_for_use_case`（`_pick_model_for_tier` 的上层助手）决定 —— 取 key 内 `vl` scope 中 tier 在范围内的启用模型，**方向按 use_case**：`vl_ocr`/`vl_activity_tracker` 取 **tier 最低**（省 cost 优先），`vl_vision` 取 **tier 最高**（质量优先，坐标错了比贵了更糟）；同 tier 按数组顺序，未注册 use_case 一律升序（Ticket 03，2026-10-11）。当前值查 `GET /vision/status` 的 `vl_model`；想换默认模型就调 tier/enabled，别改代码。注意魔搭会下架模型 ID（下架后 400 `has no provider supported`），详见 `docs/environment-constraints.md`「远程 VL」章节
 - 接口：`/ocr/vl/*`（文档解析）+ `/vision/understand`（图像问答）
 - Computer Use 使用策略：远程 VL 默认只做布局/状态描述；网页文字用 DOM、桌面文字用本地 OCR bbox，`vision_locate` 仅作无文字元素兜底，避免延迟和配额消耗
 - 多 provider 自动 failover，429/5xx 触发 60s cooldown + 退避重试 (2, 4, 8, 16, 32, 60) 秒
 - Key 选择：通过 `key_store.resolve_keys(use_case)` 路由（`vl_ocr`/`vl_vision`/`vl_activity_tracker`），与 LLM/AIGC 共用统一路由层
+- **降级链的观察口（Ticket 06，2026-10-11）**：`GET /vision/providers?use_case=…`（默认 `vl_vision`）按**该 use_case 的顺序**返回 `providers[].models[]`，每项 `{name, tier, current, dead_today, enabled, dead_reason}`——`current` 就是这条链现在真会先调的模型，因此**别再把 `/vision/status` 的 `vl_model` 当成"接下来会用的模型"**（那是升序默认视角，只代表最便宜的那个）。响应另带 `dead_reset_in_s`（距本地 00:00 判死解冻的秒数）。客户端"模型池 → VL"子面板即按此渲染（key→model 两层树 + 在服务/今日失效/待命/未启用四档角色 + 行内复位）。
+- **告警（Ticket 07，2026-10-11）**：降级发生过 → 收件箱 `category=vl_model_degraded`（含被跳过的模型与原因摘要）；全部 `(key,model)` 候选被标死 → `category=vl_all_models_dead`（与聚合 `daily_exhausted` 同一触发点）。两者按天/按 `(key_id, model)` 去重并带 `dedupe_key`，复位后去重标记一并清空（"复了又坏"能再报）。
 - 设计与历史留档：`.agents/wip/local_vl_decommissioned.md`
 
 #### USE_CASE_REGISTRY 与路由层
@@ -272,8 +276,7 @@ uv run python tools/llm/llm_token_stats.py --import
 | `agent_chat` | llm | 否 | (3, 5) | `/agent/chat` 路由 |
 | `community_summarize` | llm | 否 | (3, 5) | `workspace/community_review/community_llm.py` 社群摘要（脚本调 `/llm/pool/call`） |
 | `memory_compress` | llm | **是** | (2, 4) | `server/memory/compress.py` 记忆压缩（走 `pool.call_simple`） |
-| `memory_validate` | llm | **是** | (2, 4) | `server/memory/maintainer.py` 记忆验证（走 `pool.call`） |
-| `hourly_summarize` | llm | 否 | (3, 5) | `server/loop_actions.py` Loop 小时总结 |
+| `hourly_summarize` | llm | 否 | (3, 5) | `server/activity_tracker/loop_actions.py` 的 `HourlySummarizeAction` Loop 小时总结 |
 | `download_watcher` | llm | **是** | (4, 5) | `tools/file_classifier/predictor.py` 下载文件分类 |
 | `command_guard` | llm | 否 | (3, 5) | 命令审批 LLM 预审 |
 | `inbound_gateway` | llm | 否 | (0, 0) | `server/inbound_gateway/router.py` 入站网关转发（(0,0)=不带默认 tier 约束；显式注册让出站 key 的 `allowed_uses` 白名单对入站流量生效） |
@@ -281,9 +284,9 @@ uv run python tools/llm/llm_token_stats.py --import
 | `stock_advisor_closing` | llm | 否 | (3, 5) | Stock Advisor 收盘总结（15:05） |
 | `stock_advisor_evening` | llm | 否 | (4, 5) | Stock Advisor 晚间深度复盘（21:00，含多空辩论） |
 | `stock_advisor_query` | llm | 否 | (3, 5) | Stock Advisor 盘中午询（adhoc 即时回答） |
-| `vl_ocr` | vl | **是** | (2, 5) | `server/remote_vl.py::ocr()` 文档 VL 识别 |
-| `vl_vision` | vl | **是** | (2, 5) | `server/remote_vl.py::understand()/locate()` 图像理解/定位 |
-| `vl_activity_tracker` | vl | **是** | (2, 5) | `server/loop_actions.py:163` Loop 活动追踪截图描述 |
+| `vl_ocr` | vl | **是** | (2, 5) | `server/vl/remote_vl.py::ocr()` 文档 VL 识别 |
+| `vl_vision` | vl | **是** | (2, 5) | `server/vl/remote_vl.py::understand()/locate()` 图像理解/定位 |
+| `vl_activity_tracker` | vl | **是** | (2, 5) | `server/activity_tracker/loop_actions.py` 的 `ScreenVLDescribeAction` Loop 活动追踪截图描述 |
 | `aigc_image_gen` | aigc_image | 否 | (3, 5) | 文生图/图生图 |
 | `aigc_image_edit` | aigc_image | 否 | (3, 5) | 图像编辑 |
 | `aigc_video_gen` | aigc_video | 否 | (3, 5) | 视频生成 |

@@ -13,7 +13,7 @@ from server.screen import on_shutdown as screen_on_shutdown
 from server.system import on_shutdown as system_on_shutdown
 from server.vl.vision import on_shutdown as vision_on_shutdown
 
-logger = logging.getLogger("localagent.config_routes")
+logger = logging.getLogger("parcae.config_routes")
 
 
 class ConfigUpdateRequest(BaseSchema):
@@ -62,20 +62,33 @@ def register_config_routes(app: FastAPI):
 
         def _do_shutdown():
             """执行清理后退出。os._exit 不触发 FastAPI shutdown 事件，需手动清理子进程。"""
+            # 与 lifespan 清理链同款兜底：这条链任一步阻塞（典型是 overlay 子进程
+            # terminate / 终端子进程回收）就永远走不到 os._exit(0)，进程会滞留。
+            # 看门狗给进程一个硬上限；mark_shutdown_step 让日志能指到卡住的步骤。
+            from server.core.lifecycle import mark_shutdown_step, start_shutdown_watchdog
+
+            start_shutdown_watchdog(source="POST /shutdown")
             time.sleep(0.5)
             try:
+                mark_shutdown_step("[POST /shutdown] 关闭 Screen 模块（含 overlay GUI 子进程）")
                 screen_on_shutdown()
+                mark_shutdown_step("[POST /shutdown] 关闭 System 模块")
                 system_on_shutdown()
+                mark_shutdown_step("[POST /shutdown] 关闭视觉(VL)模块")
                 vision_on_shutdown()
+                mark_shutdown_step("[POST /shutdown] 落盘 LLM 池统计")
                 try:
                     from server.llm_pool import get_pool
                     get_pool().flush_stats()
                 except Exception:
                     pass
+                mark_shutdown_step("[POST /shutdown] 关闭记忆系统")
                 from server.memory.manager import reset_memory_manager
                 reset_memory_manager()
+                mark_shutdown_step("[POST /shutdown] 关闭 overlay 客户端")
                 from server.overlay_client import overlay_client
                 overlay_client.shutdown()
+                mark_shutdown_step("[POST /shutdown] 回收终端子进程")
                 from server.exec import _terminals
                 for _tid, session in list(_terminals.items()):
                     proc = session.get("_proc")
@@ -86,6 +99,20 @@ def register_config_routes(app: FastAPI):
                             pass
             except Exception as e:
                 logger.warning(f"清理过程出错: {e}")
+            # 运行时端口声明收尾：本路径走 os._exit，**不会触发 lifespan shutdown**，
+            # 所以 lifecycle.py 里的 stopped/pid 清理不会执行，必须在这里自己收。
+            # 否则声明会一直停在 ready，客户端以为后端还活着、死连一个已释放的端口。
+            try:
+                from lib.runtime_endpoint import (
+                    STATUS_STOPPED,
+                    clear_pid_file,
+                    mark_declaration_status,
+                )
+
+                mark_declaration_status(STATUS_STOPPED, reason="通过 POST /shutdown 关闭")
+                clear_pid_file()
+            except Exception as e:
+                logger.warning(f"关闭时更新端口声明失败: {e}")
             import os
             os._exit(0)
 

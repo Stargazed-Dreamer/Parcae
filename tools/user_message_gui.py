@@ -66,7 +66,7 @@ class UserMessageGUI(QWidget):
         self._start_fetcher()
 
     def _init_ui(self):
-        self.setWindowTitle("用户补充指令 - LocalAgent")
+        self.setWindowTitle("用户补充指令 - Parcae")
         self.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint |  # 总在最前
             Qt.WindowType.Window  # 普通窗口（可最小化）
@@ -285,7 +285,7 @@ def main():
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
-    app.setApplicationName("LocalAgent 用户消息")
+    app.setApplicationName("Parcae 用户消息")
 
     window = UserMessageGUI()
     window.show()

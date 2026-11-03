@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException
 from lib.schema import BaseSchema
 from server.config import load_config
 
-logger = logging.getLogger("localagent.mindforge")
+logger = logging.getLogger("parcae.mindforge")
 router = APIRouter(prefix="/mindforge", tags=["MindForge"])
 
 

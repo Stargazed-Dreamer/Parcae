@@ -98,6 +98,12 @@ POOL_NAME_MAP = {
 # 稀有度映射
 RARITY_MAP = {4: "★4", 5: "★5", 6: "★6"}
 
+# 抽卡产出 vs 非抽卡产出（2026-10-30 实测：API 从 07-31 起每条记录都带 kind，
+# kind=="draw" 才是抽卡出来的；赠送类如 gift_intel_book 不带 charId/rarity）。
+# 6 月那批更早的 raw 没有 kind 字段，那种记录退回按稀有度判。
+PULL_KINDS = {"draw"}
+KNOWN_NON_PULL_KINDS = {"gift_intel_book"}
+
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 
 # 游戏日志路径
@@ -650,6 +656,22 @@ async def fetch_weapon_records(u8_token: str, provider: str, server_id: str,
 
 # ========== 数据处理 ==========
 
+def classify_pull(rec: dict) -> tuple[bool, str]:
+    """判断一条记录是不是抽卡产出。
+
+    kind 优先；没有 kind 的老数据退回稀有度判据；kind 是没见过的一律按非抽卡处理
+    （宁可少计，也不让新类型悄悄混进总抽数），并由调用方把 kind 报出来等人工归类。
+    """
+    kind = rec.get("kind") or ""
+    if kind:
+        if kind in PULL_KINDS:
+            return True, "draw"
+        if kind in KNOWN_NON_PULL_KINDS:
+            return False, kind
+        return False, kind
+    return rec.get("rarity") in (4, 5, 6), ""
+
+
 def process_char_records(raw_data: dict) -> list:
     """处理角色寻访原始记录，转换为统一格式"""
     processed = []
@@ -671,6 +693,8 @@ def process_char_records(raw_data: dict) -> list:
                 "pool": rec.get("poolName", pool_name),
                 "charId": rec.get("charId", ""),
                 "name": rec.get("charName", ""),
+                "kind": rec.get("kind", ""),
+                "nameText": rec.get("nameText", ""),
                 "rarity": rec.get("rarity", 0),
                 "rarity_label": RARITY_MAP.get(rec.get("rarity", 0), f"★{rec.get('rarity', '?')}"),
                 "is_new": rec.get("isNew", False),
@@ -702,6 +726,8 @@ def process_weapon_records(raw_data: dict) -> list:
                 "pool": rec.get("poolName", pool_id),
                 "weaponId": rec.get("weaponId", ""),
                 "name": rec.get("weaponName", ""),
+                "kind": rec.get("kind", ""),
+                "nameText": rec.get("nameText", ""),
                 "rarity": rec.get("rarity", 0),
                 "rarity_label": RARITY_MAP.get(rec.get("rarity", 0), f"★{rec.get('rarity', '?')}"),
                 "is_new": rec.get("isNew", False),
@@ -736,18 +762,37 @@ def generate_summary(char_records: list, weapon_records: list, user_info: dict) 
     if total == 0:
         return {"total": 0, "user": public_user_info}
 
-    # 按稀有度统计
+    # 按类型统计
+    char_count = len(char_records)
+    weapon_count = len(weapon_records)
+
+    # 非抽卡条目：API 除角色/武器外还会下发赠送类记录（如"寻访情报书"）。
+    # 判据先看 kind（draw 才是抽卡），没 kind 的老数据退回稀有度判据；
+    # 没见过的 kind 一律按非抽卡单列，并写进 non_pull_unknown_kinds 等人工归类。
+    pulls: list = []
+    non_pull: list = []
+    unknown_kinds: set = set()
+    for rec in all_records:
+        is_pull, kind = classify_pull(rec)
+        if is_pull:
+            pulls.append(rec)
+            continue
+        non_pull.append(rec)
+        if kind and kind not in KNOWN_NON_PULL_KINDS:
+            unknown_kinds.add(kind)
+
+    pull_total = len(pulls)
+    char_pull_count = char_count - sum(1 for rec in non_pull if rec.get("type") == "char")
+    weapon_pull_count = weapon_count - sum(1 for rec in non_pull if rec.get("type") == "weapon")
+
+    # 按稀有度统计（只数抽卡产出）
     rarity_count = {}
     six_star = []
-    for rec in all_records:
+    for rec in pulls:
         r = rec["rarity_label"]
         rarity_count[r] = rarity_count.get(r, 0) + 1
         if rec["rarity"] == 6:
             six_star.append(f"{rec['name']}({rec['pool']})")
-
-    # 按类型统计
-    char_count = len(char_records)
-    weapon_count = len(weapon_records)
 
     # 角色池分布
     char_pool_count = {}
@@ -763,6 +808,22 @@ def generate_summary(char_records: list, weapon_records: list, user_info: dict) 
 
     return {
         "total": total,
+        "pull_total": pull_total,
+        "char_pull_count": char_pull_count,
+        "weapon_pull_count": weapon_pull_count,
+        "non_pull_count": len(non_pull),
+        "non_pull_entries": [
+            {
+                "type": rec.get("type", ""),
+                "kind": rec.get("kind", ""),
+                "name": rec.get("name") or rec.get("nameText", ""),
+                "time": rec.get("time", ""),
+                "pool": rec.get("pool", ""),
+                "seqId": rec.get("seqId", ""),
+            }
+            for rec in non_pull
+        ],
+        "non_pull_unknown_kinds": sorted(unknown_kinds),
         "char_count": char_count,
         "weapon_count": weapon_count,
         "rarity_count": rarity_count,
@@ -785,7 +846,20 @@ def print_summary(summary: dict):
     if user.get("roleName"):
         print(f"  角色: {user['roleName']} ({user.get('serverName', '')})")
 
-    print(f"  总抽数: {summary['total']} (角色{summary.get('char_count', 0)} + 武器{summary.get('weapon_count', 0)})")
+    pull_total = summary.get("pull_total", summary["total"])
+    print(f"  总抽数: {pull_total} (角色{summary.get('char_pull_count', summary.get('char_count', 0))}"
+          f" + 武器{summary.get('weapon_pull_count', summary.get('weapon_count', 0))})")
+
+    if summary.get("non_pull_count"):
+        print(f"  非抽卡条目: {summary['non_pull_count']}（赠送类等，不计入总抽数）")
+        for entry in summary["non_pull_entries"]:
+            print(f"    {entry['time']} {entry['pool']} {entry.get('name') or '(无名)'} "
+                  f"kind={entry.get('kind') or '无kind'} seqId={entry['seqId']}")
+
+    unknown_kinds = summary.get("non_pull_unknown_kinds") or []
+    if unknown_kinds:
+        print(f"  ⚠️ 没见过的 kind（已按非抽卡单列，核对后补进 KNOWN_NON_PULL_KINDS）: "
+              f"{', '.join(unknown_kinds)}")
 
     if summary["total"] == 0:
         return
@@ -794,7 +868,7 @@ def print_summary(summary: dict):
     for r in ["★6", "★5", "★4"]:
         count = summary["rarity_count"].get(r, 0)
         if count > 0:
-            pct = count / summary["total"] * 100
+            pct = count / pull_total * 100 if pull_total else 0
             print(f"    {r}: {count} ({pct:.1f}%)")
 
     if summary["six_star_names"]:
@@ -878,12 +952,39 @@ def load_existing_max_seq_ids() -> tuple[dict, dict]:
 
 # ========== 主流程 ==========
 
+def _load_record_list(record_type: str) -> list:
+    """读取已有记录列表（char / weapon），文件缺失时返回空列表"""
+    path = OUTPUT_DIR / f"{record_type}_records.json"
+    if not path.exists():
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        records = json.load(f)
+    if not isinstance(records, list):
+        raise RuntimeError(f"已有数据格式异常（应为列表）: {path}")
+    return records
+
+
 async def main_async(provider: str = "hypergryph", force: bool = False,
-                     token: str = "", log_only: bool = False):
+                     token: str = "", log_only: bool = False,
+                     summary_only: bool = False):
     """主流程"""
     config = get_component_config("endfield_gacha") or {}
     if provider == "hypergryph":
         provider = config.get("provider", provider)
+
+    if summary_only:
+        print("[1/1] 仅重算统计（不采集、不取 token）...")
+        all_char = _load_record_list("char")
+        all_weapon = _load_record_list("weapon")
+        prior_path = OUTPUT_DIR / "summary.json"
+        prior_user: dict = {}
+        if prior_path.exists():
+            with open(prior_path, "r", encoding="utf-8") as f:
+                prior_user = json.load(f).get("user", {}) or {}
+        summary = generate_summary(all_char, all_weapon, prior_user)
+        _atomic_write_json(prior_path, summary)
+        print_summary(summary)
+        return
 
     user_info = None
 
@@ -993,11 +1094,15 @@ def main():
     parser.add_argument("--force", action="store_true", help="强制重新采集全量（仍与历史库合并）")
     parser.add_argument("--global", dest="use_global", action="store_true", help="使用国际服 (gryphline)")
     parser.add_argument("--token", type=str, default="", help="直接使用已有的认证 token（跳过浏览器登录）")
-    parser.add_argument("--log", dest="log_only", action="store_true", help="仅从游戏日志获取 token（不回退浏览器登录）")
+    parser.add_argument("--log", dest="log_only", action="store_true",
+                        help="仅从游戏日志获取 token（⛔ 会一并关掉浏览器回退：日志 token 过期时直接崩，仅供排查日志解析）")
+    parser.add_argument("--summary-only", dest="summary_only", action="store_true",
+                        help="只按已有 char/weapon 记录重算 summary.json（不采集、不取 token）")
     args = parser.parse_args()
 
     provider = "gryphline" if args.use_global else "hypergryph"
-    asyncio.run(main_async(provider=provider, force=args.force, token=args.token, log_only=args.log_only))
+    asyncio.run(main_async(provider=provider, force=args.force, token=args.token,
+                           log_only=args.log_only, summary_only=args.summary_only))
 
 
 if __name__ == "__main__":

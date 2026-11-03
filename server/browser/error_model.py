@@ -16,6 +16,9 @@ BROWSER_ERROR_CODES = {
     "TAB_NOT_FOUND": "未找到匹配的标签页",
     "ELEMENT_NOT_FOUND": "未找到匹配的元素（CSS/role/text 等选择器未命中）",
     "AMBIGUOUS_TAB": "URL 匹配到多个标签页，需指定 tab_id 或 session_id",
+    # 2026-11-01（G4）：完全没指定目标、且浏览器有多个 tab（或唯一 tab 属于别人的
+    # 会话）。冷路径不再默认挑第一个，改为要求显式指定。
+    "TAB_REQUIRED": "未指定目标标签页（session_id / tab_id / url_pattern 都没给），而浏览器有多个标签页",
     "MULTIPLE_MATCHES": "匹配到多个元素，需细化 target",
     "INVALID_SELECTOR": "CSS 选择器语法错误",
     "TIMEOUT": "等待超时",
@@ -29,6 +32,11 @@ BROWSER_ERROR_CODES = {
     "DIALOG_NOT_FOUND": "dialog 队列为空，无 dialog 可处理",
     "DIALOG_ALREADY_DISMISSED": "dialog 已被超时兜底自动 dismiss，无法再 accept/dismiss",
     "BLOCKED_BY_DIALOG": "操作被 pending dialog 阻塞，需先调 handle_dialog 处理",
+    # 2026-10-23 新增（同域导航节流，见 nav_guard.py）
+    "NAV_RATE_LIMITED": "同域名刷新/初始连接过于频繁（冷却窗口内），需等待或复用当前页面",
+    # 2026-11-01 新增（页级互斥，见 page_guard.py）：多个 session 绑同一 tab 时，
+    # 另一个会话正在操作该页面且排队超时。不是页面报错，是并发冲突。
+    "PAGE_BUSY": "该页面正被另一个会话操作（同一 tab 被多个 session 共享），排队超时",
 }
 
 # phase 标准取值
@@ -60,6 +68,8 @@ def _classify_error(err_text: str, phase: str, elapsed: int) -> BrowserErrorResp
     et = (err_text or "").lower()
     if "target closed" in et or "browser has been closed" in et or "connection reset" in et:
         code = "BROWSER_DISCONNECTED"
+    elif "tab_required" in et:
+        code = "TAB_REQUIRED"
     elif "ambiguous_tab" in et:
         code = "AMBIGUOUS_TAB"
     elif "navigation_completed" in et:

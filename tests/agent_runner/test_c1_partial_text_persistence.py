@@ -25,15 +25,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
+from lib.agent_runtime import (  # noqa: E402
     EventStore,
     MockToolExecutor,
     RunnerConfig,
     RunnerDeps,
     SessionRunner,
 )
-from client.core.agent.doom_loop import DoomLoopConfig  # noqa: E402
-from client.core.agent.types import LLMRequest, LLMResponse, Message  # noqa: E402
+from lib.agent_runtime.doom_loop import DoomLoopConfig  # noqa: E402
+from lib.agent_runtime.types import LLMRequest, LLMResponse, Message  # noqa: E402
 
 
 def _run(coro):
@@ -103,7 +103,7 @@ class _PartialTextThenOverflowLLM:
 
     async def call(self, request: LLMRequest) -> LLMResponse:
         self.call_count += 1
-        from client.core.agent.compactor import ContextOverflow
+        from lib.agent_runtime.compactor import ContextOverflow
         raise ContextOverflow("413", status_code=413)
 
     async def stream(self, request: LLMRequest):
@@ -219,7 +219,7 @@ class TestContextOverflowPartialText:
 
     def test_partial_text_persisted_on_context_overflow(self, tmp_path):
         """红测试：ContextOverflow 中断后 partial text 应落库 source=partial。"""
-        from client.core.agent import Compactor
+        from lib.agent_runtime import Compactor
 
         store = EventStore(db_path=str(tmp_path / "c1_overflow.db"))
         store.init()

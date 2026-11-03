@@ -52,7 +52,7 @@ TOP_N = 10                  # 快照记录前 N 个进程
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LOG_PATH = os.path.join(PROJECT_ROOT, "logs", "mem_watchdog.log")
-SINGLETON_MUTEX = "LocalAgent_MemWatchdog_v1"
+SINGLETON_MUTEX = "Parcae_MemWatchdog_v1"
 
 MB = 1024 * 1024
 

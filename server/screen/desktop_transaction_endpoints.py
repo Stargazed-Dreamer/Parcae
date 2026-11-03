@@ -54,12 +54,14 @@ from server.screen.routes import (
     _COORDINATE_ACTIONS,
     _FOCUS_RETRY_DELAY,
     _KEYBOARD_ACTIONS,
+    NOT_ELEVATED_STATUS,
     _confirm_control_operation,
     _enforce_session_permission,
     _ensure_takeover_approved,
     _touch_task_authorization_after_delivery,
     _verify_snapshot_freshness,
     logger,
+    not_elevated_message,
     router,
 )
 
@@ -176,18 +178,21 @@ def desktop_transaction(req: DesktopTransactionRequest):
     - 文件另存为（点文件菜单→另存为→输入路径→点保存→后验文件存在）
     - 多步导航（点标签→等加载→点按钮→后验页面变化）
     """
+    # 提权闸门（2026-10-22）：先于 403 授权引导与 takeover 弹窗——未提权时事务里的键鼠步骤
+    # 必然被 UIPI 丢弃，先弹窗问用户再让 agent 发现点击无效是错的。
+    if not _ADMIN_STATUS:
+        return DesktopTransactionResponse(
+            success=False, status=NOT_ELEVATED_STATUS, total_steps=len(req.actions),
+            executed_steps=0, transaction_postcondition="not_checked",
+            elapsed_ms=0, results=[],
+            message=not_elevated_message("桌面事务（desktop_transaction）"),
+        )
+
     # T15：副作用端点 403 拦截
     session_status = _enforce_session_permission()
     current_mode = session_status.get("mode", "normal")
 
     # 1. 基础校验
-    if not _ADMIN_STATUS:
-        return DesktopTransactionResponse(
-            success=False, status="aborted", total_steps=len(req.actions),
-            executed_steps=0, transaction_postcondition="not_checked",
-            elapsed_ms=0, results=[],
-            message="键鼠操控需要管理员权限",
-        )
     if not emergency.can_operate():
         return DesktopTransactionResponse(
             success=False, status="emergency_stopped", total_steps=len(req.actions),

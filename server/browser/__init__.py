@@ -151,6 +151,26 @@ from .stats import (
     record_selector_call,
 )
 
+# 14. supervisor / supervisor_endpoints：浏览器进程托管（2026-10-23）
+from .supervisor import (
+    BrowserStatus,
+    BrowserSupervisor,
+    SupervisorConfig,
+    SupervisorState,
+    get_browser_supervisor,
+    reset_browser_supervisor,
+)
+from .supervisor_endpoints import (
+    BrowserSupervisorEnsureRequest,
+    BrowserSupervisorRestartRequest,
+    BrowserSupervisorStatusResponse,
+    BrowserSupervisorStopRequest,
+    browser_supervisor_ensure,
+    browser_supervisor_restart,
+    browser_supervisor_status,
+    browser_supervisor_stop,
+)
+
 # 12. vl_feedback：操作后 VL 反馈 helper（不注册端点）
 from .vl_feedback import _maybe_vl_feedback
 
@@ -261,6 +281,21 @@ __all__ = [
     "reset_session_manager",
     # vl_feedback
     "_maybe_vl_feedback",
+    # supervisor（2026-10-23）
+    "BrowserStatus",
+    "BrowserSupervisor",
+    "SupervisorConfig",
+    "SupervisorState",
+    "get_browser_supervisor",
+    "reset_browser_supervisor",
+    "BrowserSupervisorEnsureRequest",
+    "BrowserSupervisorRestartRequest",
+    "BrowserSupervisorStatusResponse",
+    "BrowserSupervisorStopRequest",
+    "browser_supervisor_ensure",
+    "browser_supervisor_restart",
+    "browser_supervisor_status",
+    "browser_supervisor_stop",
     # dialog_endpoints（2026-08-06 新增）
     "BrowserHandleDialogRequest",
     "BrowserHandleDialogResponse",

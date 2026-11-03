@@ -3,7 +3,9 @@
 设计原则（规避用户协助）：
 1. **利用 watchdog 模式**：takeover_confirm 短路 + 不因空闲撤销
 2. **直接调 SessionManager.grant()**：绕过 GUI 弹窗授权
-3. **dry_run 优先**：不投递真键鼠，无需 admin
+3. **dry_run 优先**：不投递真键鼠（⚠️ 2026-10-22 起 dry_run 也走端点级提权闸门：
+   未提权时与真实动作一样返回 `not_elevated`——闸门是端点前置条件，不按参数分支。
+   本文件的 dry_run 用例因此显式用 `elevated` 夹具声明已提权）
 4. **UIA 端点优先**：走 COM 调用，无需 admin（但需真实后端，见下）
 5. **真实 Windows 应用**：计算器/记事本，不 mock 被测对象
 
@@ -56,6 +58,36 @@ from server.screen.session import Mode as SessionMode
 from server.screen.session import get_session_manager
 
 pytestmark = pytest.mark.e2e  # E2E：依赖真实环境（CDP/后端/GUI），quick 层排除
+
+
+@pytest.fixture
+def elevated(monkeypatch):
+    """声明"后端已提权 + 键鼠不真发"。
+
+    2026-10-22 提权闸门：未提权时注入类端点**第一行**就返回 status="not_elevated"
+    （不弹接管确认窗）。本文件里验证门禁分支的用例（危险词 / 参数校验 / 坐标过期 /
+    焦点未验证 / dry_run / 三档权限）在非管理员测试机上会被闸门提前拦住，
+    因此显式声明已提权，并把 `_execute_action` 换成假实现——这些用例本就断言"零投递"，
+    不该碰真实桌面。
+    ⚠️ 不要用到 L3 SendInput 用例上：那边靠 `admin_skip` 自动跳过，伪造提权会让它真发键鼠。
+    """
+    from server.screen import (
+        action_endpoints,
+        batch_endpoints,
+        desktop_transaction_endpoints,
+        routes,
+        scroll_wait_analyze_endpoints,
+    )
+
+    def _fake_execute_action(action, **kwargs):
+        return {"success": True, "message": "mocked: 不真发键鼠"}
+
+    monkeypatch.setattr(routes, "_ADMIN_STATUS", True)
+    monkeypatch.setattr(routes, "_execute_action", _fake_execute_action)
+    for mod in (action_endpoints, batch_endpoints, desktop_transaction_endpoints,
+                scroll_wait_analyze_endpoints):
+        monkeypatch.setattr(mod, "_ADMIN_STATUS", True, raising=False)
+        monkeypatch.setattr(mod, "_execute_action", _fake_execute_action, raising=False)
 
 # ========== 工具函数 ==========
 
@@ -444,7 +476,7 @@ class TestPermissionModes:
     用 dry_run 验证副作用端点是否放行，无需 admin。
     """
 
-    def test_no_permission_blocks_all_side_effects(self, client, no_permission):
+    def test_no_permission_blocks_all_side_effects(self, client, no_permission, elevated):
         """NO_PERMISSION 模式下所有副作用端点返回 403。"""
         # execute_action
         resp = client.post("/screen/action", json={"action": "click", "x": 1, "y": 1})
@@ -494,7 +526,7 @@ class TestPermissionModes:
         resp = client.post("/screen/window/resolve", json={"title": "___nope___"})
         assert resp.status_code == 200
 
-    def test_normal_mode_allows_dry_run(self, client, normal_grant):
+    def test_normal_mode_allows_dry_run(self, client, normal_grant, elevated):
         """NORMAL 模式下 dry_run 通过权限检查（不投递真键鼠）。"""
         resp = client.post("/screen/action", json={
             "action": "click", "x": 1, "y": 1, "dry_run": True
@@ -504,7 +536,7 @@ class TestPermissionModes:
         assert data["status"] == "dry_run"
         assert data["transport_status"] == "not_sent"
 
-    def test_watchdog_mode_allows_dry_run(self, client, watchdog_grant):
+    def test_watchdog_mode_allows_dry_run(self, client, watchdog_grant, elevated):
         """WATCHDOG 模式下 dry_run 通过权限检查。"""
         resp = client.post("/screen/action", json={
             "action": "click", "x": 1, "y": 1, "dry_run": True
@@ -512,7 +544,7 @@ class TestPermissionModes:
         assert resp.status_code == 200
         assert resp.json()["status"] == "dry_run"
 
-    def test_release_returns_to_no_permission(self, client, normal_grant):
+    def test_release_returns_to_no_permission(self, client, normal_grant, elevated):
         """release 后回到 NO_PERMISSION，副作用端点恢复 403。"""
         # 授权中可以 dry_run
         resp = client.post("/screen/action", json={
@@ -605,14 +637,14 @@ class TestHealthStatus:
 class TestSafetyMechanisms:
     """安全机制测试（无需 mock，参数校验阶段真实拦截）。"""
 
-    def test_danger_keyword_blocked_without_permission(self, client, no_permission):
+    def test_danger_keyword_blocked_without_permission(self, client, no_permission, elevated):
         """无权限时危险关键词端点返回 403（权限检查在参数校验之前）。"""
         resp = client.post("/screen/action", json={
             "action": "type", "text": "关机"
         })
         assert resp.status_code == 403  # 权限检查在前
 
-    def test_danger_keyword_blocked_in_normal_mode(self, client, normal_grant):
+    def test_danger_keyword_blocked_in_normal_mode(self, client, normal_grant, elevated):
         """NORMAL 模式下危险关键词被拦截（参数校验阶段，无需 mock）。"""
         resp = client.post("/screen/action", json={
             "action": "type", "text": "关机"
@@ -623,7 +655,7 @@ class TestSafetyMechanisms:
         assert data["status"] == "blocked"
         assert "危险" in data["message"] or "拦截" in data["message"]
 
-    def test_danger_keyword_blocked_in_watchdog_mode(self, client, watchdog_grant):
+    def test_danger_keyword_blocked_in_watchdog_mode(self, client, watchdog_grant, elevated):
         """WATCHDOG 模式下危险关键词仍被拦截（不豁免 DANGER_KEYWORDS_BLOCK）。"""
         resp = client.post("/screen/action", json={
             "action": "type", "text": "关机"
@@ -633,7 +665,7 @@ class TestSafetyMechanisms:
         assert data["success"] is False
         assert data["status"] == "blocked"
 
-    def test_missing_params_blocked(self, client, normal_grant):
+    def test_missing_params_blocked(self, client, normal_grant, elevated):
         """缺少参数（click 无 x/y）→ blocked。"""
         resp = client.post("/screen/action", json={"action": "click"})
         assert resp.status_code == 200
@@ -641,7 +673,7 @@ class TestSafetyMechanisms:
         assert data["success"] is False
         assert data["status"] == "blocked"
 
-    def test_unknown_action_blocked(self, client, normal_grant):
+    def test_unknown_action_blocked(self, client, normal_grant, elevated):
         """未知 action → blocked。"""
         resp = client.post("/screen/action", json={
             "action": "__unknown__", "x": 10, "y": 10
@@ -649,7 +681,7 @@ class TestSafetyMechanisms:
         assert resp.status_code == 200
         assert resp.json()["status"] == "blocked"
 
-    def test_stale_snapshot_id_blocked(self, client, normal_grant):
+    def test_stale_snapshot_id_blocked(self, client, normal_grant, elevated):
         """不存在的 snapshot_id → STALE_COORDINATES。"""
         resp = client.post("/screen/action", json={
             "action": "click", "x": 10, "y": 10,
@@ -660,7 +692,7 @@ class TestSafetyMechanisms:
         assert data["status"] == "blocked"
         assert "STALE_COORDINATES" in data["message"] or "snapshot_id" in data["message"]
 
-    def test_focus_not_verified_no_target(self, client, normal_grant):
+    def test_focus_not_verified_no_target(self, client, normal_grant, elevated):
         """type 动作无 target_hwnd → FOCUS_NOT_VERIFIED。"""
         resp = client.post("/screen/action", json={
             "action": "type", "text": "x"
@@ -670,7 +702,7 @@ class TestSafetyMechanisms:
         assert data["status"] == "blocked"
         assert data["focus_check_status"] == "FOCUS_NOT_VERIFIED"
 
-    def test_window_range_check_invalid_hwnd(self, client, normal_grant):
+    def test_window_range_check_invalid_hwnd(self, client, normal_grant, elevated):
         """无效 hwnd → 窗口范围检查失败。"""
         resp = client.post("/screen/action", json={
             "action": "click", "x": 99999, "y": 99999, "hwnd": 65535
@@ -678,7 +710,7 @@ class TestSafetyMechanisms:
         assert resp.status_code == 200
         assert resp.json()["status"] == "blocked"
 
-    def test_dry_run_passes_all_checks(self, client, normal_grant):
+    def test_dry_run_passes_all_checks(self, client, normal_grant, elevated):
         """dry_run=true 走完所有前置校验后返回 dry_run 状态。
 
         用 hwnd=0 触发窗口范围检查异常路径（dry_run 在范围检查之后）。
@@ -763,7 +795,7 @@ class TestUIAEndToEnd:
 
     def test_uia_set_value_notepad_with_postcondition(self, real_client, watchdog_grant, notepad_app_real):
         """UIA set_value 记事本 + uia_value_equals 后验。"""
-        test_text = "LocalAgent E2E 中文测试"
+        test_text = "Parcae E2E 中文测试"
 
         # 1. snapshot 记事本
         resp = real_client.post("/screen/uia/snapshot", json={
@@ -1315,7 +1347,7 @@ class TestZcodeAlignmentE2E:
 
     def test_clipboard_roundtrip(self, client, watchdog_grant):
         """write_clipboard → read_clipboard 往返一致。"""
-        text = "LocalAgent E2E 剪贴板往返 12345"
+        text = "Parcae E2E 剪贴板往返 12345"
 
         resp = client.post("/screen/clipboard", json={"text": text})
         assert resp.status_code == 200

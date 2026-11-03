@@ -1,4 +1,4 @@
-"""LocalAgent 客户端入口
+"""Parcae 客户端入口
 
 启动方式：python -m client.main
 """
@@ -14,9 +14,9 @@ from lib.ui import apply_theme
 
 def main():
     app = cast(QApplication, QApplication.instance() or QApplication(sys.argv))
-    app.setApplicationName("LocalAgent Client")
-    app.setOrganizationName("LocalAgent")
-    app.setApplicationDisplayName("LocalAgent 客户端")
+    app.setApplicationName("Parcae Client")
+    app.setOrganizationName("Parcae")
+    app.setApplicationDisplayName("Parcae 客户端")
 
     # 全局深色工程主题（含 Fusion 风格 + 字体 + QSS）
     apply_theme(app)

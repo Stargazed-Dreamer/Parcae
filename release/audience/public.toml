@@ -147,6 +147,23 @@ core_files_exclude = [
   #   纯个人数据——按"排除比脱敏更省事也更可靠"处理。
   #   脱敏引擎仍在包里：SKILL.md / loop_actions.py / manifest.toml 照常发布。
   "workspace/disk_manager/pending_decisions.md",
+
+  # --- 2026-11-03 发布范围收窄（用户"全按默认"确认，对应 57 组分诊里的 4 项）---
+  # 判据统一是「收包人拿这份东西能不能用」，不是「里面有没有个人路径」(路径能脱敏)。
+  #
+  # 磁盘 I/O 取证报告：记录的是"这台机器那天为什么读写了 9.8GB"——SRUM 数据库导出、
+  #   逐进程小时级时间线、NVMe SMART 快照。收包人没有这套库也没有那天的现场，
+  #   拿到既跑不起来也无处对照；脚本里还写着本机盘符与进程名。属纯个人取证。
+  #   目录级排除而非逐个文件：将来同类突发归因报告也是同一性质。
+  "workspace/disk_manager/reports/**",
+  # VM 磁盘空间分析（单文件）：同样是"我这台机器还剩多少空间"的一次性结论。
+  "workspace/disk_manager/VM_SPACE_ANALYSIS.md",
+  # 磁盘 I/O 排查交接单：写给"接手这台机器的人"的备忘录，含真机盘符与进度状态。
+  "workspace/disk_manager/DISK_IO_HANDOVER.md",
+  # 群聊就业情报导入 skill：描述的是把群聊里看到的招聘信息整理进个人求职档案，
+  #   依赖私有 Future 工作区的目录约定；且正文含私聊内容的分类口径。
+  #   对外没有可复用价值（别人没有那套档案结构），隐私面最大的一项。
+  ".agents/skills/daily/future-group-intel-import/**",
 ]
 
 [audience.gates]

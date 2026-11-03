@@ -1835,80 +1835,12 @@ class TestPoolAcquireModelHealth:
 class TestMemoryUsesPool:
     """v15 memory 模块统一走 pool 的集成测试
 
-    验证 maintainer._call_llm_validate_with_429_flag 和 compress._llm_compress
-    实际通过 pool.call / pool.call_simple 调用 LLM，且 use_case 正确。
+    验证 compress._llm_compress 实际通过 pool.call_simple 调用 LLM，且 use_case 正确。
+
+    2026-10-31：`memory_validate` 那条随 LLM 验证器一起删除（用户 D7），
+    记忆维护器现在零 LLM 调用——所以这里只剩 memory_compress。
+    
     """
-
-    def test_memory_maintainer_uses_pool(self, monkeypatch):
-        """maintainer 的 LLM 验证走 pool.call(use_case="memory_validate")"""
-        import os
-        import tempfile
-
-        from server.llm_pool import singleton as singleton_mod
-        from server.memory.config import MemoryConfig
-        from server.memory.maintainer import MemoryMaintainer
-        from server.memory.store import MemoryStore
-
-        # 准备 in-memory store + maintainer
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        try:
-            store = MemoryStore(db_path)
-            store.initialize()
-            # 插入一条 pending 的记忆
-            store.conn.execute(
-                "INSERT INTO facts (key, value, updated_at) VALUES (?, ?, ?)",
-                ("test_key", "test_value", "2020-01-01 00:00:00"),
-            )
-            store.conn.execute(
-                "INSERT INTO memory_meta (key, stale_score, validation_status) "
-                "VALUES (?, ?, 'pending')",
-                ("test_key", 30.0),
-            )
-            store.conn.commit()
-
-            cfg = MemoryConfig()
-            maintainer = MemoryMaintainer(store, cfg)
-
-            # 构造 fake pool，记录调用参数并返回预定义 JSON
-            recorded_calls: list[dict] = []
-
-            class _FakePool:
-                def call(self, messages, **kwargs):
-                    recorded_calls.append({"messages": messages, **kwargs})
-                    return {
-                        "ok": True,
-                        "content": '{"is_accurate": true, "reason": "测试", "suggested_action": "keep"}',
-                    }
-
-            monkeypatch.setattr(singleton_mod, "get_pool", lambda: _FakePool())
-
-            # 执行 run_validate
-            import asyncio
-            stats = asyncio.run(maintainer.run_validate())
-
-            # pool.call 被调用且 use_case 正确
-            assert len(recorded_calls) == 1
-            assert recorded_calls[0]["use_case"] == "memory_validate"
-            assert recorded_calls[0]["retries"] == 1
-            # messages 含 system + user
-            assert len(recorded_calls[0]["messages"]) == 2
-            assert recorded_calls[0]["messages"][0]["role"] == "system"
-            assert recorded_calls[0]["messages"][1]["role"] == "user"
-
-            # 验证结果写回 DB
-            assert stats["validated"] == 1
-            assert stats["keep"] == 1
-            cur = store.conn.execute(
-                "SELECT validation_status FROM memory_meta WHERE key = ?",
-                ("test_key",),
-            )
-            assert cur.fetchone()[0] == "keep"
-
-            store.close()
-        finally:
-            if os.path.exists(db_path):
-                os.unlink(db_path)
 
     def test_memory_compress_uses_pool(self, monkeypatch):
         """compress 的 LLM 压缩走 pool.call_simple(use_case="memory_compress")"""

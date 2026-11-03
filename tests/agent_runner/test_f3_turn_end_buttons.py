@@ -16,8 +16,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent.types import Message  # noqa: E402
 from client.panels.chat import _MessageTimeline  # noqa: E402
+from lib.agent_runtime.types import Message  # noqa: E402
 
 
 @pytest.fixture
@@ -102,7 +102,7 @@ def test_event_filter_blocks_tree_tooltip(qapp, monkeypatch, tmp_path):
     """eventFilter 吞掉会话树/最近列表的 ToolTip 事件（"Loc..." 小窗口根因）。
 
     Qt item 视图为截断文本自动弹完整标题 tooltip；tooltip 是真实顶层窗口，
-    窗口标题取应用显示名"LocalAgent 客户端"（用户看到的"Loc... 小窗口"）。
+    窗口标题取应用显示名"Parcae 客户端"（用户看到的"Loc... 小窗口"）。
     """
     import tests.client_ui.test_chat_panel_v2_hover_buttons as hb
 

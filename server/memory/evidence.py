@@ -37,7 +37,8 @@ class Evidence:
     source_id: 对应表（messages/facts/summaries）的主键 id
     content_preview: 前 500 字符（避免存储过大）
     timestamp: 消息时间戳 / fact.updated_at epoch / summary.end_time
-    retrieval_score: 检索打分 0-1（messages 用 BM25/向量分，facts 用 confidence）
+    retrieval_score: 检索打分 0-1（messages 用 BM25/向量分，facts 用 confidence ×
+        词项覆盖率 —— 见 organize_evidence 内 fact 分支注释）
         —— 摘要**不再**填一个写死的中位分（T18 HONEST_EMPTY）：它没有被打分，
         就把 scored 标 False 并排在有分证据之后，别冒充"中等可信"。
     source_tag: 自定义来源标签（如 'manual'、'vl_summary'、'bill_summary'）
@@ -138,12 +139,18 @@ class EvidenceLedger:
                 # fact 的 timestamp 用 updated_at 转 epoch
                 ts = _parse_iso_to_epoch(r.get("updated_at"))
                 confidence = float(r.get("confidence", 1.0))
+                # 2026-10-10（工具体检 B1）：fact 原来直接拿 confidence 当 retrieval_score，
+                # 而实测 facts 表 161 条 confidence **全是 1.0** ⇒ 任何一条 fact 命中都
+                # 稳压所有 message，把 top_k 全占掉。现在乘上 `_search_facts` 给的词项
+                # 覆盖率：全命中仍是 confidence，半命中按半分排，跟 messages 的同量纲
+                # 分数可比。缺该字段的老调用方（如直接手搓 dict）行为不变。
+                fact_score = confidence * float(r.get("match_score", 1.0))
                 evidences.append(Evidence(
                     source_type="fact",
                     source_id=int(r.get("id", 0)),
                     content_preview=str(r.get("value", ""))[:500],
                     timestamp=ts,
-                    retrieval_score=confidence,  # fact 用 confidence 作为 retrieval_score
+                    retrieval_score=fact_score,
                     source_tag=r.get("key"),
                     confidence=confidence,
                     matched_by="fact_kv",
@@ -195,14 +202,21 @@ class EvidenceLedger:
 
     @staticmethod
     def _determine_matched_by(r: dict) -> str:
-        """根据消息搜索结果字段判断匹配类型"""
+        """根据消息搜索结果字段判断匹配类型。
+
+        检索层对未命中的一路填的是 0 值而不是缺字段（semantic.py 的
+        bm25_score / vector_score 恒存在），所以这里必须按 >0 判；
+        只看 is not None 会让所有混合检索结果永远报 both。
+        """
         bm25_score = r.get("bm25_score")
         vec_score = r.get("vector_score")
-        if bm25_score is not None and vec_score is not None:
+        has_bm25 = isinstance(bm25_score, (int, float)) and bm25_score > 0
+        has_vec = isinstance(vec_score, (int, float)) and vec_score > 0
+        if has_bm25 and has_vec:
             return "both"
-        elif vec_score is not None:
+        if has_vec:
             return "vector"
-        elif bm25_score is not None:
+        if has_bm25:
             return "bm25"
         return ""
 

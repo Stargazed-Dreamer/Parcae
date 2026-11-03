@@ -22,15 +22,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
+from lib.agent_runtime import (  # noqa: E402
     EventStore,
     MockLLM,
     RunnerConfig,
     RunnerDeps,
     SessionRunner,
 )
-from client.core.agent.compactor import Compactor  # noqa: E402
-from client.core.agent.types import (  # noqa: E402
+from lib.agent_runtime.compactor import Compactor  # noqa: E402
+from lib.agent_runtime.types import (  # noqa: E402
     LLMRequest,
     LLMResponse,
     Message,
@@ -218,7 +218,7 @@ class _CompactionTriggerLLM:
             )
         # 第一次主 LLM 调用 → 抛 ContextOverflow
         if self.call_count["n"] == 1:
-            from client.core.agent.compactor import ContextOverflow
+            from lib.agent_runtime.compactor import ContextOverflow
             raise ContextOverflow(
                 "simulated 413 context overflow",
                 status_code=413,

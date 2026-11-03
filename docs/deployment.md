@@ -32,7 +32,7 @@ OCR、本地嵌入模型、语音转写、GUI 面板全部是阶段 3 的可选�
 | **Python** | 3.12+ | 系统安装即可（用于跑自检脚本）；项目依赖由 uv 管理，不需要手动装 |
 | **uv** | 最新版 | 包管理器。安装：`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 \| iex"` |
 | **Git** | 任意版本 | 用于 clone |
-| **管理员权限** | 启动后端时需要 | 键鼠操控走 Win32 `SetCursorPos` / `SetForegroundWindow`，无权限会被 Windows UIPI 静默阻止。`start.bat` 会自动 UAC 提权 |
+| **管理员权限** | 仅键鼠/UIA 操控需要 | 键鼠操控走 Win32 `SetCursorPos` / `SetForegroundWindow`，无权限会被 Windows UIPI 静默阻止。用户手动启动 `start.bat` 会自动 UAC 提权；**agent 自启动默认非提权**（MCP/REST/浏览器/截图/OCR 不受影响） |
 | **LLM API Key** | 至少 1 个 | 后端在**无 key 时也能启动**（依赖 key 的功能会安全停止并报告），但 Agent 实际干活需要。tier 3 为默认层 |
 
 ### 可选但推荐
@@ -71,8 +71,8 @@ uv run python -c "import ctypes; ctypes.CDLL('nvml.dll'); print('NVML ok')"   # 
 ### 2.1 克隆仓库
 
 ```bash
-git clone https://github.com/Stargazed-Dreamer/localagent-public.git localAgent
-cd localAgent
+git clone https://github.com/Stargazed-Dreamer/localagent-public.git Parcae
+cd Parcae
 ```
 
 > clone 到**任意目录**都可以，脚本内部一律用相对路径定位项目根。
@@ -87,7 +87,7 @@ cd localAgent
 
 ```bash
 python tools/deploy/apply_placeholders.py . --dry-run ^
-    --project-root D:\code\localAgent ^
+    --project-root D:\code\Parcae ^
     --username your_name ^
     --data-drive D
 ```
@@ -96,14 +96,14 @@ python tools/deploy/apply_placeholders.py . --dry-run ^
 
 ```bash
 python tools/deploy/apply_placeholders.py . ^
-    --project-root D:\code\localAgent ^
+    --project-root D:\code\Parcae ^
     --username your_name ^
     --data-drive D
 ```
 
 | 参数 | 含义 | 注意 |
 |------|------|------|
-| `--project-root` | LocalAgent 项目根的绝对路径 | 就是上一步 `git clone` 出来的目录 |
+| `--project-root` | Parcae 项目根的绝对路径 | 就是上一步 `git clone` 出来的目录 |
 | `--username` | 你的 Windows 用户名 | 用于少数含用户目录的路径 |
 | `--data-drive` | 数据盘盘符**字母**（如 `D`） | **不要带冒号**。传 `D:` 会得到 `D::\...` 双冒号异常路径，脚本会报错退出 |
 
@@ -173,7 +173,7 @@ cp config.example.toml config.toml
 
 ```toml
 [browser]
-user_data_dir = "D:\\code\\localAgent\\chrome_debug"   # 独立用户数据目录（绝对路径，注意双反斜杠）
+user_data_dir = "D:\\code\\Parcae\\chrome_debug"   # 独立用户数据目录（绝对路径，注意双反斜杠）
 
 [models]
 external_dir = ""        # 空字符串 = 用项目内 weights/ 目录；设绝对路径可把模型集中到数据盘（如 "D:\\ai_models"）
@@ -240,22 +240,33 @@ tier 说明：1 最轻量 / 2 轻量 / **3 默认** / 4 较强 / 5 最强大（�
 start.bat
 ```
 
-`start.bat` 会：① 检测管理员权限，无则自动 UAC 提权 → ② 杀掉占用 8766 端口的旧后端 → ③ 设置 UTF-8 stdio → ④ 启动 `.venv\Scripts\python.exe -m server.main`。
+`start.bat` 会：① 检测管理员权限，无则自动 UAC 提权 → ② 让存量实例**先优雅退出**（外壳读 `server_port.json` 的 port/pid，先 `POST /shutdown`，超时才降级 `taskkill`；外壳缺失时退回原 `/F` 直杀）→ ③ 设置 UTF-8 stdio → ④ 经 `tools/runtime/run_backend.py`（退出监控外壳）启动 `.venv\Scripts\python.exe -m server.main`；外壳文件缺失时自动回退成直接启动。
+
+> 📋 第 ④ 步的退出监控（2026-10-30 新增）：控制台 stdout+stderr 落 `data/logs/backend_console_YYYYMMDD.log`、
+> 每 30s 内存采样落 `backend_mem_YYYYMMDD.jsonl`、退出记录（exit code / 存活时长 / 峰值内存 /
+> 优雅-vs-硬杀判定 / 有无 Traceback / 接管过程）落 `backend_exit.jsonl`。详见 `docs/operations-manual.md`「后端重启流程」。
+
+> ⚠️ `start.bat` 是**用户手动启动**的入口，会弹 UAC。**agent 自启动请不要用它**，直接用下面的非提权命令；需要键鼠/UIA 权限时请用户自己运行 `start.bat`。
 
 > 🚫 **不要修改 `start*.bat`**。它们内部用 `%~dp0` + 相对 `.venv` 路径，**clone 到任何目录都开箱可用**，没有任何需要你改的地方。
 > `.bat` 在中文 Windows 上对编码（GBK + CRLF + 无 BOM）和行尾极其敏感，用编辑器/agent"顺手改一下"很容易把脚本改坏，
 > 症状是满屏乱码或报 `'XXX' 不是内部或外部命令`。**确实需要改就先读 `.agents/skills/bat_writing/SKILL.md`。**
+> 例外说明（2026-10-30）：`start.bat` 第 ④ 步换成调 `tools/runtime/run_backend.py` 是**项目维护者批准的改动**，
+> 改后仍是纯 ASCII + CRLF，`fix_bat_encoding.py start.bat --check` 五项全 OK；这条禁令的其余部分依然有效。
 
-手动启动（管理员权限的 PowerShell）：
+手动启动：
 
 ```bash
+# agent 自启动（非提权；MCP/REST/浏览器/截图/OCR 正常）
 .venv\Scripts\python.exe -m server.main
 ```
+
+需要键鼠/UIA 权限时，由用户在管理员 PowerShell 里执行同一条命令，或运行 `start.bat`。
 
 启动成功后控制台输出：
 
 ```
-[INFO] Starting LocalAgent...
+[INFO] Starting Parcae...
 [INFO] API: http://127.0.0.1:8766
 [INFO] Dashboard: http://127.0.0.1:8766/static/index.html
 [INFO] MCP: http://127.0.0.1:8766/mcp
@@ -330,7 +341,7 @@ curl.exe -s "http://127.0.0.1:8766/guide?task=整理下载文件夹"
 ```json
 {
   "mcpServers": {
-    "localagent": {
+    "parcae": {
       "type": "streamableHttp",
       "url": "http://127.0.0.1:8766/mcp"
     }
@@ -410,7 +421,7 @@ extras 组名与上表的对应：`ocr`=PaddleOCR、`inference`=本地嵌入模�
 
 ## 6. 配置文件详解
 
-LocalAgent 用三个配置文件分工管理配置和密钥：
+Parcae 用三个配置文件分工管理配置和密钥：
 
 | 文件 | 用途 | 是否进 git | 模板 |
 |------|------|-----------|------|
@@ -427,7 +438,7 @@ port = 8766               # 监听端口
 
 [browser]
 debug_port = 9222         # 调试浏览器 CDP 端口
-user_data_dir = "D:\\code\\localAgent\\chrome_debug"   # 独立用户数据目录（绝对路径，注意双反斜杠）
+user_data_dir = "D:\\code\\Parcae\\chrome_debug"   # 独立用户数据目录（绝对路径，注意双反斜杠）
 
 [models]
 external_dir = ""         # 模型存储根目录。空 = 用项目内 weights/；填绝对路径可集中到数据盘
@@ -480,7 +491,7 @@ uv run python tools/browser/start_debug_browser.py --copy-user-data
 uv run python tools/browser/start_debug_browser.py --browser-path "C:\Program Files\Google\Chrome\Application\chrome.exe"
 
 # 指定端口和用户数据目录
-uv run python tools/browser/start_debug_browser.py --port 9222 --user-data-dir "D:\code\localAgent\chrome_debug"
+uv run python tools/browser/start_debug_browser.py --port 9222 --user-data-dir "D:\code\Parcae\chrome_debug"
 ```
 
 **重要约束**（见 [environment-constraints.md](environment-constraints.md) "调试浏览器实例"章节）：
@@ -533,7 +544,7 @@ GUI 面板由 `PanelRegistry` 扫描 `client/panels/` 自动发现，按 main / 
 
 **原因**：Windows UIPI 阻止非管理员进程调 `SetCursorPos` / `SetForegroundWindow`。
 
-**解决**：用 `start.bat` 启动（自动 UAC 提权），或手动用管理员 PowerShell 启动；用 `/health` 确认 `screen.admin=true`。
+**解决**：请用户手动运行 `start.bat`（自动 UAC 提权），或在管理员 PowerShell 启动；agent 不要替用户触发 UAC。用 `/health` 确认 `screen.admin=true`。
 
 ### 3. GPU / CUDA 缺失
 

@@ -248,7 +248,7 @@ def check_guide_registry(opids: set[str]) -> dict[str, dict]:
         for ref in entry.get("mcp_tools_priority", []) or []:
             m = tool_re.match(ref.strip())
             if m and m.group(1) not in known_tools:
-                if m.group(1) not in {"localagent_advanced_tool", "localagent_template_tool"}:
+                if m.group(1) not in {"parcae_advanced_tool", "parcae_template_tool"}:
                     unknown_refs.add(f"{tt}: {m.group(1)}")
     for u in sorted(unknown_refs):
         emit("D", "LOW", f"mcp_tools_priority 引用了未知工具名（可能已改名/删除）→ {u}")

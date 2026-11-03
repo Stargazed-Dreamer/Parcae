@@ -23,7 +23,7 @@ from pathlib import Path
 
 from server.config import get_cleanup_config
 
-logger = logging.getLogger("localagent.storage_health")
+logger = logging.getLogger("parcae.storage_health")
 
 
 def _resolve_mem_db_path() -> Path:

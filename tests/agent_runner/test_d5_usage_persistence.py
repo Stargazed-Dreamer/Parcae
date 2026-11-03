@@ -33,7 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pytest  # noqa: E402
 
-from client.core.agent.event_store import EventStore  # noqa: E402
+from lib.agent_runtime.event_store import EventStore  # noqa: E402
 
 # ============================================================================
 # Fixtures

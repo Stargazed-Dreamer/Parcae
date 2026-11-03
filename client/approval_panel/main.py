@@ -27,7 +27,7 @@ from client.approval_panel.tray import TrayIcon
 from lib.ui import apply_theme
 
 # 单实例锁 key（QSharedMemory）
-_SINGLE_INSTANCE_KEY = "LocalAgent_ApprovalPanel"
+_SINGLE_INSTANCE_KEY = "Parcae_ApprovalPanel"
 
 
 def _acquire_single_instance(app: QApplication) -> bool:
@@ -50,7 +50,7 @@ def _acquire_single_instance(app: QApplication) -> bool:
 def _activate_existing_panel() -> None:
     """第二个实例启动时，尝试激活已有面板窗口。
 
-    通过枚举顶层窗口找到标题为 "LocalAgent 审批面板" 的窗口并前置。
+    通过枚举顶层窗口找到标题为 "Parcae 审批面板" 的窗口并前置。
     简单实现：用 Win32 API 枚举窗口（Windows 平台）。
     """
     if sys.platform != "win32":
@@ -67,7 +67,7 @@ def _activate_existing_panel() -> None:
             if length > 0:
                 buf = ctypes.create_unicode_buffer(length + 1)
                 ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
-                if buf.value == "LocalAgent 审批面板":
+                if buf.value == "Parcae 审批面板":
                     nonlocal target_hwnd
                     target_hwnd = hwnd
                     return False  # 停止枚举
@@ -92,8 +92,8 @@ def main() -> int:
     # 不抢焦点：QApplication 前 set Qt::AA_DisableWindowContextHelpButton
     # 启动后窗口通过 WindowDoesNotAcceptFocus 不激活
     app = cast(QApplication, QApplication.instance() or QApplication(sys.argv))
-    app.setApplicationName("LocalAgent 审批面板")
-    app.setOrganizationName("LocalAgent")
+    app.setApplicationName("Parcae 审批面板")
+    app.setOrganizationName("Parcae")
     # 关闭最后一个窗口时不退出（托盘模式需要）
     app.setQuitOnLastWindowClosed(False)
 

@@ -19,21 +19,49 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-RAW_DIR = Path("workspace/yihuan_gacha/raw")          # 原始数据目录（保留近3次）
+RAW_DIR = Path("workspace/yihuan_gacha/raw")          # 原始数据目录（清洗成功后归档到 backup/raw/）
+ARCHIVE_DIR = Path("workspace/yihuan_gacha/backup/raw")  # 原始件永久归档（永不删除）
 SUMMARY_FILE = Path("workspace/yihuan_gacha/yihuan_gacha_summary.json")  # 采集工作文件（近1次）
 REVIEW_FILE = Path("workspace/yihuan_gacha/yihuan_gacha_review.json")    # 清洗审核文件（近1次）
 DATABASE_FILE = Path("workspace/yihuan_gacha/yihuan_gacha_database.json") # 最终数据库（近1次）
 
 
 def find_latest_raw():
-    """查找 raw/ 目录中最新的原始数据文件，找不到则回退到 summary 工作文件"""
-    if RAW_DIR.exists():
-        raw_files = sorted(RAW_DIR.glob("yihuan_gacha_raw_*.json"))
-        if raw_files:
-            return raw_files[-1], True  # (path, is_raw)
+    """查找 raw/ 目录中最新的原始数据文件，找不到则回退到 backup/raw/、再回退 summary 工作文件"""
+    for raw_dir in (RAW_DIR, ARCHIVE_DIR):
+        if raw_dir.exists():
+            raw_files = sorted(raw_dir.glob("yihuan_gacha_raw_*.json"))
+            if raw_files:
+                return raw_files[-1], True  # (path, is_raw)
     if SUMMARY_FILE.exists():
         return SUMMARY_FILE, False
     return None, False
+
+
+def archive_raw_files(raw_dir=None, archive_dir=None):
+    """清洗成功后把 raw/ 里的原始件归档到 backup/raw/ —— 永不删除。
+
+    原先采集脚本用 cleanup_old_raw(keep=3) 直接 unlink 最旧文件，与 SKILL.md
+    「raw 永不覆盖、永不删除」冲突（2026-10-30 已误删 5 个不可再生的原始件，
+    其中 2 个当晚删除、3 个更早）。归档放在清洗之后而不是采集之后，是因为
+    find_latest_raw() 只认 raw/，采完就挪走会让清洗读不到原始件。
+    """
+    src = Path(raw_dir) if raw_dir else RAW_DIR
+    dst = Path(archive_dir) if archive_dir else ARCHIVE_DIR
+    if not src.exists():
+        return 0
+    moved = 0
+    for f in sorted(src.glob("yihuan_gacha_raw_*.json")):
+        dst.mkdir(parents=True, exist_ok=True)
+        target = dst / f.name
+        n = 1
+        while target.exists():  # 同名文件改名保留，绝不覆盖
+            target = dst / f"{f.stem}_{n}{f.suffix}"
+            n += 1
+        f.replace(target)
+        moved += 1
+        print(f"  原始件归档: backup/raw/{target.name}")
+    return moved
 
 # ========== 稀有度映射（用户确认，作为权威来源） ==========
 RARITY_MAP = {
@@ -43,6 +71,8 @@ RARITY_MAP = {
     '角色·残虹': 'S', '角色·伊洛伊': 'S',
     # 灵可：2026-09-30 用户确认 S（采集时颜色检测返回 ?，非实测）
     '角色·灵可': 'S',
+    # 明音凛：2026-10-30 用户确认 S（限定棋盘 10-16 抽到，颜色金黄 42°/0.96，与灵可同色）
+    '角色·明音凛': 'S',
     '道具·失纬棋子': 'S', '道具·质实骰子': 'S', '道具·捏造骰子': 'S',
     '弧盘·好狗狗走四方': 'S', '弧盘·预备备': 'S',
     # 2026-10-07 用户确认 S：09-30 夜采那 6 项，检测原值全为 S，当时未落盘裁片。
@@ -88,6 +118,9 @@ NAME_FIXES = {
     '弧盘·「我们。√1': '弧盘·「我们。」',
     '弧盘：「电音」狂欢': '弧盘·「电音」狂欢',
     '弧盘「电音」狂欢': '弧盘·「电音」狂欢',
+    # 2026-10-30 武器池实测：OCR 丢掉开头的「，只剩尾部书名号（→ 稀有度落 ? 待复核）
+    '弧盘·最后一朵玫瑰」': '弧盘·「最后一朵玫瑰」',
+    '弧盘·最后一朵玫瑰': '弧盘·「最后一朵玫瑰」',
     '弧盘■笑口常开': '弧盘·笑口常开',
     '盘·美口常开': '弧盘·笑口常开',
     '强盘·成功的第一步': '弧盘·成功的第一步',
@@ -255,8 +288,11 @@ def validate_times(records, board_type):
     return warnings
 
 # ========== 主流程 ==========
-def run_clean():
+def run_clean(raw_path=None):
     """执行清洗主流程
+
+    raw_path: 指定原始件路径（默认取 raw/ 或 backup/raw/ 里最新的一个）。
+    指定后可用于拿历史原始件重算，不会碰 raw/ 目录。
 
     支持武器池(弧盘研募)记录：
     - 武器池名称无"弧盘·"前缀，清洗时自动补前缀以便RARITY_MAP查找
@@ -264,7 +300,11 @@ def run_clean():
     - 武器池保留 research_type 字段（研募类型，如"奇迹盒盒"）
     - 武器池与已有数据库合并（支持单独采集武器池而不丢失角色池数据）
     """
-    raw_path, is_raw = find_latest_raw()
+    if raw_path is None:
+        raw_path, is_raw = find_latest_raw()
+    else:
+        raw_path = Path(raw_path)
+        is_raw = True
     if raw_path is None:
         print("[!] 未找到原始数据文件，请先运行采集脚本")
         return
@@ -369,6 +409,9 @@ def run_clean():
                 'count': count,
                 'dice_points': dice_points,
                 'time': unix_time,
+                # time_source 标明时间可信度：raw=游戏里读到的真值；
+                # legacy=raw 已不可得的超期旧记录，时间带历史偏移（仅供排序，别当真值用）
+                'time_source': 'raw',
             }
             # 武器池额外保留 research_type 字段（不影响角色池记录）
             if is_weapon:
@@ -377,35 +420,15 @@ def run_clean():
 
         print(f"  清洗后: {len(cleaned)} 条")
 
-        # 按时间排序（time=0的排最后）
+        # 按时间排序（time=0的排最后）。同一时间戳的记录保持采集顺序（sort 稳定）
         cleaned.sort(key=lambda x: (x['time'] == 0, x['time']))
 
-        # 十连组时间均摊：同时间戳的记录反序后+1s递增
-        # 游戏历史页按倒序显示（最新在前），OCR读取的顺序也是倒序
-        # 反序后得到正序（最旧在前），符合游戏内实际抽取顺序
-        i = 0
-        while i < len(cleaned):
-            t = cleaned[i]['time']
-            if t == 0:
-                i += 1
-                continue
-            j = i + 1
-            while j < len(cleaned) and cleaned[j]['time'] == t:
-                j += 1
-            group_size = j - i
-            if group_size >= 2:
-                # 反序：OCR最后一条（最旧）获得最早时间
-                for k in range(group_size):
-                    cleaned[j - 1 - k]['time'] = t + k
-            i = j
-
-        # 确保时间严格递增（处理不同组之间的时间冲突）
-        for k in range(1, len(cleaned)):
-            if cleaned[k]['time'] > 0 and cleaned[k-1]['time'] > 0:
-                if cleaned[k]['time'] <= cleaned[k-1]['time']:
-                    cleaned[k]['time'] = cleaned[k-1]['time'] + 1
-
-        # 时间正确性验证
+        # 时间一律保留游戏里显示的真值，**不做任何单调化/均摊**。
+        # 一次十连的 10 条在游戏里本来就共享同一个时间（精确到秒），
+        # 老版为了用 time 当唯一键把同组拆成 t+0/t+1/…（最大偏移近 20 秒/组），
+        # 代价是库里时间从此不可信：跨轮判重、按时间对齐、增量水位线全部失效。
+        # 唯一性改由「内容多重集」承担（(名称, 稀有度, 时间) 出现次数），
+        # 与鸣潮 wuwa_gacha.py 的 _record_key / Counter 合并同一套做法。
         time_warnings = validate_times(cleaned, board_type)
 
         # 合并已有数据库（增量更新）
@@ -426,10 +449,20 @@ def run_clean():
             # 旧库中早于 raw 最早记录 - 120s 的保留（raw 丢失的旧记录）
             # 120s 容差：时间戳重分配偏移最大约60秒，2倍容差确保安全
             if raw_min_time > 0:
+                # 120s 容差：老库 time 曾被单调化（同组最多 +9s、跨组偶有 +1s），
+                # 真值只会更小；宽容一点，别把 raw 范围外的旧记录误当成 raw 范围内丢掉
                 cutoff = raw_min_time - 120
-                preserved = [r for r in old_records if 0 < r['time'] < cutoff]
+                candidates = [r for r in old_records if 0 < r['time'] < cutoff]
             else:
-                preserved = list(old_records)
+                candidates = list(old_records)
+
+            # raw 覆盖不到的旧记录（超过游戏 6 个月保留期，真时间已永久不可得）：
+            # 保留原值，但标 time_source=legacy —— 这几条的时间只能当排序用
+            preserved = []
+            for r in candidates:
+                r = dict(r)
+                r.setdefault('time_source', 'legacy')
+                preserved.append(r)
 
             # 对 raw 中 dice_points==-1 的记录，从旧库(raw范围内)查找 dice 修正
             # 用 (type, name, count) + ±120s 模糊匹配，只修正 dice 值，不影响记录保留
@@ -452,6 +485,7 @@ def run_clean():
                                 break
 
             merged = preserved + cleaned
+            # 稳定排序：同一十连共享同一 time，组内顺序保持 raw 采集顺序
             merged.sort(key=lambda x: (x['time'] == 0, x['time']))
             review_data[board_type] = merged
 
@@ -474,6 +508,11 @@ def run_clean():
     with open(REVIEW_FILE, "w", encoding="utf-8") as f:
         json.dump(review_data, f, ensure_ascii=False, indent=2)
     print(f"\n审核文件已保存: {REVIEW_FILE}")
+
+    # ========== 原始件归档（清洗成功后；raw 永不删除） ==========
+    archived = archive_raw_files()
+    if archived:
+        print(f"已归档 {archived} 个原始件到 {ARCHIVE_DIR}（不删除，可随时重算）")
 
     # ========== 打印名称审核清单 ==========
     print(f"\n{'='*60}")
@@ -537,6 +576,9 @@ def run_clean():
 
         if no_time:
             print(f"  [!] {no_time} 条记录缺少时间")
+        legacy_n = sum(1 for r in records if r.get('time_source') == 'legacy')
+        if legacy_n:
+            print(f"  [!] {legacy_n} 条是 raw 已不可得的旧记录，时间带历史偏移（time_source=legacy）")
 
 # ========== 时间补全接口 ==========
 def fix_time(board_type: str, index: int, time_str: str):
@@ -639,5 +681,12 @@ if __name__ == "__main__":
             print("用法:")
             print("  python workspace/yihuan_gacha/yihuan_clean.py --fix-time")
             print("  python workspace/yihuan_gacha/yihuan_clean.py --fix-time 限定棋盘 0 \"2026年6月8日 23:50:00\"")
+    elif '--raw' in sys.argv:
+        # 指定历史原始件重算（例如拿 backup/raw 里的完整件重建库）
+        idx = sys.argv.index('--raw')
+        if idx + 1 >= len(sys.argv):
+            print("用法: python workspace/yihuan_gacha/yihuan_clean.py --raw <原始件路径>")
+        else:
+            run_clean(sys.argv[idx + 1])
     else:
         run_clean()

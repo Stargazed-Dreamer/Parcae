@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-
+from tests.client_ui._local_store import local_store_factory as _local_store_factory  # noqa: E402
 
 # ============================================================================
 # Fixtures
@@ -67,7 +67,7 @@ def _run(coro):
 
 def _open_store(db_path: str):
     """打开一个独立 EventStore。"""
-    from client.core.agent import EventStore
+    from lib.agent_runtime import EventStore
 
     s = EventStore(db_path=db_path)
     s.init()
@@ -82,7 +82,7 @@ def _make_chat_panel(db_path: str, monkeypatch):
     import client.panels.chat as chat_module
     from client.panels.chat import ChatPanel
 
-    monkeypatch.setattr(chat_module, "DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(chat_module, "_make_read_store", _local_store_factory(db_path))
     return ChatPanel()
 
 
@@ -109,7 +109,7 @@ class TestEventStoreGroupPinned:
 
     def test_session_has_group_name_and_pinned_fields(self):
         """Session dataclass 应有 group_name/pinned 字段（T01 加列）。"""
-        from client.core.agent import Session
+        from lib.agent_runtime import Session
 
         s = Session(id="x", title="t")
         assert hasattr(s, "group_name"), "Session 应有 group_name 字段"
@@ -724,6 +724,30 @@ class TestInlineRename:
             assert isinstance(panel._rename_editor, QLineEdit)
             # 应该挂到 item widget
             assert panel._session_tree.itemWidget(item, 0) is panel._rename_editor
+        finally:
+            _cleanup_panel(panel, qapp)
+
+    def test_begin_rename_survives_tree_rebuild(self, qapp, tmp_path, monkeypatch):
+        """菜单打开期间树被刷新 clear()：按 sid 重新取 item，不能拿悬空 C++ 对象。"""
+        from PySide6.QtWidgets import QLineEdit
+
+        db = str(tmp_path / "test_rename_stale.db")
+        s = _open_store(db)
+        _run(s.create_session(session_id="sess-1", title="原标题"))
+        s.close()
+
+        panel = _make_chat_panel(db, monkeypatch)
+        try:
+            panel._refresh_session_list()
+            stale = panel._find_session_item("sess-1")
+            assert stale is not None
+            panel._last_tree_signature = None
+            panel._refresh_session_list()  # clear() 后 stale 已是已删除的 C++ 对象
+            panel._begin_rename(stale, "sess-1")
+            fresh = panel._find_session_item("sess-1")
+            assert fresh is not None
+            assert isinstance(panel._rename_editor, QLineEdit)
+            assert panel._session_tree.itemWidget(fresh, 0) is panel._rename_editor
         finally:
             _cleanup_panel(panel, qapp)
 

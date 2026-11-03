@@ -26,7 +26,7 @@ from pathlib import Path
 
 import toml
 
-# 项目根：lib/config_reader.py → parents[1] = localAgent/
+# 项目根：lib/config_reader.py → parents[1] = Parcae/
 # 与 lib/secret/paths.py 的 _PROJECT_ROOT 计算方式一致（parents[N]）
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 

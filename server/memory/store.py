@@ -1,5 +1,6 @@
 """SQLite 存储层 — 消息、摘要、事实的 CRUD"""
 
+import hashlib
 import json
 import logging
 import os
@@ -36,7 +37,7 @@ def _plus_one_microsecond(ts: str) -> str:
 class MemoryStore:
     """SQLite 存储层，线程安全（WAL 模式 + check_same_thread=False + 写锁）"""
 
-    _write_lock: threading.Lock
+    _write_lock: threading.RLock
 
     def __init__(self, db_path: str):
             """初始化数据库连接管理器。
@@ -52,7 +53,7 @@ class MemoryStore:
             """
             self.db_path = db_path  # 存储数据库文件路径，供后续连接使用
             self._conn: sqlite3.Connection | None = None  # 初始化数据库连接对象为None，表示尚未建立连接
-            self._write_lock = threading.Lock()
+            self._write_lock = threading.RLock()  # 可重入：ButlerStore 的读路径也复用它串行化单连接读
             self._table_columns_cache: dict[str, list[str]] = {}  # 表名列名缓存（实例级）
             # Ticket 01：DB 大小采样历史（in-memory 7 天滚动，不新增 sqlite 表）
             self._db_size_history: dict[str, float] = {}
@@ -313,25 +314,53 @@ class MemoryStore:
         occurred_at: str | None = None,
         consumption_contexts: list[str] | None = None,
         trigger_keywords: list[str] | None = None,
+        *,
+        title: str | None = None,
+        summary: str | None = None,
+        scope: str | None = None,
+        kind: str | None = None,
+        origin: str | None = None,
+        sensitivity: str | None = None,
+        evidence_refs: list[str] | None = None,
+        source_quote_ids: list[int] | None = None,
+        must_read: int | None = None,
+        expires_at: str | None = None,
+        dedup_hash: str | None = None,
     ) -> None:
-        """插入或更新一条事实记录。
+        """插入或更新一条事实记录 —— **记忆的唯一写入漏斗**。
 
         v3 新增：fact_type / occurred_at / consumption_contexts / trigger_keywords
-        这些字段为可选，不传时保持现有值（更新场景）或 NULL（新建场景）。
+        v8 新增（DL3）：三轴 title/summary/scope/kind/origin/sensitivity、
+                      证据 evidence_refs/source_quote_ids、红线 must_read、
+                      current_state 的 expires_at、幂等键 dedup_hash。
+        这些字段全部可选：不传时更新场景保留原值（COALESCE），新建场景为 NULL。
         mentioned_at 由 get_fact 自动更新，不在此处设置。
 
         Args:
             key: 事实的唯一键
             value: 事实的值（通常为 JSON 字符串）
-            source: 'auto' 或 'manual'
+            source: 'auto' 或 'manual'（**谁写进来的**，与 origin「谁说的」不同）
             confidence: 置信度 0-1
-            fact_type: 事实类型 'preference'|'project'|'reference'|'experience'|'transaction'
+            fact_type: 旧分类 'preference'|'project'|'reference'|'experience'|'transaction'
             occurred_at: 事实发生时间 ISO 字符串
             consumption_contexts: 消费场景列表（写入时序列化为 JSON 字符串）
             trigger_keywords: 触发关键词列表（写入时序列化为 JSON 字符串）
+            title: 列表/注入的短标题
+            summary: 1-2 句摘要，注入只看这个
+            scope: 'global' / 'project:<id>' / 'topic:<id>'
+            kind: norm/fact/pitfall/preference/procedure/reference/current_state
+            origin: user_quote / agent_extracted / system / tool
+            sensitivity: public / private-eng / personal（N1）
+            evidence_refs: 可机器核对的证据列表（path:line / 命令 / URL）
+            source_quote_ids: 指向 source_quotes.id 的列表
+            must_read: 1 = 必读（只允许 kind='norm'，由 wrapup 层校验）
+            expires_at: 过期时间（kind='current_state' 必填）
+            dedup_hash: 幂等键（sha256），唯一部分索引守着重不进去
         """
         contexts_json = json.dumps(consumption_contexts, ensure_ascii=False) if consumption_contexts is not None else None
         keywords_json = json.dumps(trigger_keywords, ensure_ascii=False) if trigger_keywords is not None else None
+        refs_json = json.dumps(evidence_refs, ensure_ascii=False) if evidence_refs is not None else None
+        quotes_json = json.dumps(source_quote_ids, ensure_ascii=False) if source_quote_ids is not None else None
         # T06：execute + commit 包入 _write_lock
         with self._write_lock:
             # v6：覆盖前先把旧值落进历史。**必须在同一次加锁里做**，
@@ -339,8 +368,12 @@ class MemoryStore:
             self._record_superseded_value(key, value)
             self.conn.execute(
                 """INSERT INTO facts (key, value, source, confidence, fact_type, occurred_at,
-                                       consumption_contexts, trigger_keywords, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+                                       consumption_contexts, trigger_keywords,
+                                       title, summary, scope, kind, origin, sensitivity,
+                                       evidence_refs, source_quote_ids, must_read,
+                                       expires_at, dedup_hash, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           datetime('now', 'localtime'))
                    ON CONFLICT(key) DO UPDATE SET
                        value = excluded.value,
                        source = excluded.source,
@@ -349,10 +382,231 @@ class MemoryStore:
                        occurred_at = COALESCE(excluded.occurred_at, facts.occurred_at),
                        consumption_contexts = COALESCE(excluded.consumption_contexts, facts.consumption_contexts),
                        trigger_keywords = COALESCE(excluded.trigger_keywords, facts.trigger_keywords),
-                       updated_at = datetime('now', 'localtime')""",
-                (key, value, source, confidence, fact_type, occurred_at, contexts_json, keywords_json),
+                       title = COALESCE(excluded.title, facts.title),
+                       summary = COALESCE(excluded.summary, facts.summary),
+                       scope = COALESCE(excluded.scope, facts.scope),
+                       kind = COALESCE(excluded.kind, facts.kind),
+                       origin = COALESCE(excluded.origin, facts.origin),
+                       sensitivity = COALESCE(excluded.sensitivity, facts.sensitivity),
+                       evidence_refs = COALESCE(excluded.evidence_refs, facts.evidence_refs),
+                       source_quote_ids = COALESCE(excluded.source_quote_ids, facts.source_quote_ids),
+                       must_read = COALESCE(excluded.must_read, facts.must_read),
+                       expires_at = COALESCE(excluded.expires_at, facts.expires_at),
+                       dedup_hash = COALESCE(excluded.dedup_hash, facts.dedup_hash),
+                       updated_at = datetime('now', 'localtime'),
+                       archived_at = NULL""",
+                (key, value, source, confidence, fact_type, occurred_at, contexts_json, keywords_json,
+                 title, summary, scope, kind, origin, sensitivity, refs_json, quotes_json,
+                 must_read, expires_at, dedup_hash),
             )
             self.conn.commit()
+
+    # ─── v8（DL3）：原话 / 候选账 / 上下文查询 ─────────────────────
+
+    def insert_source_quote(
+        self,
+        text: str,
+        speaker: str = "user",
+        project_id: str | None = None,
+        run_id: str | None = None,
+        sensitivity: str = "personal",
+        captured_at: str | None = None,
+    ) -> tuple[int, bool]:
+        """落一条用户原话，同 hash 不重复插。返回 ``(quote_id, is_new)``。
+
+        为什么按归一化 hash 去重：同一句话在一个 run 里被提交两次很常见
+        （``note`` 一次、``wrapup`` 一次），不判重会让原话表变成重复存档。
+        **原文永不 UPDATE**：命中已有 hash 直接返回旧 id，不改正文、不改 speaker。
+        """
+        norm = " ".join(text.split()).strip()
+        if not norm:
+            raise ValueError("原话为空，拒收")
+        qh = hashlib.sha256(norm.encode("utf-8")).hexdigest()
+        with self._write_lock:
+            row = self.conn.execute(
+                "SELECT id FROM source_quotes WHERE quote_hash = ?", (qh,)
+            ).fetchone()
+            if row:
+                return int(row[0]), False
+            cur = self.conn.execute(
+                "INSERT INTO source_quotes "
+                "(quote_hash, text, speaker, project_id, run_id, sensitivity, captured_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    qh,
+                    text,
+                    speaker,
+                    project_id,
+                    run_id,
+                    sensitivity,
+                    captured_at or datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+            self.conn.commit()
+            return int(cur.lastrowid or 0), True
+
+    def get_source_quote(self, quote_id: int) -> dict | None:
+        """按 id 取一条原话（脱敏后的正文照返回，调用方自己看 redacted_at）。"""
+        cur = self.conn.execute("SELECT * FROM source_quotes WHERE id = ?", (quote_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return dict(zip([d[0] for d in cur.description], row, strict=False))
+
+    def find_fact_by_dedup(self, dedup_hash: str) -> dict | None:
+        """按幂等键找已存在的事实。
+
+        **已失效的行也算命中**：一条记忆被软删后，同内容再提交不该变回两条——
+        要么显式 restore，要么换内容重写。这里返回整行（含 ``archived_at``），
+        由调用方决定是 duplicate 还是提示"已失效，要恢复吗"。
+        """
+        cur = self.conn.execute(
+            "SELECT * FROM facts WHERE dedup_hash = ? LIMIT 1", (dedup_hash,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return dict(zip([d[0] for d in cur.description], row, strict=False))
+
+    def list_fact_rows_by_scope_kind(self, scope: str, kind: str) -> list[dict]:
+        """去重回退用：v8 之前写入的行可能没有 dedup_hash，需在 Python 侧重算。"""
+        cur = self.conn.execute(
+            "SELECT * FROM facts WHERE scope = ? AND kind = ?", (scope, kind)
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r, strict=False)) for r in cur.fetchall()]
+
+    def record_memory_candidate(
+        self,
+        status: str,
+        payload: dict,
+        run_id: str | None = None,
+        reason: str | None = None,
+        fact_key: str | None = None,
+        dedup_hash: str | None = None,
+        submitted_at: str | None = None,
+    ) -> int:
+        """记一条候选的去向（accepted / merged / duplicate / rejected）。
+
+        这是「写不进去也要被看见」的落点：``rejected`` 行就是 DL5 的待审候选，
+        ``payload`` 原样存 JSON，人工改完可以再提交一次。
+        """
+        with self._write_lock:
+            cur = self.conn.execute(
+                "INSERT INTO memory_candidates "
+                "(run_id, submitted_at, status, reason, fact_key, dedup_hash, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    submitted_at or datetime.now().isoformat(timespec="seconds"),
+                    status,
+                    reason,
+                    fact_key,
+                    dedup_hash,
+                    json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+            self.conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def get_memory_candidate(self, candidate_id: int) -> dict | None:
+        cur = self.conn.execute(
+            "SELECT * FROM memory_candidates WHERE id = ?", (candidate_id,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [d[0] for d in cur.description]
+        item = dict(zip(cols, row, strict=False))
+        try:
+            item["payload"] = json.loads(item.get("payload") or "{}")
+        except (TypeError, ValueError):
+            pass
+        return item
+
+    def resolve_memory_candidate(
+        self,
+        candidate_id: int,
+        status: str,
+        *,
+        reason: str | None = None,
+        fact_key: str | None = None,
+    ) -> bool:
+        """把一条 rejected 候选置为终态；已处理过则返回 False（不覆盖）。"""
+        if status not in ("accepted", "merged", "duplicate", "dismissed"):
+            raise ValueError(f"非法候选终态: {status!r}")
+        with self._write_lock:
+            cur = self.conn.execute(
+                "UPDATE memory_candidates SET status = ?, reason = COALESCE(?, reason), "
+                "fact_key = ? WHERE id = ? AND status = 'rejected'",
+                (status, reason, fact_key, candidate_id),
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def list_facts_for_context(
+        self,
+        scope: str | None = None,
+        kinds: list[str] | None = None,
+        must_read_only: bool = False,
+        limit: int = 50,
+    ) -> list[dict]:
+        """取一批可注入的记忆（bundle 用）。
+
+        排序：``must_read`` 优先 → ``kind='norm'`` 优先 → ``updated_at`` 新。
+        只返回活跃行。**老数据 ``scope`` 为 NULL，按 scope 过滤时自然排除**——
+        这是有意的：没人判过归属的老记忆不进上下文，等人工标过再进。
+        """
+        where = ["archived_at IS NULL"]
+        params: list[Any] = []
+        if scope is not None:
+            where.append("scope = ?")
+            params.append(scope)
+        if kinds:
+            where.append("kind IN (%s)" % ", ".join("?" * len(kinds)))
+            params.extend(kinds)
+        if must_read_only:
+            where.append("COALESCE(must_read, 0) = 1")
+        params.append(limit)
+        cur = self.conn.execute(
+            "SELECT * FROM facts WHERE "
+            + " AND ".join(where)
+            + " ORDER BY COALESCE(must_read, 0) DESC,"
+            " CASE WHEN kind = 'norm' THEN 0 ELSE 1 END, updated_at DESC LIMIT ?",
+            params,
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r, strict=False)) for r in cur.fetchall()]
+
+    def list_norms(
+        self,
+        project_id: str | None = None,
+        limit: int = 500,
+    ) -> list[dict]:
+        """取上下文红线（DL1）：``kind='norm'`` 的活跃行。
+
+        - 只认 ``global`` 与 ``project:<id>`` 两级；``scope`` 为 NULL 的老数据
+          不进（没人判过归属，不假装知道）。
+        - 排序：``must_read`` 优先（安全类）→ global 先于 project → 新更新在前。
+        """
+        where = ["archived_at IS NULL", "kind = 'norm'"]
+        params: list[Any] = []
+        if project_id:
+            where.append("(scope = 'global' OR scope = ?)")
+            params.append(f"project:{project_id}")
+        else:
+            where.append("scope = 'global'")
+        params.append(limit)
+        cur = self.conn.execute(
+            "SELECT * FROM facts WHERE "
+            + " AND ".join(where)
+            + " ORDER BY COALESCE(must_read, 0) DESC,"
+            " CASE WHEN scope = 'global' THEN 0 ELSE 1 END,"
+            " updated_at DESC, key ASC LIMIT ?",
+            params,
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r, strict=False)) for r in cur.fetchall()]
 
     def _update_fact_structured_fields(self, key: str, fields: dict) -> None:
         """更新 facts 表的 v3 结构化字段（fact_type/occurred_at/consumption_contexts/trigger_keywords）。
@@ -393,8 +647,12 @@ class MemoryStore:
         T06：SELECT + UPDATE + commit + 重新 SELECT 包入 _write_lock，保证访问计数递增原子性。
         """
         # T06：整个读-改-写序列包入 _write_lock，避免并发 access_count 丢失更新
+        # C1（2026-10-18）：已失效（archived_at 非 NULL）的行视为不存在，
+        # 否则"删掉的记忆还能被 GET 出来"会让删除变成假动作。
         with self._write_lock:
-            cur = self.conn.execute("SELECT * FROM facts WHERE key = ?", (key,))
+            cur = self.conn.execute(
+                "SELECT * FROM facts WHERE key = ? AND archived_at IS NULL", (key,)
+            )
             row = cur.fetchone()
             if not row:
                 return None
@@ -404,13 +662,22 @@ class MemoryStore:
                 (now_iso, key),
             )
             self.conn.commit()
-            cur = self.conn.execute("SELECT * FROM facts WHERE key = ?", (key,))
+            cur = self.conn.execute(
+                "SELECT * FROM facts WHERE key = ? AND archived_at IS NULL", (key,)
+            )
             row = cur.fetchone()
             return self._row_to_dict("facts", row)
 
     def get_fact_meta(self, key: str) -> dict | None:
-        """读取 fact 元数据（不增加 access_count，用于索引构建）"""
-        cur = self.conn.execute("SELECT * FROM facts WHERE key = ?", (key,))
+        """读取 fact 元数据（不增加 access_count，用于索引构建）。
+
+        C1（2026-10-18）：已失效的行不返回。这条决定连带影响 ``upsert_fact``：
+        对已失效的 key 再写入时，`get_fact_meta` 返回 None ⇒ 调用方按"新建"处理，
+        而 SQL 侧的 ``ON CONFLICT ... archived_at = NULL`` 会把该行复活。
+        """
+        cur = self.conn.execute(
+            "SELECT * FROM facts WHERE key = ? AND archived_at IS NULL", (key,)
+        )
         row = cur.fetchone()
         return self._row_to_dict("facts", row) if row else None
 
@@ -515,32 +782,12 @@ class MemoryStore:
             return str(cur[0]), "current", None
         return None
 
-    def get_validation_meta(self, keys: list[str]) -> dict[str, dict]:
-        """批量读 memory_meta 的验证状态（unknown-outcome-evidence T17）。
-
-        memory_meta 由维护器逐条 LLM 验证后写入，此前只有面板与维护器自己读——
-        也就是"验没验过"这件事从不参与记忆被消费的那一刻。消费路径接上它之后，
-        被标成 archive/update 的记忆不再静默进上下文，而是带警告降到必读块末尾。
-
-        只读，不加锁：不写任何计数，读-改-写竞态在这里不存在。
-        """
-        if not keys:
-            return {}
-        placeholders = ",".join("?" for _ in keys)
-        rows = self.conn.execute(
-            f"SELECT key, validation_status, last_validated_at, stale_score, validation_note "
-            f"FROM memory_meta WHERE key IN ({placeholders})",
-            tuple(keys),
-        ).fetchall()
-        out: dict[str, dict] = {}
-        for row in rows:
-            d = self._row_to_dict("memory_meta", row)
-            key = d.get("key")
-            if key:
-                out[str(key)] = d
-        return out
-
-    def list_facts(self, source: str | None = None, limit: int = 100) -> list[dict]:
+    def list_facts(
+        self,
+        source: str | None = None,
+        limit: int = 100,
+        include_archived: bool = False,
+    ) -> list[dict]:
         """
         从数据库中获取事实（facts）记录列表。
 
@@ -554,14 +801,15 @@ class MemoryStore:
         返回:
             list[dict]: 一个字典列表，每个字典代表一条事实记录，键为数据库表的列名。
         """
+        arch = "" if include_archived else " AND archived_at IS NULL"
         if source: # 如果提供了来源参数，则执行带来源筛选的查询
             cur = self.conn.execute(
-                "SELECT * FROM facts WHERE source = ? ORDER BY updated_at DESC LIMIT ?",
+                f"SELECT * FROM facts WHERE source = ?{arch} ORDER BY updated_at DESC LIMIT ?",
                 (source, limit),
             )
         else: # 未提供来源参数，查询所有记录
             cur = self.conn.execute(
-                "SELECT * FROM facts ORDER BY updated_at DESC LIMIT ?", (limit,)
+                f"SELECT * FROM facts WHERE 1=1{arch} ORDER BY updated_at DESC LIMIT ?", (limit,)
             )
         # 从游标（cursor）的描述信息中提取列名，作为后续字典的键
         columns = [desc[0] for desc in cur.description]
@@ -569,21 +817,65 @@ class MemoryStore:
         return [dict(zip(columns, row, strict=False)) for row in cur.fetchall()]
 
     def delete_fact(self, key: str) -> bool:
-            """删除指定键对应的事实数据。
+            """**失效**指定 key 的记忆（不再物理删）。
 
-            从数据库的facts表中删除匹配给定键的记录。
+            C1（2026-10-18 用户拍板）：原实现是 ``DELETE FROM facts WHERE key = ?``，
+            与两条硬约束直接冲突——「``archive ≠ 删除``」「``superseded ≠ 物理删``」。
+            而且面板已成为纠正主通路，一次误点就不可逆消失。
 
-            参数:
-                key (str): 要删除的记录的键。
+            现在的语义：
+            - 写 ``archived_at``（定长文本、微秒精度，与 ``fact_revisions`` 同一格式）
+            - 行本身与 ``fact_revisions`` 全部保留 ⇒ ``restore_fact`` 可以还原
+            - 所有读路径（``get_fact`` / ``get_fact_meta`` / ``list_facts`` /
+              ``manager.find_consumable_memories`` / ``manager._search_facts``）
+              都已排除 ``archived_at IS NOT NULL``，所以"失效 = 读不到"
+            - 同 key 再写入会被 ``upsert_fact`` 复活（``archived_at = NULL``）
 
             返回:
-                bool: 如果成功删除至少一条记录，返回True；否则返回False。
+                bool: 真的从"活跃"变成"失效"才返回 True（重复删除返回 False）。
             """
-            # T06：execute + commit 包入 _write_lock
             with self._write_lock:
-                cur = self.conn.execute("DELETE FROM facts WHERE key = ?", (key,))
+                now_us = datetime.now().strftime(_REVISION_TS_FMT)
+                cur = self.conn.execute(
+                    "UPDATE facts SET archived_at = ? WHERE key = ? AND archived_at IS NULL",
+                    (now_us, key),
+                )
                 self.conn.commit()
                 return cur.rowcount > 0
+
+    def restore_fact(self, key: str) -> bool:
+        """把一条已失效的记忆恢复为活跃。
+
+        只在 ``archived_at`` 非 NULL 时生效（重复恢复返回 False），
+        这样 API 层能区分"恢复成功"与"本来就是活跃的"。
+        """
+        with self._write_lock:
+            cur = self.conn.execute(
+                "UPDATE facts SET archived_at = NULL WHERE key = ? AND archived_at IS NOT NULL",
+                (key,),
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def get_fact_raw(self, key: str) -> dict | None:
+        """读任意状态的 fact（含已失效），不增加 access_count。
+
+        给"失效列表 / 恢复前确认"用。**不要拿它当正常读路径**——
+        正常读一律走 ``get_fact`` / ``get_fact_meta``（它们会过滤已失效行）。
+        """
+        cur = self.conn.execute("SELECT * FROM facts WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return self._row_to_dict("facts", row) if row else None
+
+    def list_archived_facts(self, limit: int = 100) -> list[dict]:
+        """列出已失效的记忆（最近失效的在前），用于面板"回收站"视图。"""
+        cur = self.conn.execute(
+            "SELECT * FROM facts WHERE archived_at IS NOT NULL "
+            "ORDER BY archived_at DESC LIMIT ?",
+            (limit,),
+        )
+        columns = [d[0] for d in cur.description]
+        return [dict(zip(columns, row, strict=False)) for row in cur.fetchall()]
 
         # ─── 向量索引 ───────────────────────────────────────────
 
@@ -616,14 +908,16 @@ class MemoryStore:
         """获取所有向量用于搜索"""
         if model_name:
             cur = self.conn.execute(
-                """SELECT v.id, v.message_id, v.vector, v.model_name, v.dim, m.content, m.timestamp
+                """SELECT v.id, v.message_id, v.vector, v.model_name, v.dim,
+                          m.content, m.timestamp, m.source
                    FROM vector_index v JOIN messages m ON v.message_id = m.id
                    WHERE v.model_name = ?""",
                 (model_name,),
             )
         else:
             cur = self.conn.execute(
-                """SELECT v.id, v.message_id, v.vector, v.model_name, v.dim, m.content, m.timestamp
+                """SELECT v.id, v.message_id, v.vector, v.model_name, v.dim,
+                          m.content, m.timestamp, m.source
                    FROM vector_index v JOIN messages m ON v.message_id = m.id""",
             )
         columns = [desc[0] for desc in cur.description]
@@ -710,7 +1004,7 @@ class MemoryStore:
             self.conn.execute("DELETE FROM bm25_inverted WHERE message_id = ?", (message_id,))
             self.conn.commit()
 
-    def get_bm25_posting(self, term: str) -> list[dict]:
+    def get_bm25_posting(self, term: str, exclude_sources: set[str] | None = None) -> list[dict]:
             """获取指定术语的BM25倒排索引列表。
 
             该函数通过SQLite数据库查询给定术语的倒排索引信息，
@@ -718,17 +1012,28 @@ class MemoryStore:
 
             Args:
                 term (str): 需要查询的目标术语。
+                exclude_sources (set[str] | None): 需要排除的消息来源（如 {"tool"}）。
+                    在 SQL 侧与 messages 关联过滤，避免工具日志先占满 top_k 再被滤掉。
 
             Returns:
                 list[dict]: 包含字典的列表，每个字典包含两个字段：
                     - "message_id" (int): 消息ID。
                     - "tf" (int): 该术语在该消息中的词频。
             """
-            # 使用参数化查询在bm25_inverted表中查找匹配的术语记录
-            cur = self.conn.execute(
-                "SELECT message_id, tf FROM bm25_inverted WHERE term = ?",
-                (term,),
-            )
+            if exclude_sources:
+                placeholders = ",".join("?" for _ in exclude_sources)
+                cur = self.conn.execute(
+                    "SELECT i.message_id, i.tf FROM bm25_inverted i "
+                    "JOIN messages m ON m.id = i.message_id "
+                    f"WHERE i.term = ? AND m.source NOT IN ({placeholders})",
+                    (term, *sorted(exclude_sources)),
+                )
+            else:
+                # 使用参数化查询在bm25_inverted表中查找匹配的术语记录
+                cur = self.conn.execute(
+                    "SELECT message_id, tf FROM bm25_inverted WHERE term = ?",
+                    (term,),
+                )
             # 将查询结果转换为包含message_id和tf字段的字典列表
             return [{"message_id": r[0], "tf": r[1]} for r in cur.fetchall()]
 

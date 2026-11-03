@@ -19,7 +19,7 @@ import time
 from server.config import get_screen_config
 from server.screen.session import SessionEvent, get_session_manager
 
-logger = logging.getLogger("localagent.gui")
+logger = logging.getLogger("parcae.gui")
 
 
 def _invalidate_health_cache() -> None:

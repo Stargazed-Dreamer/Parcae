@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -23,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import EventStore, Message  # noqa: E402
+from lib.agent_runtime import EventStore, Message  # noqa: E402
 
 # ============================================================================
 # Fixtures（沿用 test_event_store_mode.py 模式）
@@ -37,6 +38,19 @@ def store(tmp_db_path) -> EventStore:
     s.init()
     yield s
     s.close()
+
+
+@pytest.fixture(autouse=True)
+def _probe_runs_isolated(tmp_path, monkeypatch):
+    """把所有探针的 JSON 落盘重定向到本用例的 tmp_path。
+
+    ⛔ 不能落真实 RUNS_DIR（temp/probe/runs/）：跑一次测试集就会堆一批 run 目录，
+    "该不该删"分不清（2026-10-09 前它落在 temp/chat_mgmt_probe/runs/，341 个目录
+    共 143 MiB 就是这么攒出来的）。落盘内容本身照测，只是换个目录。
+    """
+    from lib.agent_runtime import probe_runner
+    monkeypatch.setattr(probe_runner, "RUNS_DIR", tmp_path / "probe_runs")
+    yield
 
 
 # ============================================================================
@@ -264,7 +278,7 @@ def test_delete_one_session_does_not_affect_others(store):
 
 def test_probe_runner_minimal_session_completes(tmp_path):
     """Ticket 02: script=["hi"] 跑完一个 mode=probe 会话，outcome.status=completed。"""
-    from server.probe.runner import ProbeParams, run_probe
+    from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
     async def run():
         result = await run_probe(ProbeParams(
@@ -285,7 +299,7 @@ def test_probe_runner_minimal_session_completes(tmp_path):
 
 def test_probe_runner_writes_six_json_files(tmp_path):
     """Ticket 02: 跑完后落盘 6 个 JSON 文件到 runs/<session_id>/。"""
-    from server.probe.runner import ProbeParams, run_probe
+    from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
     async def run():
         result = await run_probe(ProbeParams(
@@ -295,6 +309,7 @@ def test_probe_runner_writes_six_json_files(tmp_path):
             use_stream=False,
             auto_cleanup=False,
             db_path=str(tmp_path / "probe_files.db"),
+            persist=True,  # 本用例断言 6 个 JSON 落盘
         ))
         run_dir = Path(result.run_dir)
         assert run_dir.exists(), f"run_dir should exist: {run_dir}"
@@ -309,7 +324,7 @@ def test_probe_runner_writes_six_json_files(tmp_path):
 
 def test_probe_runner_summary_has_required_fields(tmp_path):
     """Ticket 02: 返回的 ProbeSummary 含所有必需字段。"""
-    from server.probe.runner import ProbeParams, run_probe
+    from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
     async def run():
         result = await run_probe(ProbeParams(
@@ -349,8 +364,8 @@ def test_probe_runner_summary_has_required_fields(tmp_path):
 
 def test_probe_runner_auto_cleanup_true_deletes_session(tmp_path):
     """Ticket 02: auto_cleanup=True 时跑完后 session 从 DB 删除。"""
-    from client.core.agent import EventStore
-    from server.probe.runner import ProbeParams, run_probe
+    from lib.agent_runtime import EventStore
+    from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
     async def run():
         db_path = str(tmp_path / "probe_cleanup.db")
@@ -377,8 +392,8 @@ def test_probe_runner_auto_cleanup_true_deletes_session(tmp_path):
 
 def test_probe_runner_auto_cleanup_false_keeps_session(tmp_path):
     """Ticket 02: auto_cleanup=False 时 session 留在 DB。"""
-    from client.core.agent import EventStore
-    from server.probe.runner import ProbeParams, run_probe
+    from lib.agent_runtime import EventStore
+    from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
     async def run():
         db_path = str(tmp_path / "probe_nocleanup.db")
@@ -407,7 +422,7 @@ def test_probe_runner_llm_requests_captured(tmp_path):
     """Ticket 02: 落盘的 llm_requests.json 含完整 LLMRequest（messages+system+tools）。"""
     import json
 
-    from server.probe.runner import ProbeParams, run_probe
+    from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
     async def run():
         result = await run_probe(ProbeParams(
@@ -417,6 +432,7 @@ def test_probe_runner_llm_requests_captured(tmp_path):
             use_stream=False,
             auto_cleanup=False,
             db_path=str(tmp_path / "probe_llm_req.db"),
+            persist=True,  # 本用例读落盘的 llm_requests.json
         ))
         llm_req_path = Path(result.run_dir) / "llm_requests.json"
         with open(llm_req_path, encoding="utf-8") as f:
@@ -450,9 +466,24 @@ def probe_fastapi_app():
 
 
 @pytest.fixture
-def probe_client(probe_fastapi_app):
-    """TestClient。"""
+def probe_client(probe_fastapi_app, monkeypatch):
+    """TestClient；router 的 runtime 客户端换成"进程内引擎"适配器。
+
+    T6 起 router 只代理 runtime；这里让代理落到同一进程的引擎，
+    保持端点行为（参数校验/摘要形状）可测，不依赖真 runtime 进程。
+    """
     from fastapi.testclient import TestClient
+
+    import server.probe.router as probe_router_module
+
+    class _LocalProbeClient:
+        async def probe(self, params):
+            from dataclasses import asdict
+
+            from lib.agent_runtime.probe_runner import ProbeParams, run_probe
+            return asdict(await run_probe(ProbeParams(**params)))
+
+    monkeypatch.setattr(probe_router_module, "_runtime_client", lambda: _LocalProbeClient())
     return TestClient(probe_fastapi_app)
 
 
@@ -480,7 +511,7 @@ class TestRouterE2E:
 
     def test_auto_cleanup_true_session_deleted(self, probe_client, tmp_path):
         """auto_cleanup=true 时跑完 session 从 DB 删除。"""
-        from client.core.agent import EventStore
+        from lib.agent_runtime import EventStore
         db_path = str(tmp_path / "probe_e2e_cleanup.db")
         resp = probe_client.post("/probe/runs", json={
             "trigger_text": "hello",
@@ -505,7 +536,7 @@ class TestRouterE2E:
 
     def test_auto_cleanup_false_session_kept(self, probe_client, tmp_path):
         """auto_cleanup=false 时 session 留在 DB，mode=probe。"""
-        from client.core.agent import EventStore
+        from lib.agent_runtime import EventStore
         db_path = str(tmp_path / "probe_e2e_kept.db")
         resp = probe_client.post("/probe/runs", json={
             "trigger_text": "hello",
@@ -585,7 +616,7 @@ class TestPatterns:
 
     def test_pattern_text_only(self, tmp_path):
         """pattern=text_only：每轮返回纯文本，无 tool_calls。"""
-        from server.probe.runner import ProbeParams, run_probe
+        from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
         async def run():
             result = await run_probe(ProbeParams(
@@ -607,7 +638,7 @@ class TestPatterns:
 
     def test_pattern_refuse(self, tmp_path):
         """pattern=refuse：返回拒绝文本。"""
-        from server.probe.runner import ProbeParams, run_probe
+        from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
         async def run():
             result = await run_probe(ProbeParams(
@@ -626,7 +657,7 @@ class TestPatterns:
 
     def test_script_dict_format_with_tool_call(self, tmp_path):
         """Ticket 04: script 支持 dict 格式，含 tool_calls 字段。"""
-        from server.probe.runner import ProbeParams, run_probe
+        from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
         async def run():
             # script: 第一轮返回 tool_call（memory_list），第二轮返回纯文本
@@ -653,6 +684,7 @@ class TestPatterns:
                 use_stream=False,
                 auto_cleanup=False,
                 db_path=str(tmp_path / "p_script_dict.db"),
+                persist=True,  # 本用例读落盘的 tool_calls.json
             ))
             # 应该有 tool_call 记录（真调后端 memory_list 工具）
             # 注：如果后端不在线，tool_call 可能 failed，但记录应该存在
@@ -668,7 +700,7 @@ class TestPatterns:
 
     def test_pattern_tool_call_then_text(self, tmp_path):
         """pattern=tool_call_then_text：第一轮 tool_call，第二轮纯文本。"""
-        from server.probe.runner import ProbeParams, run_probe
+        from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
         async def run():
             result = await run_probe(ProbeParams(
@@ -688,7 +720,7 @@ class TestPatterns:
 
     def test_pattern_streaming_text(self, tmp_path):
         """pattern=streaming_text：返回带 thinking 字段的响应（配合 use_stream 测流式）。"""
-        from server.probe.runner import ProbeParams, run_probe
+        from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
         async def run():
             result = await run_probe(ProbeParams(
@@ -698,6 +730,7 @@ class TestPatterns:
                 use_stream=False,  # Ticket 05 才测流式路径，这里只验证 thinking 字段存在
                 auto_cleanup=False,
                 db_path=str(tmp_path / "p_stream_text.db"),
+                persist=True,  # 本用例读落盘的 llm_responses.json
             ))
             assert result.status == "completed"
             # 落盘的 llm_responses.json 应含 thinking 字段
@@ -713,7 +746,7 @@ class TestPatterns:
 
     def test_pattern_always_tool_call(self, tmp_path):
         """pattern=always_tool_call：每轮都返回 tool_call（受 max_iterations 限制）。"""
-        from server.probe.runner import ProbeParams, run_probe
+        from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
         async def run():
             result = await run_probe(ProbeParams(
@@ -749,7 +782,7 @@ class TestOptionalPaths:
         """
         import json
 
-        from server.probe.runner import ProbeParams, run_probe
+        from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
         async def run():
             result = await run_probe(ProbeParams(
@@ -759,6 +792,7 @@ class TestOptionalPaths:
                 use_stream=True,  # 关键：走流式路径
                 auto_cleanup=False,
                 db_path=str(tmp_path / "p_stream.db"),
+                persist=True,  # 本用例读落盘的 events.json
             ))
             assert result.status == "completed"
 
@@ -795,7 +829,7 @@ class TestOptionalPaths:
         """
         import json
 
-        from server.probe.runner import ProbeParams, run_probe
+        from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
         async def run():
             result = await run_probe(ProbeParams(
@@ -822,6 +856,7 @@ class TestOptionalPaths:
                 use_stream=False,
                 auto_cleanup=False,
                 db_path=str(tmp_path / "p_approval.db"),
+                persist=True,  # 本用例读落盘的 tool_calls.json / messages.json
             ))
             assert result.status == "completed"
 
@@ -870,7 +905,7 @@ class TestOptionalPaths:
         """
         import json
 
-        from server.probe.runner import ProbeParams, run_probe
+        from lib.agent_runtime.probe_runner import ProbeParams, run_probe
 
         def _tc_item(i: int) -> dict:
             return {
@@ -905,6 +940,7 @@ class TestOptionalPaths:
                 use_stream=False,
                 auto_cleanup=False,
                 db_path=str(tmp_path / "p_compact.db"),
+                persist=True,  # 本用例读落盘的 events.json / messages.json
             ))
 
             # 断言 3: 跑完（compactor 可能 fail-open 但 runner 处理后仍 completed/failed）
@@ -939,3 +975,45 @@ class TestOptionalPaths:
                 f"got sources: {[m.get('source') for m in msgs]}"
             )
         asyncio.run(run())
+
+
+# ============================================================================
+# 落盘保留上限（_prune_old_runs）：persist=True 反复跑时 temp/probe/runs/ 有界
+# ============================================================================
+
+
+def test_prune_old_runs_keeps_newest(tmp_path, monkeypatch):
+    """超出 keep 的旧 run 目录被删，最新 keep 个保留，非 probe- 目录不碰。"""
+    from lib.agent_runtime import probe_runner
+
+    runs_dir = tmp_path / "prune_runs"
+    runs_dir.mkdir()
+    monkeypatch.setattr(probe_runner, "RUNS_DIR", runs_dir)
+
+    # 5 个 run 目录，mtime 递增（probe-00 最旧）
+    base = 1_000_000.0
+    for i in range(5):
+        d = runs_dir / f"probe-{i:02d}"
+        d.mkdir()
+        (d / "x.json").write_text("{}", encoding="utf-8")
+        os.utime(d, (base + i, base + i))
+    (runs_dir / "keepme").mkdir()  # 非 probe- 目录，不应被删
+
+    deleted = probe_runner._prune_old_runs(keep=2)
+
+    assert deleted == 3
+    assert sorted(p.name for p in runs_dir.iterdir()) == ["keepme", "probe-03", "probe-04"]
+
+
+def test_prune_old_runs_noop_when_under_cap(tmp_path, monkeypatch):
+    """未超上限时一个都不删。"""
+    from lib.agent_runtime import probe_runner
+
+    runs_dir = tmp_path / "prune_runs2"
+    runs_dir.mkdir()
+    monkeypatch.setattr(probe_runner, "RUNS_DIR", runs_dir)
+    for i in range(2):
+        (runs_dir / f"probe-{i:02d}").mkdir()
+
+    assert probe_runner._prune_old_runs(keep=5) == 0
+    assert len(list(runs_dir.iterdir())) == 2

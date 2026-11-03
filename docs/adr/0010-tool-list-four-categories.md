@@ -1,6 +1,6 @@
 # 工具清单分四类呈现（内置基本 + 核心直暴露 + MCP 子桶 + REST 物化）
 
-116 个 MCP 工具被压缩成 1 个 `localagent_advanced_tool` 网关端点，模型无法选择具体子工具；工具描述只有 summary/description 无 when_to_use/when_not_to_use，模型瞎调；agent 缺通用能力（文件读写）过度依赖 `exec_python` 间接实现。本决策将工具清单分四类呈现：(A) 10 个内置基本工具自实现；(B) 19 个项目核心 MCP 工具直接暴露（去前缀 + 完整 7 段说明书）；(C) 本项目 MCP 自动拆一层子桶，其他 MCP server 给桶概览；(D) server REST 端点从 `/openapi.json` 物化。对模型不强调"这是 MCP 工具"。
+116 个 MCP 工具被压缩成 1 个 `parcae_advanced_tool` 网关端点，模型无法选择具体子工具；工具描述只有 summary/description 无 when_to_use/when_not_to_use，模型瞎调；agent 缺通用能力（文件读写）过度依赖 `exec_python` 间接实现。本决策将工具清单分四类呈现：(A) 10 个内置基本工具自实现；(B) 19 个项目核心 MCP 工具直接暴露（去前缀 + 完整 7 段说明书）；(C) 本项目 MCP 自动拆一层子桶，其他 MCP server 给桶概览；(D) server REST 端点从 `/openapi.json` 物化。对模型不强调"这是 MCP 工具"。
 
 ## Status
 
@@ -10,7 +10,7 @@ accepted (2026-08-05)
 
 v6-lite 引擎的工具清单面临三重问题：
 
-1. **116 个 MCP 工具平铺 = context 爆炸**：现有 MCP 网关把 116 个工具压缩成 1 个 `localagent_advanced_tool` 端点，模型只知道"有个网关"但不知道有哪些子工具、何时该调哪个。若 116 个全平铺进 system prompt（每个按 7 段说明书 ~400 token），约 46k token，撑爆上下文。
+1. **116 个 MCP 工具平铺 = context 爆炸**：现有 MCP 网关把 116 个工具压缩成 1 个 `parcae_advanced_tool` 端点，模型只知道"有个网关"但不知道有哪些子工具、何时该调哪个。若 116 个全平铺进 system prompt（每个按 7 段说明书 ~400 token），约 46k token，撑爆上下文。
 2. **工具描述不足，模型瞎调**：现有工具描述只有 summary/description，无 when_to_use/when_not_to_use，模型不知道何时该用、何时该换其他工具。模糊工具名（如 `todos_due`/`wip_list`/`agent_guide`/`screen_ocr`）尤其严重。
 3. **agent 缺通用能力**：用户反馈"基本工具也要给，不能全是我们的 mcp，文件查看、编写等等"——agent 需要文件读写/搜索/网页抓取等通用能力，不应只依赖项目 MCP。过度依赖 `exec_python` 间接实现文件操作效率低且需审批。
 
@@ -37,11 +37,11 @@ v6-lite 引擎的工具清单面临三重问题：
 - todos（2）：`todos_due`/`todos_mark_done`
 - wip（2）：`wip_list`/`wip_get`
 
-工具名去掉 `mcp_localagent_` 前缀（直接用 `memory_get` 而不是 `mcp_localagent_memory_get`），`ToolRegistry` 内部映射回实际调用名。给完整 7 段说明书（purpose/when_to_use/when_not_to_use/inputs/outputs/error_cases/examples），按工具名自描述程度自适应详略（明确的工具少写，模糊的工具多写）。
+工具名去掉 `mcp_parcae_` 前缀（直接用 `memory_get` 而不是 `mcp_parcae_memory_get`），`ToolRegistry` 内部映射回实际调用名。给完整 7 段说明书（purpose/when_to_use/when_not_to_use/inputs/outputs/error_cases/examples），按工具名自描述程度自适应详略（明确的工具少写，模糊的工具多写）。
 
 ### C. MCP 工具桶（本项目 MCP 自动拆一层子桶，其他 MCP server 给桶概览）
 
-- **本项目 MCP（localagent_advanced）**：116 个子工具按 `operation_id` 前缀自动归类为子桶（`browser_*`/`screen_*`/`exec_*`/`ocr_*`/`vision_*`/`memory_*`/杂项），每个子桶给 purpose + when_to_use + 子工具清单（仅 name + purpose）+ 调用方式。核心 19 个工具在子桶清单中标 `*` 表示已直接暴露。启动时 `ToolRegistry` 调 `localagent_list_tools` 拉取子工具清单自动归类。
+- **本项目 MCP（parcae_advanced）**：116 个子工具按 `operation_id` 前缀自动归类为子桶（`browser_*`/`screen_*`/`exec_*`/`ocr_*`/`vision_*`/`memory_*`/杂项），每个子桶给 purpose + when_to_use + 子工具清单（仅 name + purpose）+ 调用方式。核心 19 个工具在子桶清单中标 `*` 表示已直接暴露。启动时 `ToolRegistry` 调 `parcae_list_tools` 拉取子工具清单自动归类。
 - **其他 MCP server（如 lark-cli）**：给桶概览（桶名 + 工具数 + purpose + when_to_use + 调用方式 + `list_tools()` 查子工具），不自动展开。
 
 ### D. server REST 端点（从 `/openapi.json` 物化，完整 7 段说明书）

@@ -85,13 +85,13 @@ task_type: system.task_reminder
 
 当用户完成某项周期任务后（用户说"记账做完了"或 agent 执行完任务）：
 
-1. 调用 `POST /todos/{todo_id}/done`（MCP 网关: `localagent_advanced_tool(todos_mark_done)`）
+1. 调用 `POST /todos/{todo_id}/done`（MCP 网关: `parcae_advanced_tool(todos_mark_done)`）
 2. 系统自动更新 `last_done_at` 为今天 + 计算 `next_due_at`（daily+1/weekly+7/monthly=下月同日，月末兜底如 1月31日→2月28日）
 3. 简短确认："已记录 {任务名} 完成，下次提醒时间 {next_due_at}"
 
 ### 3. 增减周期任务
 
-**新增**：`POST /todos`（MCP 网关: `localagent_advanced_tool(todos_create)`）
+**新增**：`POST /todos`（MCP 网关: `parcae_advanced_tool(todos_create)`）
 
 ```json
 {
@@ -104,7 +104,7 @@ task_type: system.task_reminder
 }
 ```
 
-**删除**：`DELETE /todos/{todo_id}`（MCP 网关: `localagent_advanced_tool(todos_delete)`）
+**删除**：`DELETE /todos/{todo_id}`（MCP 网关: `parcae_advanced_tool(todos_delete)`）
 
 ### 4. 空闲额度自查（机会型跑批）
 
@@ -160,5 +160,5 @@ task_type: system.task_reminder
 | 依赖 | 路径/接口 | 说明 |
 |------|----------|------|
 | 待办模块 | `todos_due` / `wip_list` | MCP 直连，获取到期任务和 WIP |
-| 待办模块 | `localagent_advanced_tool(todos_create/todos_mark_done/todos_delete)` | MCP 网关，增删改任务 |
+| 待办模块 | `parcae_advanced_tool(todos_create/todos_mark_done/todos_delete)` | MCP 网关，增删改任务 |
 | WIP 追踪 | `wip_tracker` skill | 提供一次性待办清单 |

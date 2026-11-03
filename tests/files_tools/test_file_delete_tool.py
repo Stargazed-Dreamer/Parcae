@@ -18,9 +18,9 @@ from pathlib import Path
 
 import pytest
 
-from client.core.agent.builtin_tools import file_delete as fd_module
-from client.core.agent.builtin_tools.file_delete import FileDeleteTool
-from client.core.agent.types import ToolCall
+from lib.agent_runtime.builtin_tools import file_delete as fd_module
+from lib.agent_runtime.builtin_tools.file_delete import FileDeleteTool
+from lib.agent_runtime.types import ToolCall
 
 
 @pytest.fixture(autouse=True)

@@ -1,14 +1,14 @@
 # dev_toolkit - 新项目工具包
 
-> 从 anthropics/skills 仓库（17 个 skill）研究中提炼的精华 + LocalAgent 项目本土化改进汇总。
+> 从 anthropics/skills 仓库（17 个 skill）研究中提炼的精华 + Parcae 项目本土化改进汇总。
 > 用于新项目启动时按需取用，避免重复踩坑。
 
 ## 概述
 
-本工具包由 LocalAgent 项目维护，来源分两路：
+本工具包由 Parcae 项目维护，来源分两路：
 
 1. **anthropics/skills 精华提炼**：从 `https://github.com/anthropics/skills/tree/main/skills` 的 17 个 skill 中提炼出适合新项目的精华（部分 skill 为 Anthropic 内部场景定制，不适合本地化使用，已剔除）。
-2. **LocalAgent 项目改进**：本项目在 anthropics/skills 基础上做的本土化改进与扩展，包括三层 MCP 架构、Tool Annotations 落地、anti-AI-slop 实战经验、Reconnaissance-Then-Action 铁律等。
+2. **Parcae 项目改进**：本项目在 anthropics/skills 基础上做的本土化改进与扩展，包括三层 MCP 架构、Tool Annotations 落地、anti-AI-slop 实战经验、Reconnaissance-Then-Action 铁律等。
 
 **适用场景**：新项目启动时按需取用——不需要全部拷贝，按文件清单选取适用的部分。
 
@@ -30,17 +30,17 @@
 | 文件 | 主题 | 来源 | 行数 |
 |------|------|------|------|
 | [README.md](file:///<project_root>/workspace/dev_toolkit/README.md) | 入口导航（本文件） | - | ~170 |
-| [DEPLOY.md](file:///<project_root>/workspace/dev_toolkit/DEPLOY.md) | 部署指南（6 步流程 + 占位符清单 + skill 裁剪推荐 + 常见误用） | LocalAgent | ~150 |
-| [AGENTS.md](file:///<project_root>/workspace/dev_toolkit/AGENTS.md) | AI Agent 协作指引模板（含 23 个 skill 的 SDD 主流程 + 部署初始化章节） | LocalAgent | ~330 |
-| [checklist.md](file:///<project_root>/workspace/dev_toolkit/checklist.md) | 功能变更检查清单模板 | LocalAgent | ~80 |
+| [DEPLOY.md](file:///<project_root>/workspace/dev_toolkit/DEPLOY.md) | 部署指南（6 步流程 + 占位符清单 + skill 裁剪推荐 + 常见误用） | Parcae | ~150 |
+| [AGENTS.md](file:///<project_root>/workspace/dev_toolkit/AGENTS.md) | AI Agent 协作指引模板（含 23 个 skill 的 SDD 主流程 + 部署初始化章节） | Parcae | ~330 |
+| [checklist.md](file:///<project_root>/workspace/dev_toolkit/checklist.md) | 功能变更检查清单模板 | Parcae | ~80 |
 | [html_toolkit.md](file:///<project_root>/workspace/dev_toolkit/html_toolkit.md) | HTML 生成工具栈（algorithmic-art / brand-guidelines / canvas-design / frontend-design / web-artifacts-builder / theme-factory 整合去重） | anthropics/skills | ~500 |
-| [mcp_builder.md](file:///<project_root>/workspace/dev_toolkit/mcp_builder.md) | MCP 服务构建（Python fastapi-mcp / TypeScript @modelcontextprotocol/sdk） | anthropics/skills + LocalAgent | ~400 |
-| [webapp_testing.md](file:///<project_root>/workspace/dev_toolkit/webapp_testing.md) | Web 应用测试（Playwright + Reconnaissance-Then-Action + JS 错误捕获） | anthropics/skills + LocalAgent | ~400 |
+| [mcp_builder.md](file:///<project_root>/workspace/dev_toolkit/mcp_builder.md) | MCP 服务构建（Python fastapi-mcp / TypeScript @modelcontextprotocol/sdk） | anthropics/skills + Parcae | ~400 |
+| [webapp_testing.md](file:///<project_root>/workspace/dev_toolkit/webapp_testing.md) | Web 应用测试（Playwright + Reconnaissance-Then-Action + JS 错误捕获） | anthropics/skills + Parcae | ~400 |
 | [skill_creator.md](file:///<project_root>/workspace/dev_toolkit/skill_creator.md) | Skill 创建精华（补充 anthropic 版的 evals/progressive disclosure/description 优化器） | anthropics/skills | ~350 |
 | [evals_template.json](file:///<project_root>/workspace/dev_toolkit/evals_template.json) | evals 模板（5 种 assertion 类型 + 对照组） | anthropics/skills | ~80 |
-| [project_essentials.md](file:///<project_root>/workspace/dev_toolkit/project_essentials.md) | LocalAgent 项目改进精华（三层 MCP / Tool Annotations / anti-AI-slop 实战 / 磁盘清理铁律） | LocalAgent | ~450 |
+| [project_essentials.md](file:///<project_root>/workspace/dev_toolkit/project_essentials.md) | Parcae 项目改进精华（三层 MCP / Tool Annotations / anti-AI-slop 实战 / 磁盘清理铁律） | Parcae | ~450 |
 | [team_playbook.md](file:///<project_root>/workspace/dev_toolkit/team_playbook.md) | 小团队项目启动军规（game jam 复盘提炼：leader 定标准 / 术语表 / 常量集中 / commit 纪律 / 封包缓冲） | 实战复盘 | ~60 |
-| [.agents/skills/](file:///<project_root>/workspace/dev_toolkit/.agents/skills/) | 34 个 skill 蓝图（SDD 链 6 + 安全网 1 + 验证调试 2 + 元 skill 3 + 工程化 dev/* 7 + UI/UX 1 + 前端设计工艺 2 + 思维工具集 daily/ 11） | anthropics/skills + LocalAgent + mattpocock/skills + pbakaus/impeccable + nutlope/hallmark + KKKKhazix/khazix-skills + 数字生命卡兹克文章 | - |
+| [.agents/skills/](file:///<project_root>/workspace/dev_toolkit/.agents/skills/) | 34 个 skill 蓝图（SDD 链 6 + 安全网 1 + 验证调试 2 + 元 skill 3 + 工程化 dev/* 7 + UI/UX 1 + 前端设计工艺 2 + 思维工具集 daily/ 11） | anthropics/skills + Parcae + mattpocock/skills + pbakaus/impeccable + nutlope/hallmark + KKKKhazix/khazix-skills + 数字生命卡兹克文章 | - |
 
 ## Skill 蓝图概览（.agents/skills/，34 个）
 
@@ -98,7 +98,7 @@
 - `webapp-testing` → `webapp_testing.md`（全文主源）
 - `skill-creator` → `skill_creator.md` + `evals_template.json`（全文主源）
 
-### 来自 LocalAgent 项目
+### 来自 Parcae 项目
 
 - **三层 MCP 架构**（DIRECT_TOOLS + advanced_tool 网关 + GATEWAY_EXCLUDE） → `mcp_builder.md` § 7 + `project_essentials.md` § 4
 - **Tool Annotations 落地实践**（4 hint × 全工具映射表） → `project_essentials.md` § 5
@@ -135,7 +135,7 @@
 
 ### 本项目已有但不重复（只引用）
 
-以下 LocalAgent 项目文件已强化含相关内容，本工具包不重复，仅引用：
+以下 Parcae 项目文件已强化含相关内容，本工具包不重复，仅引用：
 
 - `<project_root>\.agents\skills\skill-creator.md` — 已强化含 pushy description / 500 行软上限 / evals 机制 / 反模式
 - `<project_root>\.agents\skills\html-dev-debug.md` — 已强化含 Reconnaissance-Then-Action / JS console 捕获 / anti-AI-slop 设计规范
@@ -147,14 +147,14 @@
 - 本工具包是**参考蓝图**而非运行代码，更新时保持文档结构清晰
 - 新项目取用后应在自己项目内独立维护副本，不再回溯同步
 - 如发现 anthropics/skills 上游有重要更新，可回头补充本工具包对应章节
-- LocalAgent 项目自身改进若涉及本工具包引用的章节，可同步更新对应文件
+- Parcae 项目自身改进若涉及本工具包引用的章节，可同步更新对应文件
 
 ## 版本
 
 - 创建日期：2026-07-18
 - 最后更新：2026-07-28
 - 来源版本：anthropics/skills `main` 分支（截至 2026-07-18）
-- LocalAgent 项目状态：v2 三层 MCP + Tool Annotations 已落地
+- Parcae 项目状态：v2 三层 MCP + Tool Annotations 已落地
 - 变更记录：
   - 2026-07-28：新增 DEPLOY.md 部署指南；AGENTS.md 加部署初始化章节 + TODO_DEPLOY 占位符标记；修复"完善 toolkit"被误读为修改 skill 方法论的问题
   - 2026-07-27：新增 dev/leader + dev/goal_engineering 两个目标工程 skill（23 个 skill）

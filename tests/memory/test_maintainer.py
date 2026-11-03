@@ -1,6 +1,9 @@
 """测试记忆维护器（MemoryMaintainer）
 
-覆盖：should_run 时间判断、run_aging 标记 stale、_parse_validate_response 容错。
+覆盖：should_run 时间判断、run_aging 只写 stale_score、get_status 的删除标记。
+
+2026-10-31 随 LLM 验证器删除：`_parse_validate_response` 那组测试整块移除。
+
 """
 
 import os
@@ -72,33 +75,15 @@ class TestRunAging:
         assert result["stale_count"] >= 1
 
         meta = store.conn.execute(
-            "SELECT validation_status FROM memory_meta WHERE key = 'old_fact'"
+            "SELECT stale_score FROM memory_meta WHERE key = 'old_fact'"
         ).fetchone()
         assert meta is not None
-        assert meta[0] == "pending"
+        assert meta[0] >= 9          # 只算分，不再写 validation_status
 
     def test_aging_skips_recent_facts(self, maintainer, store):
         store.upsert_fact("fresh_fact", '{"content": "fresh"}', source="test")
         result = maintainer.run_aging()
         assert result["stale_count"] == 0
-
-
-class TestParseValidateResponse:
-    def test_parse_clean_json(self, maintainer):
-        raw = '{"is_accurate": true, "reason": "ok", "suggested_action": "keep"}'
-        result = maintainer._parse_validate_response(raw)
-        assert result["is_accurate"] is True
-        assert result["suggested_action"] == "keep"
-
-    def test_parse_json_with_markdown_fence(self, maintainer):
-        raw = '```json\n{"is_accurate": false, "reason": "outdated", "suggested_action": "archive"}\n```'
-        result = maintainer._parse_validate_response(raw)
-        assert result["is_accurate"] is False
-        assert result["suggested_action"] == "archive"
-
-    def test_parse_invalid_response_returns_none(self, maintainer):
-        result = maintainer._parse_validate_response("not json at all")
-        assert result is None
 
 
 class TestGetStatus:
@@ -107,7 +92,9 @@ class TestGetStatus:
         assert "last_run" in status
         assert "stale_threshold_days" in status
         assert "interval_hours" in status
-        assert "status_counts" in status
         assert "stale_total" in status
-        assert "model_tier" in status
-        assert "validate_enabled" in status
+        assert "archived_total" in status
+        assert status["validator"] == "removed_2026-10-31"
+        # 验证器已删：不能再出现「看起来还能拨」的开关字段
+        assert "validate_enabled" not in status
+        assert "model_tier" not in status

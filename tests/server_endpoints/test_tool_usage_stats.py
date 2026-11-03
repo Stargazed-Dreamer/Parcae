@@ -46,7 +46,7 @@ def test_record_exec_python_call(tmp_path, monkeypatch):
     # 第一次调用
     record_exec_python_call(
         code="print('hello')",  # 14 chars → <100
-        environment="localagent",
+        environment="parcae",
         cwd="",
     )
     # 第二次调用
@@ -64,7 +64,7 @@ def test_record_exec_python_call(tmp_path, monkeypatch):
     assert entry["call_count"] == 2
     assert entry["code_length_buckets"]["<100"] == 1
     assert entry["code_length_buckets"]["1k-10k"] == 1
-    assert entry["environment"]["localagent"] == 1
+    assert entry["environment"]["parcae"] == 1
     assert entry["environment"]["workspace_venv"] == 1
     assert entry["has_cwd_false"] == 1
     assert entry["has_cwd_true"] == 1
@@ -82,6 +82,6 @@ def test_record_failure_no_crash(tmp_path, monkeypatch):
     # 不应抛异常
     record_exec_python_call(
         code="print(1)",
-        environment="localagent",
+        environment="parcae",
         cwd="",
     )

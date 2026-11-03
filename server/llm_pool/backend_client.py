@@ -21,11 +21,15 @@ _DEFAULT_BACKEND_URL = "http://127.0.0.1:8766"
 
 
 def backend_url() -> str:
-    """后端根 URL（外部脚本环境可能无 server.config，使用默认值）"""
+    """后端根 URL：运行时声明优先（端口可能被顺延），回退 config.toml。
+
+    外部脚本环境可能无 server.config —— 那种情况下 resolve_base_url 内部
+    会回退到 config.toml 再回退到默认值，不会抛。
+    """
     try:
-        from server.config import get_server_config
-        cfg = get_server_config()
-        return f"http://{cfg['host']}:{cfg['port']}"
+        from lib.runtime_endpoint import resolve_base_url
+
+        return resolve_base_url(probe_health=False)
     except Exception:
         return _DEFAULT_BACKEND_URL
 

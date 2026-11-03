@@ -26,7 +26,7 @@ import logging
 import re
 import time
 
-logger = logging.getLogger("localagent.content_filter")
+logger = logging.getLogger("parcae.content_filter")
 
 
 # ==================== 预检：二分法识别敏感标题 ====================

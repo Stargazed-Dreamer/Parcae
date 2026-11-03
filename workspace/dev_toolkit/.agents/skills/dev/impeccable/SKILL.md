@@ -156,6 +156,6 @@ upstream_version: 3.9.1
 | 本地 upstream/ 档案 | `.agents/skills/dev/impeccable/upstream/` | 完整原版 SKILL.md + 8 个根文档（README/LICENSE/NOTICE/AGENTS/CLAUDE/DESIGN/PRODUCT）+ docs/ 5 个开发文档（DEVELOP/HARNESSES/STYLE/adr-live-variant-mode/openai-plugin-submission） |
 | reference/ 子目录 | `.agents/skills/dev/impeccable/reference/` | 30 个命令规范（adapt/audit/bolder/brand/clarify/codex/colorize/craft/critique/delight/distill/document/extract/harden/hooks/init/interaction-design/ios/layout/live/onboard/optimize/overdrive/polish/product/quieter/shape/typeset + adapt.native/audit.native + android/animate 等共 30 个） |
 | scripts/ 子目录 | `.agents/skills/dev/impeccable/scripts/` | 11 类 mjs 脚本（context/detect/hook-lib/live/palette/pin 等），仅方法论参考，本地不执行 |
-| LLM 池 | `localagent_agent_chat` 或 `localagent_advanced_tool(llm_pool_call)` | 生成设计代码 / 文档时使用 |
+| LLM 池 | `parcae_agent_chat` 或 `parcae_advanced_tool(llm_pool_call)` | 生成设计代码 / 文档时使用 |
 | 浏览器 | `browser_navigate` + `browser_snapshot` + `browser_take_screenshot` | audit 命令验证现有页面 / live 命令浏览器实时迭代 |
 | _index.md / GUIDE_REGISTRY | 写入项目级设计规范后同步 | 若 craft/distill 产出可复用方法论，路由到 `.agents/skills/<scope>/` 时使用 |

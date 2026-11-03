@@ -1,5 +1,5 @@
 ---
-aliases: [即时设计, jsdesign, js.design]
+aliases: ['js.design', 'jsdesign', '即时设计']
 ---
 
 # 即时设计 (js.design)
@@ -14,7 +14,7 @@ aliases: [即时设计, jsdesign, js.design]
 | **登录态要求** | 需登录（自注册账户）；客户端登录态存 `%APPDATA%\js.design\` |
 | **抓取频次** | 周期（每次上机实验 / 大作业） |
 | **文件创建日期** | 2026-09-18 |
-| **最后更新** | 2026-09-18 |
+| **最后更新** | 2026-11-03 |
 
 ## 网站概况
 
@@ -43,6 +43,21 @@ aliases: [即时设计, jsdesign, js.design]
 | 导入入口 | `input[type=file]`（工作区页实测 2 个） | 但 `window.showOpenFilePicker` 也存在 → 是否真走原生选择器**未实测** |
 | 编辑器 URL | `https://js.design/f/<shortKey>?p=<nodeKey>&mode=design` | 打开文件时**新开 target**，原 `/workspace` 页 URL 不变 |
 
+### 编辑器内常用控件（2026-11-03 网页版实测，类名取前缀匹配）
+
+| 用途 | 定位方式 | 备注 |
+|---|---|---|
+| 图层行 | `div.readonly-input`，文本 = 图层名 | 单击即选中；帧行左侧有展开箭头（点准箭头才会展开子层） |
+| X/Y/W/H | 右面板前 4 个 `input[class*=input__]` | 顺序固定：X、Y、W、H；写值用 React setter + `Enter` 可落盘（帧位置会体现在 `relativeTransform`） |
+| 缩放控件 | 文本 `^\d+%$` 的祖先 `[class*=zoomNum]` | 点开有：放大/缩小/50%/100%/200%/**显示全部**。用 Ctrl+滚轮也行，但方向：deltaY 负=放大 |
+| 网格布局加号 | 「网格布局」行的 `[class*=gapRow]` 最后一个子节点 | ⚠ 紧邻的「自动布局」加号位置很近，点错会给画板套自动布局（排版会被打乱）——Ctrl+Z 可一次撤销 |
+| 交互加号（原型模式） | 右面板「交互」标题右侧 | 点后出现一行「点击 / 无」 |
+| 交互目标 | 该行的「无」文字节点 | 弹出面板：事件（点击）/行为（跳转画板）/↳ 目标（画板列表）/过渡动画；动画枚举：无・淡入淡出・弹入・弹出・推入・滑入・滑出・**智能动画** |
+| 时长／缓动 | 智能动画下方的数字框与「线性」下拉 | 时长默认 300ms；缓动枚举：线性・缓入・缓出・**缓动(=ease-in-out)**・回弹×3・自定义 |
+
+**一次完整配方（SVG → 成品 jsd，全程零键鼠玄学，2026-11-03 跑通）**：建工程 API `POST /backend/api/resource/v1/projects`（name+format=msp，返回 `shortId`）→ 开 `/f/<shortId>?mode=design` → `#imageInput` 塞 SVG（可连续塞多份，第二份自动并排，偏移约 +1600）→ 选中帧加 24 列网格 → 原型模式连「点击→跳转+智能动画」→ `T01_IMG.py --export` 导出。
+
+
 ## 已知坑（与正常行为区分）
 
 | 问题 | 错误做法 | 正确做法 | 发现日期 |
@@ -51,7 +66,7 @@ aliases: [即时设计, jsdesign, js.design]
 | 找关闭按钮找错 | `document.querySelector('[class*=closeIcon]')` | 该选择器**先命中别处**的 closeIcon（实测 1330,104 是侧栏的），必须限定在弹窗子树内查（实测真关闭键 934,233） | 2026-09-18 |
 | playwright 连客户端调试口挂死 | `connect_over_cdp("http://127.0.0.1:9223")` | 该壳有 4-5 个 `url` 为空的 page target，playwright 会 30s+ 无输出；改 `websocket-client` 直连具体 target 的 `webSocketDebuggerUrl`（`suppress_origin=True`） | 2026-09-18 |
 | 判定"文件没打开" | 只轮询当前页 `location.href` | 轮询 `/json/list` 找 `/f/` 新 target | 2026-09-18 |
-| 读截图里的文字 | 调 `ocr_file`（一次请求把 localAgent 后端 :8766 整个打死，端口拒连） | 单张判定直接用多模态 Read 读 PNG；必须批量 OCR 时先想清楚重启成本 | 2026-09-18 |
+| 读截图里的文字 | 调 `ocr_file`（一次请求把 Parcae 后端 :8766 整个打死，端口拒连） | 单张判定直接用多模态 Read 读 PNG；必须批量 OCR 时先想清楚重启成本 | 2026-09-18 |
 | 「确认导入」点不动 | `Input.dispatchMouseEvent` 鼠标事件（坐标正确也无反应） | 该按钮是 `<a class="baseBtn…submitBtn">`，要用 `el.click()` 沿祖先找 React `onClick` 才生效 | 2026-09-18 |
 | 导入 input 认错 | 取第一个 `input[type=file]`（`#0 accept=".fig"` 是上传面板） | 挑 **`accept` 含 `.jsd`** 的那个（实测 `#1 accept=".xd, .jsd, .fig, .sketch"`） | 2026-09-18 |
 | `Page.captureScreenshot` 挂死 | 反复调参数（`fromSurface`/`captureBeyondViewport`/`png` 降级） | **未被壳注册成可见标签的 webContents 上它永远挂死**，参数降级无效。改走：`ShowWindow(SW_RESTORE)`+`SetForegroundWindow` → 后端 `/screen/capture {mode:"fullscreen",format:"path"}` → 按 `list_windows` 的 bbox 自己裁 | 2026-09-18 |
@@ -72,6 +87,9 @@ aliases: [即时设计, jsdesign, js.design]
 
 | **把"网页版未登录"写进文档** | 打开 `https://js.design/login`，看到没有登录表单就判"未登录" | **误判**。`/login` 会 **302 到营销首页 `/home`**（首页只有「前往工作台」span，不是登录表单）。**判登录态要开 `https://js.design/workspace`**：出现「我的文件 / 我创建的 / 共享给我的 / 回收站」+ 文件列表 + **没有任何「登录/注册」按钮** = 已登录 | 2026-09-19 |
 | 判断 `networkidle` 能等到 | `goto(url, wait_until="networkidle")` | 本站有长连接/长轮询，**`networkidle` 永不触发**（实测 45 s 超时）。用 `domcontentloaded` + `wait_for_timeout(3000~6000)` | 2026-09-19 |
+| 判断「画板/图层移动有没有保存」 | 只读 `element.x`／只看云端 patch 里有没有 `/x`，没变就判「没保存成功」 | **真源是变换矩阵**：`absoluteTransform` 与 `relativeTransform` 的 `[0][2]=x`、`[1][2]=y`。`element.x` 是创建时的常量、不跟随移动（2026-11-03 因此误判一轮，白查） | 2026-11-03 |
+| 网格「边距」改不动 | 用 React setter + Enter 写 input：框里值变了但云端没有 `/grid/0/margin` 的 patch | 列宽=**自动**时该字段只读。同一面板的**数量／间距**用同样写法是有效的（能看到 `/grid/0/number`、`/grid/0/space`）；要改边距需先把列宽从「自动」切成固定 | 2026-11-03 |
+
 
 ## 可机判的验收配方（09-18 实测跑通，`jsd_research/SELFCHECK.py`）
 
@@ -145,3 +163,5 @@ aliases: [即时设计, jsdesign, js.design]
 | 2026-09-18 | 推翻"导入卡 43%"错误结论；补 6 条实测坑（截图挂死真因、PrintWindow 纯色假成功、tabbar 独立 target、URL 直开变空白、`NN%` 是缩放、canvas 文字不在 DOM） |
 | 2026-09-18 | 建 `SELFCHECK.py`（三档判定，红→绿已验）；补 4 条新坑：**`Target.closeTarget` 会让壳主进程崩溃**、已打开的工程双击不再注册标签、卡片 `data-id` ≠ URL shortKey、可见标签的 CDP 截图也会超时 |
 | 2026-09-19 | T02/T03 收口：**写路径改走"直传 OSS `assets/projectData/<_id>.json`"**（`PUSH.py`，成功=204），应用导入入口判红但不再阻塞；"逐工程像素验收"与"自主导入"两条遗留问题**解除**；补 4 条新坑：**OCR 必须先把视图对准（`--focus` = 选中图层行 + `Ctrl+2`）**、**改文案必须同步改框**（`horizDirect="scale"` 会压扁超长文字）、应用会回写派生数据但不修框宽、`Cdp.ev` 要带 `awaitPromise` |
+| 2026-11-03 | 追加 已知坑（来自 https://js.design/f/） |
+| 2026-11-03 | 追加 DOM 结构与提取规则（来自 https://js.design/f/qxiQHh） |

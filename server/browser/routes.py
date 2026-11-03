@@ -43,7 +43,7 @@ from .playwright_executor import (
 # （routes → session.manager → site_lessons → routes.router，此时 router 尚未定义）。
 # 改为在 _get_session_page / browser_console_logs 等函数内延迟 import，与
 # action_endpoints / wait_endpoints / snapshot_endpoints 的模式一致。
-logger = logging.getLogger("localagent.browser")
+logger = logging.getLogger("parcae.browser")
 router = APIRouter(prefix="/browser", tags=["浏览器"])
 
 
@@ -51,7 +51,7 @@ router = APIRouter(prefix="/browser", tags=["浏览器"])
 
 def _shot_dir() -> str:
     """浏览器 VL 反馈截图临时目录（不在项目 temp/ 下，避免污染 git 工作树）。"""
-    d = os.path.join(tempfile.gettempdir(), "localagent_browser_shots")
+    d = os.path.join(tempfile.gettempdir(), "parcae_browser_shots")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -83,6 +83,33 @@ def _resolve_tab_id_to_url(tab_id: str) -> str | None:
                 return t.get("url", "")
     except Exception as e:
         logger.warning("_resolve_tab_id_to_url 失败: %s", e)
+    return None
+
+
+def _resolve_target_url(tab_id: str | None, url_pattern: str | None) -> str | None:
+    """无 session 模式下定位目标 tab 的 URL（供同域导航节流判断域名）。
+
+    优先 tab_id 精确匹配，其次 url_pattern 子串匹配第一个 page target。
+    定位不到返回 None —— 调用方据此跳过节流（不因定位失败阻断导航）。
+    """
+    if not tab_id and not url_pattern:
+        return None
+    try:
+        from lib.async_http import get_sync_client
+
+        port = get_browser_config()["debug_port"]
+        resp = get_sync_client().get(f"http://127.0.0.1:{port}/json/list", timeout=3)
+        pages = [t for t in resp.json() if t.get("type") == "page"]
+        if tab_id:
+            for t in pages:
+                if t.get("id") == tab_id:
+                    return t.get("url", "") or None
+            return None
+        for t in pages:
+            if url_pattern and url_pattern in (t.get("url") or ""):
+                return t.get("url", "") or None
+    except Exception as e:
+        logger.debug("_resolve_target_url 失败（跳过节流判断）: %s", e)
     return None
 
 
@@ -138,6 +165,12 @@ class BrowserStatusResponse(BaseSchema):
     has_pending_dialog: bool = False
     pending_dialog_count: int = 0
     pending_dialogs: list[dict] = []
+    # 2026-10-23：同域导航节流状态（哪些域名还在冷却、各自违规次数）。
+    # agent 撞到 NAV_RATE_LIMITED 后可先看这里，别盲目重试。
+    nav_guard: dict | None = None
+    # 2026-11-01：标签页来源分布。foreign = 不是后端建的（脚本/用户自己开的），
+    # 它们不参与 agent 侧的目标歧义判定，也不受 nav_guard / 会话额度约束。
+    tab_origins: dict | None = None
 
 
 # ========== 基础端点 ==========
@@ -199,6 +232,23 @@ async def browser_status():
         all_targets = tabs_resp.json()
         page_count = sum(1 for t in all_targets if t.get("type") == "page")
         target_count = len(all_targets)
+        from .nav_guard import nav_guard_status
+
+        # 2026-11-01：顺手记一次标签页来源（脚本直连 CDP 开的页只能这样被认出来）
+        _tab_origin_stat: dict | None = None
+        try:
+            from .tab_origins import get_tab_origins
+
+            _pages = [
+                {"tab_id": t.get("id", ""), "url": t.get("url", ""), "title": t.get("title", "")}
+                for t in all_targets if t.get("type") == "page"
+            ]
+            _sessions = mgr.list_sessions() if mgr is not None else []
+            get_tab_origins().observe(_pages, _sessions)
+            _tab_origin_stat = get_tab_origins().summary()
+        except Exception as _e:
+            logger.debug("browser_status: 来源统计失败 %s", _e)
+
         return BrowserStatusResponse(
             connected=True, debug_port=port,
             tab_count=page_count,  # 向后兼容
@@ -208,17 +258,32 @@ async def browser_status():
             has_pending_dialog=has_pending_dialog,
             pending_dialog_count=len(pending_dialog_list),
             pending_dialogs=pending_dialog_list,
+            nav_guard=nav_guard_status(),
+            tab_origins=_tab_origin_stat,
         )
     except Exception as e:
         # T07 回归修复：httpx.ConnectTimeout/ConnectError 的 str() 可能为空，
         # 补 type name 保证 error 字段非空（test_disconnected_returns_error_string 契约）
         err_msg = str(e) or f"{type(e).__name__}: 浏览器调试端口 {port} 不可达"
+        from .nav_guard import nav_guard_status
+
+        # 浏览器断连时登记表里可能还有上次的残留记录，读出来供排查（不新增观测）
+        _tab_origin_stat: dict | None = None
+        try:
+            from .tab_origins import get_tab_origins
+
+            _tab_origin_stat = get_tab_origins().summary()
+        except Exception as _e:
+            logger.debug("browser_status: 断连态来源统计失败 %s", _e)
+
         return BrowserStatusResponse(
             connected=False, debug_port=port,
             error=err_msg,
             has_pending_dialog=has_pending_dialog,
             pending_dialog_count=len(pending_dialog_list),
             pending_dialogs=pending_dialog_list,
+            nav_guard=nav_guard_status(),
+            tab_origins=_tab_origin_stat,
         )
 
 
@@ -238,6 +303,10 @@ async def browser_list_tabs():
 
     target_id 可用于 browser_close(tab_ids=[...]) 精确关闭，
     避免同 URL 多标签的歧义。
+
+    ★ 2026-10-23 复用优先：动手前先看一眼这里——目标网站要是已经开着 tab，
+    就直接 browser_session_create(url_pattern="<域名>") 复用，别新开、别刷新。
+    同域 30s 内只允许一次 reload/goto，复用是目前最省时间的路径。
     """
     cfg = get_browser_config()
     port = cfg["debug_port"]
@@ -252,10 +321,27 @@ async def browser_list_tabs():
         page_targets = [t for t in tabs_data if t.get("type") == "page"]
         # 构建 target_id → url 映射，用于解析 opener_url
         url_by_target_id = {t.get("id", ""): t.get("url", "") for t in page_targets}
+        # 2026-11-01：标注来源（session / preexisting / unknown）。
+        # 脚本直连 CDP 开的页不登记归属，只能靠"看着它冒出来"识别，这里顺手记一次。
+        origins_by_tab: dict[str, dict] = {}
+        try:
+            from .session import manager as _mgr_mod
+            from .tab_origins import get_tab_origins
+
+            _mgr = _mgr_mod._manager
+            _sessions = _mgr.list_sessions() if _mgr is not None else []
+            _pages = [
+                {"tab_id": t.get("id", ""), "url": t.get("url", ""), "title": t.get("title", "")}
+                for t in page_targets
+            ]
+            for row in get_tab_origins().observe(_pages, _sessions):
+                origins_by_tab[row["tab_id"]] = row
+        except Exception as _e:  # 观测失败不能拖垮列表本身
+            logger.debug("browser_list_tabs: 来源标注失败 %s", _e)
         tabs = []
         for t in page_targets:
             opener_id = t.get("openerId")
-            tabs.append({
+            item = {
                 "target_id": t.get("id", ""),
                 "title": t.get("title", ""),
                 "url": t.get("url", ""),
@@ -263,7 +349,18 @@ async def browser_list_tabs():
                 "attached": bool(t.get("attached", False)),
                 "opener_target_id": opener_id or "",
                 "opener_url": url_by_target_id.get(opener_id, "") if opener_id else "",
-            })
+            }
+            meta = origins_by_tab.get(item["target_id"])
+            if meta:
+                item["origin"] = meta.get("origin")
+                item["origin_hint"] = meta.get("origin_hint")
+                item["first_seen_at"] = meta.get("first_seen_at")
+                item["open_secs"] = meta.get("open_secs")
+                if meta.get("session_id"):
+                    item["session_id"] = meta["session_id"]
+                if meta.get("owner"):
+                    item["owner"] = meta["owner"]
+            tabs.append(item)
         return BrowserListResponse(success=True, tabs=tabs)
     except Exception:
         # 浏览器未运行或连接失败，返回空列表而非 500
@@ -568,6 +665,17 @@ async def browser_console_logs(req: BrowserConsoleLogsRequest):
         )
 
     # 无 session：一次性抓取模式
+    # 2026-11-01（G4）：多 tab 且没指定目标 ⇒ TAB_REQUIRED（不再默认第一个 tab）
+    from .target_resolver import cold_guard
+
+    _cold = await cold_guard(req.tab_id, req.url_pattern, start)
+    if isinstance(_cold, str):
+        # 后端替你选定了唯一可信 tab（其余是外来者/无主页），走精确匹配
+        req.tab_id = _cold
+    elif _cold is not None:
+        return BrowserConsoleLogsResponse(
+            success=False, logs=[], elapsed_ms=_cold.elapsed_ms, error=_cold,
+        )
     # 修复幽灵参数：无会话模式支持 tab_id 精确消歧。
     _tab_id_url = None
     if req.tab_id:
@@ -750,6 +858,10 @@ class BrowserNavigateResponse(BaseSchema):
     # （需重新 browser_navigate(action="goto", url=url_after) 重开），
     # dismiss 则页面保留在 url_after。
     beforeunload_triggered: bool = False
+    # 2026-10-23：同域导航节流（nav_guard）。被拒时给出还需等待的秒数，
+    # error_code=NAV_RATE_LIMITED。正常放行时为 None。
+    nav_retry_after_secs: float | None = None
+    nav_guard_host: str | None = None
 
 
 @router.post("/navigate", response_model=BrowserNavigateResponse, operation_id="browser_navigate")
@@ -762,6 +874,15 @@ async def browser_navigate(req: BrowserNavigateRequest):
     Tip — 访问新网站前建议先调 browser_match_site(domain=...) 查询是否有已记录经验
     （已知 DOM 坑/反爬规则/选择器回退等），避免重复踩坑。session 模式下
     browser_session_create 会自动注入 site_lessons，无需手动查询。
+
+    ★ 2026-10-23 同域导航节流（风控面）：同一域名 **30 秒内只允许一次
+    reload / goto**（localhost/内网/file: 豁免）。超频直接拒绝，返回
+    error_code=NAV_RATE_LIMITED + nav_retry_after_secs，不会自动帮你等。
+    ⛔ 撞到限流不要原地循环重试——先问自己：当前页真的不能用了吗？
+    能复用就 browser_snapshot / browser_action 在现页面上继续做；
+    需要别的 tab 就带 url_pattern 复用（它正被别人持有则 409，那时 force=true
+    的语义是加入共享、不是抢占）。back / forward 不受限。
+    连续重试不会让等待变长（窗口恒定 30s），但也不会让它变短。
 
     Example — reload current tab:
       browser_navigate(action="reload", url_pattern="bilibili")
@@ -831,6 +952,36 @@ async def browser_navigate(req: BrowserNavigateRequest):
                 blocked_by_dialog=True,
                 blocking_dialog=block["blocking_dialog"],
             )
+        # 2026-10-23：同域导航节流（刷新/初始连接 30s 一次/域）。
+        # 顺序放在 dialog 预检之后：先让 agent 处理更紧急的 dialog，再谈频率。
+        # 例外：reload + force_beforeunload 实际走 page.close(run_before_unload=True)，
+        # 不产生导航请求，不计入节流（否则 beforeunload 处理流程会被无谓卡 30s）。
+        from .nav_guard import check_nav, explain_verdict
+
+        nav_url = req.url if req.action == "goto" else page.url
+        if not (req.action == "reload" and req.force_beforeunload):
+            # 归因（2026-11-01）：把 caller/session 记进节流状态，被拒的一方才能看到
+            # 「额度是谁用掉的」，而不是只看到"再等 22 秒"。
+            verdict = check_nav(
+                nav_url, req.action,
+                caller=(sess.owner if sess else ""),
+                session_id=req.session_id or "",
+            )
+            if not verdict.allowed:
+                elapsed = int((_time.perf_counter() - start) * 1000)
+                return BrowserNavigateResponse(
+                    success=False, action=req.action, elapsed_ms=elapsed,
+                    url_after=page.url,
+                    error=BrowserErrorResponse(
+                        error_code="NAV_RATE_LIMITED",
+                        error_message=BROWSER_ERROR_CODES["NAV_RATE_LIMITED"],
+                        phase="connect",
+                        debug_detail=explain_verdict(verdict),
+                        elapsed_ms=elapsed,
+                    ),
+                    nav_retry_after_secs=round(verdict.retry_after_secs, 1),
+                    nav_guard_host=verdict.host,
+                )
         try:
             timeout_ms = int(req.timeout * 1000)
             # 2026-08-06 Ticket 04：force_beforeunload 触发路径
@@ -929,6 +1080,18 @@ async def browser_navigate(req: BrowserNavigateRequest):
             )
 
     # 无 session：走 exec_python 子进程模型（冷启动）
+    # 2026-11-01（G4）：多 tab 且没指定目标 ⇒ TAB_REQUIRED（不再默认第一个 tab）
+    from .target_resolver import cold_guard
+
+    _cold = await cold_guard(req.tab_id, req.url_pattern, start)
+    if isinstance(_cold, str):
+        # 后端替你选定了唯一可信 tab（其余是外来者/无主页），走精确匹配
+        req.tab_id = _cold
+    elif _cold is not None:
+        return BrowserNavigateResponse(
+            success=False, action=req.action,
+            elapsed_ms=_cold.elapsed_ms, error=_cold,
+        )
     # 修复幽灵参数：无会话模式支持 tab_id 精确消歧。
     _tab_id_url = None
     if req.tab_id:
@@ -944,6 +1107,32 @@ async def browser_navigate(req: BrowserNavigateRequest):
                     elapsed_ms=_elapsed,
                 ),
             )
+    # 2026-10-23：同域导航节流——无 session 冷启动路径同样要过，
+    # 否则"关掉 session 直接 goto"就是绕过通道。
+    from .nav_guard import check_nav, explain_verdict
+
+    if req.action == "goto":
+        _nav_target = req.url or ""
+    elif _tab_id_url:
+        _nav_target = _tab_id_url
+    else:
+        _nav_target = await asyncio.to_thread(_resolve_target_url, None, req.url_pattern) or ""
+    _nav_verdict = check_nav(_nav_target, req.action)
+    if not _nav_verdict.allowed:
+        _elapsed = int((_time.perf_counter() - start) * 1000)
+        return BrowserNavigateResponse(
+            success=False, action=req.action, elapsed_ms=_elapsed,
+            error=BrowserErrorResponse(
+                error_code="NAV_RATE_LIMITED",
+                error_message=BROWSER_ERROR_CODES["NAV_RATE_LIMITED"],
+                phase="connect",
+                debug_detail=explain_verdict(_nav_verdict),
+                elapsed_ms=_elapsed,
+            ),
+            nav_retry_after_secs=round(_nav_verdict.retry_after_secs, 1),
+            nav_guard_host=_nav_verdict.host,
+        )
+
     params = {
         "url_pattern": req.url_pattern,
         "tab_id": _tab_id_url,
@@ -1097,7 +1286,7 @@ async def browser_screenshot(req: BrowserScreenshotRequest):
     """Take a screenshot: viewport, full_page, or specific element.
 
     Use full_page to capture long scrolling content (eval reports Browser Use
-    had this and LocalAgent didn't). Use element for a single card/button.
+    had this and Parcae didn't). Use element for a single card/button.
 
     - return_base64 defaults to False: only the file path comes back, so nothing
       large enters LLM context. Pass True only when a multimodal model must see
@@ -1178,6 +1367,17 @@ async def browser_screenshot(req: BrowserScreenshotRequest):
     else:
         import time as _time
         start = _time.perf_counter()
+        # 2026-11-01（G4）：多 tab 且没指定目标 ⇒ TAB_REQUIRED（不再默认第一个 tab）
+        from .target_resolver import cold_guard
+
+        _cold = await cold_guard(req.tab_id, req.url_pattern, start)
+        if isinstance(_cold, str):
+            # 后端替你选定了唯一可信 tab（其余是外来者/无主页），走精确匹配
+            req.tab_id = _cold
+        elif _cold is not None:
+            return BrowserScreenshotResponse(
+                success=False, elapsed_ms=_cold.elapsed_ms, error=_cold,
+            )
         # 修复问题②：无会话模式支持 tab_id 精确消歧。先把 CDP target id 解析为 URL，
         # 再作为精确匹配传给子进程 _find_page(tab_id=url)。
         _tab_id_url = None
@@ -1343,6 +1543,10 @@ from . import site_lessons as _site_lessons_endpoints  # noqa: E402,F401
 # （Ticket 04 追加），首次 import 触发 @router.post("/snapshot") 注册到本 router。
 from . import snapshot_endpoints as _snapshot_endpoints  # noqa: E402,F401
 from . import stats as _stats_endpoints  # noqa: E402,F401
+
+# 2026-10-23：浏览器进程 supervisor（status/ensure/stop/restart）。
+# 不进 DIRECT_TOOLS，agent 走 parcae_advanced_tool 调用（compact 工具面）。
+from . import supervisor_endpoints as _supervisor_endpoints  # noqa: E402,F401
 
 # Ticket 05：VL 反馈闭环 helper + 站点经验匹配/书签历史检索端点。
 # vl_feedback 仅提供 _maybe_vl_feedback helper（不注册端点）；

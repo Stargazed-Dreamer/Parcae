@@ -29,7 +29,18 @@ from PySide6.QtWidgets import (
     QDialog, QListWidget, QDialogButtonBox, QListWidgetItem
 )
 
-API = "http://127.0.0.1:8766"
+# ---- 后端地址动态解析：端口可能被 Windows 保留区顶走而顺延（docs/environment-constraints.md）
+import sys as _sys
+from pathlib import Path as _Path
+
+for _p in _Path(__file__).resolve().parents:
+    if (_p / "lib" / "runtime_endpoint.py").exists():
+        _sys.path.insert(0, str(_p))
+        break
+
+from lib.runtime_endpoint import resolve_base_url as _resolve_base_url  # noqa: E402
+
+API = _resolve_base_url(probe_health=False)
 # 注意：游戏窗口实际标题是 "异环  "（带两个尾随空格），见 yihuan_gacha.py 的 WINDOW
 # 后端 _find_window 先精确匹配再包含匹配；GUI 标题不能含"异环"两字，否则会被误匹配
 WINDOW_TITLE_DEFAULT = "异环"

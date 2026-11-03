@@ -19,7 +19,7 @@ from lib.schema import BaseSchema
 
 from .remote_vl import remote_vl, vl_status_fields
 
-logger = logging.getLogger("localagent.vl.vision")
+logger = logging.getLogger("parcae.vl.vision")
 router = APIRouter(prefix="/vision", tags=["Vision"])
 
 
@@ -158,7 +158,7 @@ async def vision_status():
 
 
 @router.get("/providers", operation_id="vl_providers")
-async def vl_providers():
+async def vl_providers(use_case: str = "vl_vision"):
     """返回 VL providers 详情（per-key_id 运行时状态）
 
     暴露 remote_vl.status().providers 列表，供客户端"模型池"面板的 VL 子面板展示。
@@ -166,10 +166,15 @@ async def vl_providers():
     active_count/max_concurrency/last_error/privacy_warning。
     models[] 按模型展开（Ticket 04）：每项含 name/current/dead_today——判死是
     (key_id, model) 粒度，同 key 其余模型是否还能用只能从这里看出来。
+
+    Ticket 06：`use_case` 决定 models[] 的顺序（即该 use_case 的降级链顺序）与
+    current 落点。默认 vl_vision（定位兜底、质量优先、tier 降序），所以面板看到的
+    "在服务"那一行就是这条链路真会先调的模型。要便宜优先的截图 OCR 链传
+    use_case=vl_ocr。响应回显 use_case 与 dead_reset_in_s（判死解冻倒计时）。
     """
     from server.vl.remote_vl import remote_vl
     remote_vl.reload_config()
-    vstatus = remote_vl.status()
+    vstatus = remote_vl.status(use_case=use_case)
     return {
         "enabled": vstatus.get("enabled", False),
         "available": vstatus.get("available", False),
@@ -180,6 +185,8 @@ async def vl_providers():
         "daily_exhausted_reason": vstatus.get("daily_exhausted_reason", ""),
         "providers": vstatus.get("providers", []),
         "provider_exhausted": vstatus.get("provider_exhausted", {}),
+        "use_case": use_case,
+        "dead_reset_in_s": vstatus.get("dead_reset_in_s", 0),
     }
 
 

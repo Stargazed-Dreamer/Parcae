@@ -44,7 +44,7 @@ class ApprovalDialog(QDialog):
 
     def __init__(self, payload: dict, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("LocalAgent 命令安全确认")
+        self.setWindowTitle("Parcae 命令安全确认")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         self.setMinimumSize(720, 560)
 

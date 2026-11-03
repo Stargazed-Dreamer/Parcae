@@ -212,7 +212,7 @@ upstream_fused_at: 2026-07-21
 |------|----------|------|
 | 本地 upstream/ 档案 | `.agents/skills/daily/cangjie_extraction/upstream/` | RIA-TV++ 完整方法论、原版 README/LICENSE/GITHUB_REPO.md（融合自 cangjie-skill，2026-07-21） |
 | Task sub-agent | Trae `Task` 工具（subagent_type=`general_purpose_task`） | 阶段 1 并行提取、阶段 4 盲测 |
-| LLM 池 | `localagent_agent_chat` 或 `localagent_advanced_tool(llm_pool_call)` | 阶段 0-4 各阶段生成内容 |
-| memory | `localagent_memory_*` | 阶段 5 路由到 memory 时使用 |
-| wip | `localagent_wip_create` | 阶段 5 路由到 wip 时使用 |
+| LLM 池 | `parcae_agent_chat` 或 `parcae_advanced_tool(llm_pool_call)` | 阶段 0-4 各阶段生成内容 |
+| memory | `memory_list` / `memory_get` / `memory_set` | 阶段 5 路由到 memory 时使用 |
+| wip | `parcae_advanced_tool(wip_create)` | 阶段 5 路由到 wip 时使用 |
 | _index.md / GUIDE_REGISTRY | 写入项目级 skill 后同步 | 阶段 5 路由到 `.agents/skills/` 时使用 |

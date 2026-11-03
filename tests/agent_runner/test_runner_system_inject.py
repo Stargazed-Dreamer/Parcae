@@ -1,7 +1,7 @@
 """v6-lite-chat-fix T01 验收测试：runner system prompt 自动注入
 
 覆盖 Ticket 01 acceptance（temp/sdd/v6-lite-chat-fix/tickets.md）：
-- [x] runner `_build_request` 首轮构建的 LLMRequest.system 非空，含 "LocalAgent" / "agent_guide" / "5:00"
+- [x] runner `_build_request` 首轮构建的 LLMRequest.system 非空，含 "Parcae" / "agent_guide" / "5:00"
 - [x] `compute_today(now)` 纯函数：01:18→前一天，14:00→当天，05:00→当天，04:59→前一天
 - [x] 首轮调 agent_guide(task=用户首句) 一次（spy 验证），第二轮 _build_request 不调
 - [x] guide 调用失败降级：system 仍含 stable prefix + "guide 调用失败"标记，不阻断对话
@@ -10,7 +10,7 @@
 Anti-Cheat 约束（spec）：
 - 测试用 MockLLM + mock HTTP（不起真后端）
 - spy 必须验证 guide 真被调（不能 mock 后跳过调用断言）
-- 断言字符串 "LocalAgent" / "agent_guide" / "5:00" / "guide 调用失败" 定稿，不许改
+- 断言字符串 "Parcae" / "agent_guide" / "5:00" / "guide 调用失败" 定稿，不许改
 - 反向验证：临时改 system="" → 测试失败 → 恢复 → 绿
 """
 
@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
+from lib.agent_runtime import (  # noqa: E402
     EventStore,
     Message,
     MockLLM,
@@ -37,8 +37,8 @@ from client.core.agent import (  # noqa: E402
     RunnerDeps,
     SessionRunner,
 )
-from client.core.agent import runner as runner_mod  # noqa: E402
-from client.core.agent.runner import compute_today  # noqa: E402
+from lib.agent_runtime import runner as runner_mod  # noqa: E402
+from lib.agent_runtime.runner import compute_today  # noqa: E402
 
 # ============================================================================
 # Fixtures
@@ -78,15 +78,15 @@ def _make_runner(store, *, mock_text: str = "MockLLM ok") -> tuple[SessionRunner
 
 
 def test_system_not_empty(store):
-    """T01: 首轮 _build_request 的 LLMRequest.system 非空，含 LocalAgent / agent_guide / 5:00。"""
+    """T01: 首轮 _build_request 的 LLMRequest.system 非空，含 Parcae / agent_guide / 5:00。"""
     async def run():
         await _prepare_session(store, "你好，请帮我记账", session_id="sess-inject")
         runner, _ = _make_runner(store)
         messages = await store.load_messages("sess-inject")
         request = runner._build_request(messages)
         assert request.system, "system prompt 不能为空（system='' 是 v6-lite-chat-fix 要修的根病根）"
-        # stable prefix 提供 "LocalAgent"（身份铁律 + AGENTS.md 全文）
-        assert "LocalAgent" in request.system, "system 必须含 LocalAgent 身份"
+        # stable prefix 提供 "Parcae"（身份铁律 + AGENTS.md 全文）
+        assert "Parcae" in request.system, "system 必须含 Parcae 身份"
         # ephemeral 提供 "agent_guide"（自动调用注入声明）
         assert "agent_guide" in request.system, "system 必须含 agent_guide 自动调用注入声明"
         # ephemeral 提供 "5:00"（今天日期按 5:00 分界线算出）
@@ -171,8 +171,8 @@ def test_guide_failure_degrades(store):
             request = runner._build_request(messages)
             assert request.system, "guide 失败时 system 仍应非空（含 stable prefix）"
             # stable prefix 仍注入
-            assert "LocalAgent" in request.system, (
-                "guide 失败时 stable prefix 仍应注入（LocalAgent 身份）"
+            assert "Parcae" in request.system, (
+                "guide 失败时 stable prefix 仍应注入（Parcae 身份）"
             )
             # 降级标记
             assert "guide 调用失败" in request.system, (

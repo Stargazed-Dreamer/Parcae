@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import gc
+import importlib
 import io
 import logging
 import os
+import sys
 import threading
 import time
+import types
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -20,7 +23,7 @@ from PIL import Image
 from lib.schema import BaseSchema
 from server.vl.remote_vl import remote_vl, vl_status_fields
 
-logger = logging.getLogger("localagent.ocr")
+logger = logging.getLogger("parcae.ocr")
 router = APIRouter(prefix="/ocr", tags=["OCR"])
 
 # 长图分块时相邻块的纵向重叠像素，避免文字被切断
@@ -34,6 +37,126 @@ def _get_models_cfg() -> dict:
 
 def _fmt_ratio(ratio: float | None) -> str:
     return "unknown" if ratio is None else f"{ratio:.2f}"
+
+
+def _trim_working_set_process() -> tuple[bool, str]:
+    """把本进程工作集刷到 standby/pagefile，归还**物理内存**（Windows psapi）。
+
+    为什么需要（2026-10-24 隔离实测，WIP `wip_d6417a7d`）：paddle 卸载只 `del` 引擎
+    对象，273 条 DLL 映像映射一条不少——**CPython 不提供卸载扩展模块的机制**，
+    `del sys.modules` 只删 Python 对象，`LoadLibrary` 的引用计数不会减。于是
+    "空闲 10s 自动卸载"卸掉的只是模型，主机侧的提交与映射一直跟着进程。
+
+    实测（`temp/unload_probe2.py` + `temp/trim_reload_cost.py`，device=cpu）::
+
+        del+gc            rss=496MB  private=1385MB   ← del 之后映射一条没少
+        EmptyWorkingSet   rss=  0MB  private=1385MB   ← 物理内存全还
+        trim 后重建引擎    1.08s（未 trim 1.02s，只慢 0.06s）
+
+    ⚠ 它只归**物理内存**，不降低 private 提交量：若症状是"提交量超限 / 系统报内存
+    不足"，本函数无效，得当子进程（B 方案）才能真还。
+
+    ⛔ 因此**调用方默认关**（`trim_working_set = false`）：闲置页本来就由 Windows 在
+    需要时换出，提交量没超限时主动刷只是提前付 page fault，没有收益。
+
+    Returns:
+        (是否成功, 说明)。非 Windows 或调用失败时返回 (False, 原因)，调用方不因此报错。
+    """
+    if os.name != "nt":
+        return False, "not_windows"
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi.EmptyWorkingSet.argtypes = [wintypes.HANDLE]
+        psapi.EmptyWorkingSet.restype = wintypes.BOOL
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        if not psapi.EmptyWorkingSet(k32.GetCurrentProcess()):
+            return False, f"GetLastError={ctypes.get_last_error()}"
+        return True, "ok"
+    except Exception as e:  # pragma: no cover - 平台/权限差异
+        return False, f"{type(e).__name__}: {e}"
+
+
+class _LazyModelscope(types.ModuleType):
+    """modelscope 的惰性占位：只有真正取属性（即确实要下载模型）时才导入真包。
+
+    **为什么需要它**（2026-10-24 取证，WIP `wip_d6417a7d`）：
+    `paddlex.inference.utils.official_models` 在**模块导入期**就 `import modelscope`，
+    而 modelscope 的包初始化会探测 torch——`modelscope/utils/file_utils.py` 建
+    `logger = get_logger()` → `utils/logger.py` 用 `find_spec('torch')` 判断后
+    `from modelscope.utils.torch_utils import is_dist, is_master` → `import torch`。
+    于是 `from paddleocr import PaddleOCR` 就顺带把整套 torch CUDA 栈（文件映射
+    ~4.0GB）拉进后端进程，而 OCR `unload` 不调用 FreeLibrary，进程不重启就永不释放
+    （实测后端 RSS 480MB → 1828MB）。
+
+    这里把 `modelscope` 换成占位：`import modelscope` 拿到的还是对象，
+    但真包要等第一次访问属性（如 `modelscope.snapshot_download(...)`，仅在
+    模型缓存缺失、真去下载时才发生）才导入。
+    """
+
+    # 这些名字不能转发给真包：会在导入机器/解释器探测时被反复访问，转发会提前触发真导入
+    _BLOCKED = frozenset(
+        {
+            "__path__",
+            "__spec__",
+            "__loader__",
+            "__name__",
+            "__file__",
+            "__cached__",
+            "__builtins__",
+            "__package__",
+        }
+    )
+
+    def __init__(self) -> None:
+        super().__init__("modelscope")
+        # 空 __path__ 让 `import modelscope.hub.errors` 立刻 ModuleNotFoundError。
+        # official_models 那处导入在 try/except 内，失败会回落到按类名/状态码判 404 的
+        # 兜底分支（`_modelscope_is_model_package_not_found_error` 的 else 路径），
+        # 只在"下载时 404"这一情形下改变判定来源，不改变下载本身的行为。
+        self.__path__: list[str] = []
+        # 保持与真包一致的最低限度元信息（读 dist-info，不会导入 torch）
+        try:
+            from importlib.metadata import version as _pkg_version
+
+            self.__version__ = _pkg_version("modelscope")
+        except Exception:  # pragma: no cover - 缺元数据不影响功能
+            self.__version__ = "unknown"
+
+    def _load(self) -> types.ModuleType:
+        real = self.__dict__.get("_real_module")
+        if real is None:
+            # 先把占位从 sys.modules 摘掉，否则 import 回来还是自己
+            sys.modules.pop("modelscope", None)
+            try:
+                real = importlib.import_module("modelscope")
+            finally:
+                sys.modules["modelscope"] = self
+            self.__dict__["_real_module"] = real
+            logger.warning("modelscope 真包已按需导入（torch CUDA 栈随之进场，仅首次）")
+        return real
+
+    def __getattr__(self, name: str) -> Any:
+        # dunder 一律不转发。踩坑记录：PySide6 的 shiboken 导入钩子对每个被导入模块做
+        # 内省（`inspect.getsource` → `inspect.unwrap` → `hasattr(func, "__wrapped__")`），
+        # 只要占位把 `__wrapped__` 转发给真包，torch 立刻被拽进来——第一版就是这么漏的。
+        if name in self._BLOCKED or (name.startswith("__") and name.endswith("__")):
+            raise AttributeError(name)
+        return getattr(self._load(), name)
+
+
+def _defer_modelscope_import() -> None:
+    """在 import paddleocr / paddlex 之前把 modelscope 换成惰性占位（幂等）。
+
+    真包若已被别的模块导入则什么都不做（此时 torch 早进场了，换占位没有意义）。
+    """
+    if "modelscope" in sys.modules:
+        return
+    sys.modules["modelscope"] = _LazyModelscope()
+    logger.info("modelscope 已置惰性占位（避免 import paddleocr 时拉进 ~4GB torch CUDA 栈）")
 
 
 class ModelManager:
@@ -70,6 +193,10 @@ class ModelManager:
         self._in_flight = 0                         # 进行中的推理数（卸载前排空用）
         self._in_flight_lock = threading.Lock()
         self._loaded_at: float | None = None        # wall-clock 加载完成时间戳（驱动协议 loaded_at）
+        # 最近一次被请求的时间戳（wall-clock）：空闲回收判据（manager._idle_sweep）。
+        # 每次 get_ocr() 进入即刷新（请求开始就算"在用"），record_inference 再刷一次
+        # （覆盖长推理：入口刷新 + 推理结束刷新，避免推理跑 10s 被判空闲）。
+        self._last_used_at: float | None = None
         # GPU→CPU 条件降级（2026-08-31）：显存被占满时压力拒绝态下降级到 CPU 继续服务
         # _active_device 是"最近一次决策的设备"，OcrDriver.resource 动态读它，
         # 供 admission/逐出按实际归属分流。每次加载前由 _decide_device() 决策，
@@ -255,6 +382,10 @@ class ModelManager:
         3. 局部变量返回（防"返回时属性已被置 None"）。
         拒绝时抛 ModelUnavailableError（全局异常处理器转 503）。
         """
+        # 请求进入即算"在用"：空闲回收（manager._idle_sweep）以本时间戳为判据，
+        # 放最前面是为了覆盖"正在冷加载/等待加载锁"的请求——否则一次 20s 的冷加载
+        # 进行到第 10s 时会被判空闲而卸载，加载完立刻又被卸掉，白跑一遍。
+        self._last_used_at = time.time()
         from server.model_manager import get_model_manager
         from server.model_manager.types import ModelUnavailableError
 
@@ -274,6 +405,9 @@ class ModelManager:
                 return engine
             manager.admit("ocr")                       # 锁内复查（等待期间状态可能已变）
             self._ensure_env()
+            # 必须早于任何 paddlex/paddleocr 导入：paddlex 的 official_models 是模块级
+            # `import modelscope`，会把 torch CUDA 栈一起带进来（见 _LazyModelscope 注释）
+            _defer_modelscope_import()
             self._apply_pir_patch()
             try:
                 from paddleocr import PaddleOCR
@@ -335,6 +469,7 @@ class ModelManager:
                 self._unloading = False
                 self._reset_load_stats()
                 self._loaded_at = None
+                self._last_used_at = None
                 return {"unloaded": True, "forced": False, "detail": "already_unloaded"}
         forced = False
         try:
@@ -350,7 +485,12 @@ class ModelManager:
             del self._ocr_engine
             self._ocr_engine = None
             self._loaded_at = None
+            self._last_used_at = None          # 卸载后清活跃时间，避免下次加载前被旧值误判
             self._release_paddle_cache(forced=forced)
+            # 归还物理内存（Windows EmptyWorkingSet）：del 只丢引擎对象，DLL 映像与
+            # paddle 的 C++ 堆仍被进程持有，见 _trim_working_set_process 的实测数据。
+            # 默认关（trim_working_set=false）：闲置页交给 Windows 按需换出。
+            self._trim_working_set()
             # 卸载后重置加载统计，使下次调用重新计为 cold_start
             self._reset_load_stats()
             # 设备复位为 config 期望设备，下次加载重新决策；
@@ -362,9 +502,59 @@ class ModelManager:
         finally:
             self._unloading = False
 
+    def _trim_working_set(self) -> bool:
+        """卸载后归还物理内存（开关 `[model_manager.models.ocr] trim_working_set`，**默认关**）。
+
+        只在**卸载完成后**调：会把本进程全部页面刷出工作集，紧接着的请求要吃少量
+        page fault（实测重建引擎 1.08s vs 1.02s）。默认关的理由：这里还的只是物理内存，
+        private 提交一分不减，而闲置页本来就由 Windows 按需换出——只要提交量没超限，
+        提前刷不解决问题，只换来后续请求的 page fault。要给别的程序腾物理内存时才开。
+        """
+        try:
+            from server.model_manager.config import get_model_manager_config, get_model_override
+
+            cfg = get_model_manager_config()
+            enabled = bool(get_model_override(cfg, "ocr", "trim_working_set", False))
+        except Exception:
+            enabled = False  # 配置读不到就按默认关处理：不为读配置失败多做一次系统调用
+        if not enabled:
+            logger.debug("OCR 卸载后跳过 EmptyWorkingSet（trim_working_set=false）")
+            return False
+
+        def _rss() -> float | None:
+            try:
+                import psutil
+
+                return psutil.Process().memory_info().rss / 2**20
+            except Exception:
+                return None
+
+        before = _rss()
+        ok, detail = _trim_working_set_process()
+        if ok:
+            after = _rss()
+            logger.info(
+                "OCR 卸载后已归还物理内存: RSS %s → %s MB（private 提交不变）",
+                "?" if before is None else f"{before:.0f}",
+                "?" if after is None else f"{after:.0f}",
+            )
+        else:
+            logger.debug("EmptyWorkingSet 未生效: %s", detail)
+        return ok
+
     def _release_paddle_cache(self, forced: bool = False) -> None:
-        """归还 Paddle 显存：gc.collect + cuda.empty_cache（CPU-only 环境安全降级）"""
+        """归还 Paddle 显存：gc.collect + cuda.empty_cache（CPU-only 环境安全降级）
+
+        ⚠️ 2026-10-24 实测修正：device=cpu 时 `import paddle` + `empty_cache()` 会
+        **初始化 CUDA 上下文**，把 private 从 2131MB 推到 2342MB（+211MB）——是反效果。
+        故只在"设备决策是 gpu 且 paddle 确实已在场"时才碰它；CPU 路径直接跳过。
+        """
         gc.collect()
+        paddle_present = "paddle" in sys.modules
+        if self._active_device != "gpu" or not paddle_present:
+            if forced:
+                self._schedule_forced_release()
+            return
         try:
             import paddle
             _paddle_dynamic: Any = paddle  # 桩未导出私有函数，走 Any 规避
@@ -385,6 +575,8 @@ class ModelManager:
             if self._ocr_engine is not None:
                 return  # 期间已重载，跳过补释放
             gc.collect()
+            if self._active_device != "gpu" or "paddle" not in sys.modules:
+                return
             try:
                 import paddle
                 _paddle_dynamic: Any = paddle  # 桩未导出私有函数，走 Any 规避
@@ -442,6 +634,42 @@ class ModelManager:
         return self._active_device
 
     @property
+    def last_used_at(self) -> float | None:
+        """最近一次请求/推理的 wall-clock 时间戳（空闲回收判据，见 OcrDriver.last_active_at）"""
+        return self._last_used_at
+
+    @property
+    def idle_unload_sec(self) -> float:
+        """生效的空闲回收阈值（秒）：0 = 禁用。
+
+        读管理器 per-model 配置 `[model_manager.models.ocr] idle_unload_sec`
+        （未配则回退全局 `[model_manager] idle_unload_sec`）。是否真的会回收还取决于
+        常驻开关：keep_models=True 时永不回收。
+        """
+        try:
+            from server.model_manager import get_model_manager
+            from server.model_manager.config import get_idle_unload_sec
+            return get_idle_unload_sec(get_model_manager().cfg, "ocr")
+        except Exception:
+            return 0.0
+
+    @property
+    def idle_remaining_sec(self) -> float | None:
+        """距空闲回收还有多少秒；None = 当前不适用（未加载 / 常驻开启 / 未启用回收）。
+
+        GUI 用它显示"还有 N 秒卸载"倒计时，避免用户以为开关没生效。
+        """
+        if self._ocr_engine is None:
+            return None
+        sec = self.idle_unload_sec
+        if sec <= 0 or self.keep_models:
+            return None
+        last = self._last_used_at
+        if last is None:
+            return None
+        return max(0.0, sec - (time.time() - last))
+
+    @property
     def cold_start(self) -> bool:
         """下次调用会触发首次加载（未加载 + 未在加载中）"""
         return self._ocr_engine is None and self._load_started_at is None
@@ -461,6 +689,9 @@ class ModelManager:
         with self._stats_lock:
             self._last_inference_ms = elapsed_ms
             self._inference_count += 1
+        # 推理结束也刷新活跃时间：长推理（实测大图 2.7s）期间入口时间戳已过时，
+        # 不刷新会让"推理刚跑完"被算成空闲。
+        self._last_used_at = time.time()
 
     def get_vl_client(self):
         from server.config import get_vision_config
@@ -584,6 +815,10 @@ class OCRStatusResponse(BaseSchema):
     last_inference_ms: int | None = None
     inference_count: int = 0
     last_error: str | None = None
+    # 空闲回收（keep_models=False 时生效）：阈值 / 倒计时 / 最近活跃时间
+    idle_unload_sec: float = 0.0
+    idle_remaining_sec: float | None = None
+    last_active_at: float | None = None
     # design §10 兼容委托：附加 ModelLifecycleManager 状态摘要
     mlm_state: dict = {}
 
@@ -655,6 +890,10 @@ async def ocr_status():
         last_inference_ms=models._last_inference_ms,
         inference_count=models._inference_count,
         last_error=models._last_error,
+        # 空闲回收可见性
+        idle_unload_sec=models.idle_unload_sec,
+        idle_remaining_sec=models.idle_remaining_sec,
+        last_active_at=models.last_used_at,
         # design §10 兼容委托：附加 ModelLifecycleManager 状态摘要
         mlm_state=_get_mlm_state(),
     )

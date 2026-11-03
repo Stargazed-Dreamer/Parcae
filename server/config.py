@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 # ADR-0027: load_config/save_config/CONFIG_PATH 已迁移到 lib/config_reader.py
 # CONFIG_PATH 保留重导出用于向后兼容（# noqa: F401 抑制未使用告警）
@@ -346,6 +346,9 @@ def get_browser_config() -> dict:
         session_idle_timeout_secs = 900   # 有主 session idle 租约（15min，owner 每次操作即续租）
         session_anon_idle_timeout_secs = 300  # 无主(anonymous) session 租约（没人续租，更快回收）
         session_max_count = 32            # 全局 session 上限（2026-10-02 按 4 agent 并发观测上调；LRU 只淘汰 anonymous）
+        nav_guard_enabled = true          # 同域导航节流总开关（reload/goto 频率）
+        nav_guard_window_secs = 30        # 同一域名两次刷新/初始连接的最小间隔（恒定，不随违规次数加码）
+        nav_guard_exempt_hosts = ["scnu.edu.cn"]   # 站点级豁免（命中该域及其子域）；给空列表=不要默认豁免
 
     向后兼容：若未配置 [browser] 段，会回退读取旧的 [chrome] 段。
     """
@@ -363,6 +366,15 @@ def get_browser_config() -> dict:
         "session_idle_timeout_secs": int(browser.get("session_idle_timeout_secs", 900)),
         "session_anon_idle_timeout_secs": int(browser.get("session_anon_idle_timeout_secs", 300)),
         "session_max_count": int(browser.get("session_max_count", 32)),
+        # 同域导航节流（2026-10-23）：同一域名 30s 内只允许一次 reload / goto。
+        # 违规硬拒绝（NAV_RATE_LIMITED）；窗口恒定，不按违规次数加码；本地地址自动豁免。
+        "nav_guard_enabled": bool(browser.get("nav_guard_enabled", True)),
+        "nav_guard_window_secs": float(browser.get("nav_guard_window_secs", 30.0)),
+        # 站点级豁免名单（None = 没配 ⇒ nav_guard 侧用内置默认；空列表 = 明确不要豁免）
+        "nav_guard_exempt_hosts": (
+            list(browser["nav_guard_exempt_hosts"])
+            if "nav_guard_exempt_hosts" in browser else None
+        ),
         # 浏览器选择器调用统计 DB 路径；留空则用 data/browser_stats.db
         "stats_db_path": browser.get("stats_db_path", ""),
     }
@@ -370,6 +382,34 @@ def get_browser_config() -> dict:
 
 # 向后兼容别名（旧调用方过渡期使用，新代码请直接用 get_browser_config）
 get_chrome_config = get_browser_config
+
+
+def get_supervisor_config() -> dict:
+    """获取浏览器 supervisor 配置（[browser.supervisor] 段）。
+
+    合法键见 BrowserSupervisorConfigSchema。配置损坏/含未知键时退回全默认值；
+    具体错误由启动时的 validate_config() 报告，避免运行时因一处笔误整体不可用。
+    """
+    config = load_config()
+    browser = config.get("browser", {})
+    if not browser and "chrome" in config:
+        browser = config.get("chrome", {})
+    raw = browser.get("supervisor", {}) if isinstance(browser, dict) else {}
+    if not isinstance(raw, dict):
+        raw = {}
+    try:
+        data = BrowserSupervisorConfigSchema(**raw).model_dump()
+    except Exception:
+        data = BrowserSupervisorConfigSchema().model_dump()
+    # 未显式配置时继承 [browser] 的端口/profile：supervisor 与 SessionManager 必须看同一个实例。
+    if "port" not in raw:
+        try:
+            data["port"] = int(browser.get("debug_port", 9222))
+        except (TypeError, ValueError):
+            pass
+    if not raw.get("user_data_dir"):
+        data["user_data_dir"] = browser.get("user_data_dir", "") or ""
+    return data
 
 
 def get_server_config() -> dict:
@@ -387,6 +427,16 @@ def get_server_config() -> dict:
         # (status=done)，否则返回 terminal_id (status=running) 让 agent 调 exec_inspect。
         # 0=禁用，回退 v15 立即返回行为。默认 10s 覆盖 ~80% 短任务。
         "exec_python_inline_wait_secs": server.get("exec_python_inline_wait_secs", 10),
+        # 优雅关停上限（秒）：uvicorn 关闭监听后等待「在飞连接/任务结束」的最长时间。
+        # ⛔ 不要设 None/0：uvicorn 默认 None = 无限等，而本机未装 httptools ⇒ 走 h11，
+        # h11 对「有在飞请求」的连接只置 keep_alive=False、不关连接 ⇒ 只要有 1 个请求
+        # 不返回（LLM 池排队 / 未断开的 SSE / IDE 的 MCP 长连接），后端就永远退不出。
+        # 下限 1 秒（负数/0 会被夹到 1）；超时后 uvicorn 取消挂起任务并继续正常清理。
+        "graceful_shutdown_timeout_secs": max(1, int(server.get("graceful_shutdown_timeout_secs", 15))),
+        # 关停清理链总兜底（秒）：lifespan 清理（Screen/系统/视觉/记忆/Loop/浏览器/httpx…）
+        # 超过此时长仍未走完就强制退出（os._exit），避免任一清理步骤永久阻塞进程。
+        # 下限 5 秒。日志里最后一条「关闭步骤: xxx」即被阻塞的那一步。
+        "shutdown_cleanup_deadline_secs": max(5, int(server.get("shutdown_cleanup_deadline_secs", 30))),
     }
 
 
@@ -749,6 +799,15 @@ def get_models_config() -> dict:
 class ServerConfigSchema(BaseSchema):
     host: str = "127.0.0.1"
     port: int = Field(default=8766, ge=1, le=65535)
+    # ⛔ 以下四项都被 get_server_config() 读取，但此前未在此声明；BaseSchema 是
+    # extra='forbid'，所以用户一旦在 config.toml 写它们，每次启动都会刷
+    # "[server] ... Extra inputs are not permitted" 告警（与 model_manager.models
+    # 同一类缺陷）。声明范围与 get_server_config() 的取值口径一致（关停两旋钮在
+    # get_server_config() 里另做下限夹取，此处只做类型/范围校验）。
+    host_whitelist: list[str] = []
+    exec_python_inline_wait_secs: int = Field(default=10, ge=0)
+    graceful_shutdown_timeout_secs: int = Field(default=15, ge=1)
+    shutdown_cleanup_deadline_secs: int = Field(default=30, ge=5)
 
 
 class LoggingConfigSchema(BaseSchema):
@@ -760,6 +819,26 @@ class LoggingConfigSchema(BaseSchema):
     console_level: str = "INFO"
 
 
+class BrowserSupervisorConfigSchema(BaseSchema):
+    """浏览器 supervisor 配置（[browser.supervisor] 段，2026-10-23）。
+
+    端口 0 = 动态端口；其余阈值与设计文档 §11 对应。
+    """
+    enabled: bool = True
+    browser_path: str = ""
+    port: int = Field(default=9222, ge=0, le=65535)
+    port_file: str = "data/runtime/agent_browser.json"
+    user_data_dir: str = ""
+    adopt_existing: bool = True
+    health_interval_secs: float = Field(default=5.0, gt=0)
+    health_timeout_secs: float = Field(default=2.0, gt=0)
+    startup_timeout_secs: float = Field(default=10.0, gt=0)
+    close_grace_secs: float = Field(default=6.0, ge=0)
+    exit_wait_secs: float = Field(default=3.0, ge=0)
+    max_restarts: int = Field(default=5, ge=0)
+    backoff_max_secs: float = Field(default=60.0, gt=0)
+
+
 class BrowserConfigSchema(BaseSchema):
     """调试浏览器配置 Schema（通用，支持 Chromium 内核浏览器）"""
     debug_port: int = Field(default=9222, ge=1, le=65535)
@@ -769,6 +848,10 @@ class BrowserConfigSchema(BaseSchema):
     session_idle_timeout_secs: int = Field(default=900, ge=60)
     session_anon_idle_timeout_secs: int = Field(default=300, ge=30)
     session_max_count: int = Field(default=32, ge=1)
+    nav_guard_enabled: bool = True
+    nav_guard_window_secs: float = Field(default=30.0, gt=0)
+    nav_guard_exempt_hosts: list[str] = Field(default_factory=list)
+    supervisor: BrowserSupervisorConfigSchema | None = None
 
 
 # 向后兼容别名
@@ -869,18 +952,51 @@ class ModelManagerResourceSchema(BaseSchema):
     unload_timeout_sec: float = Field(default=15.0, ge=0.0)
 
 
+class ModelManagerModelSchema(BaseSchema):
+    """[model_manager.models.<id>] 单模型覆盖项（design §9）
+
+    模型 id 是**动态的**（key 自由，由 `dict[str, ...]` 保证）；这里校验的是
+    每个 id 下**已知字段的类型**，未声明的字段放行给 `get_model_override()` 运行时兜底。
+
+    ⚠️ 有意放宽 `extra`（与 BaseSchema 的 forbid 相反），原因有二：
+    1. per-model 字段是**渐进加入**的 —— 文档列了 4 个（restore_preload / evictable /
+       priority / reload_fail_cooldown_sec），但 `priority` 目前只在
+       `drivers.py` 里静态定义、尚未走 `get_model_override()` 覆盖读取。沿用 forbid
+       会让"配置先行于代码"的字段每次启动都报 extra_forbidden。
+    2. 实测（2026-10-19）：用户配了 `[model_manager.models.ocr] restore_preload = false`
+       —— 这是**活的旋钮**（`is_restore_preload()` 默认 True，false = OCR 被 GPU 高压
+       逐出后不自动重载）——却每次启动报一次告警，等于把真问题淹没在噪音里。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    # None = 未配置，交给读取侧的默认值（is_restore_preload / is_evictable / get_model_cooldown）
+    restore_preload: bool | None = None
+    evictable: bool | None = None
+    reload_fail_cooldown_sec: float | None = Field(default=None, gt=0)
+    # 空闲回收阈值（秒）：keep_models=False 时，空闲超过该值自动卸载；0=禁用
+    idle_unload_sec: float | None = Field(default=None, ge=0.0)
+    # 卸载后是否把本进程工作集刷回系统（Windows EmptyWorkingSet）。只归还物理内存，
+    # 不降低 private 提交量 ⇒ 默认 false：无人引用时 Windows 自己会换出闲置页，
+    # 主动刷只换来后续请求的 page fault（详见 server/ocr.py）
+    trim_working_set: bool | None = None
+
+
 class ModelManagerConfigSchema(BaseSchema):
     """[model_manager] 段 schema（design §9，T5 接入）
 
-    覆盖 get_model_manager_config() 读取的顶层字段 + gpu/cpu 子段。
-    [model_manager.models.<id>] 动态子段由 get_model_manager_config() 运行时兜底
-    （schema 不做静态校验，避免新增模型 id 时需同步改 schema）。
+    覆盖 get_model_manager_config() 读取的顶层字段 + gpu/cpu 子段 + per-model 覆盖。
     """
+
     enabled: bool = True
     poll_interval_sec: float = Field(default=5.0, gt=0)
     reload_fail_cooldown_sec: float = Field(default=30.0, gt=0)
+    # 空闲回收：默认禁用（0），按需在 per-model 上配（如 ocr = 10）
+    idle_unload_sec: float = Field(default=0.0, ge=0.0)
+    idle_tick_sec: float = Field(default=1.0, gt=0)
     gpu: ModelManagerResourceSchema = Field(default_factory=ModelManagerResourceSchema)
     cpu: ModelManagerResourceSchema = Field(default_factory=ModelManagerResourceSchema)
+    models: dict[str, ModelManagerModelSchema] = Field(default_factory=dict)
 
 
 class ResourceProbeEntrySchema(BaseSchema):
@@ -905,6 +1021,12 @@ class ResourceProbeConfigSchema(BaseSchema):
     probes: dict[str, ResourceProbeEntrySchema] = Field(default_factory=dict)
 
 
+# ⚠️ 新增「含动态子段」的配置段时（形如 `[xxx.items.<id>]`），必须在 schema 里
+# 显式声明 `items: dict[str, SomeEntrySchema]`（见 ResourceProbeConfigSchema.probes /
+# ModelManagerConfigSchema.models），**不能**指望"运行时兜底所以 schema 不管" ——
+# BaseSchema 全局 extra='forbid'，动态子段照样会被判 extra_forbidden，
+# 表现为每次启动一条配置告警（2026-10-19 `[model_manager.models.ocr]` 事故：
+# 那个 restore_preload 是活的旋钮，告警却让人以为是死配置）。
 _CONFIG_SCHEMAS: dict[str, type[BaseSchema]] = {
     "server": ServerConfigSchema,
     "logging": LoggingConfigSchema,

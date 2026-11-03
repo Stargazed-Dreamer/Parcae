@@ -1,4 +1,4 @@
-"""LocalAgent 共享 UI 主题基础设施。
+"""Parcae 共享 UI 主题基础设施。
 
 全项目 GUI（client / recorder / 未来所有 PySide6 界面）统一使用本模块，
 设计规范见 docs/ui/ 目录（style-guide.md / components.md / icons.md /

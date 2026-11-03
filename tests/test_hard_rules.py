@@ -22,9 +22,9 @@ def test_hard_rules_all_tracked_files():
 
 # --- C5 专项：两个陷阱的回归保护（真源 server/mcp_whitelist.py 的 DIRECT_TOOLS）---
 
-# 最小替身直连表：wip_get 是直连，localagent_advanced_tool 是直连且同时在
+# 最小替身直连表：wip_get 是直连，parcae_advanced_tool 是直连且同时在
 # GATEWAY_EXCLUDE，wip_create 只在网关层。
-_FAKE_DIRECT = {"wip_get", "localagent_advanced_tool"}
+_FAKE_DIRECT = {"wip_get", "parcae_advanced_tool"}
 
 
 def test_c5_gateway_only_name_is_violation():
@@ -40,12 +40,12 @@ def test_c5_direct_name_is_ok():
 
 
 def test_c5_gateway_exclude_does_not_mean_absent():
-    """陷阱②：localagent_advanced_tool 同时属 DIRECT_TOOLS 与 GATEWAY_EXCLUDE → 不红。
+    """陷阱②：parcae_advanced_tool 同时属 DIRECT_TOOLS 与 GATEWAY_EXCLUDE → 不红。
 
     拿 GATEWAY_EXCLUDE 当"不存在"会把这个最高频网关入口判违规。
     """
     assert _scan_mcp_refs(
-        "兜底走 `mcp__localagent__localagent_advanced_tool`。", _FAKE_DIRECT
+        "兜底走 `mcp__localagent__parcae_advanced_tool`。", _FAKE_DIRECT
     ) == []
 
 

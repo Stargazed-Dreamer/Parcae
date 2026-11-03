@@ -21,9 +21,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent.event_store import EventStore  # noqa: E402
-from client.core.agent.reconciler import reconcile  # noqa: E402
-from client.core.agent.types import Message  # noqa: E402
+from lib.agent_runtime.event_store import EventStore  # noqa: E402
+from lib.agent_runtime.reconciler import reconcile  # noqa: E402
+from lib.agent_runtime.types import Message  # noqa: E402
 
 
 def _make_store(tmp_dir: str) -> EventStore:
@@ -47,7 +47,7 @@ def test_append_streaming_events():
             await store.append_event("s1", "streaming_thinking_delta", {"delta": "thinking..."})
             await store.append_event("s1", "streaming_tool_call", {"tool_call": {"id": "tc1", "function": {"name": "foo", "arguments": "{}"}}})
 
-            events = await store.load_events("s1")
+            events = await store.load_events("s1", include_live=True)
             # session_created + 4 streaming = 5 events
             assert len(events) == 5
             streaming = [e for e in events if e.type.startswith("streaming_")]
@@ -97,7 +97,7 @@ def test_invalidate_events():
             # invalidate seq1 和 seq2
             await store.invalidate_events("s1", [seq1, seq2])
 
-            events = await store.load_events("s1")
+            events = await store.load_events("s1", include_live=True)
             # session_created(1) + 3 streaming = 4 events
             assert len(events) == 4
             ev1 = [e for e in events if e.seq == seq1][0]
@@ -231,7 +231,7 @@ def test_reconciler_merges_streaming_tool_calls():
             assert len(messages[0].tool_calls) == 2
 
             # tool_calls 表有记录（status=interrupted）
-            from client.core.agent.types import TOOL_STATUS_INTERRUPTED
+            from lib.agent_runtime.types import TOOL_STATUS_INTERRUPTED
             tool_calls = await store.load_tool_calls("s1")
             assert len(tool_calls) == 2
             assert all(tc.status == TOOL_STATUS_INTERRUPTED for tc in tool_calls)

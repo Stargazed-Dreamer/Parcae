@@ -73,12 +73,12 @@ class TestMCPWhitelist:
     def test_gateway_tools_not_in_direct(self):
         """网关工具同时在 DIRECT_TOOLS 和 GATEWAY_EXCLUDE 中（避免 advanced_tool 自引用）
 
-        v3 精简后 localagent_list_templates / localagent_template_tool 不在 DIRECT_TOOLS
-        （模板发现走 localagent_list_tools 网关），仅 localagent_list_tools / localagent_advanced_tool
+        v3 精简后 parcae_list_templates / parcae_template_tool 不在 DIRECT_TOOLS
+        （模板发现走 parcae_list_tools 网关），仅 parcae_list_tools / parcae_advanced_tool
         同时出现在两处。
         """
         gateway_tools = {
-            "localagent_list_tools", "localagent_advanced_tool",
+            "parcae_list_tools", "parcae_advanced_tool",
         }
         assert gateway_tools.issubset(set(DIRECT_TOOLS))
         assert gateway_tools.issubset(GATEWAY_EXCLUDE)
@@ -93,26 +93,27 @@ class TestMCPWhitelist:
           browser_action + browser_navigate + browser_screenshot + browser_evaluate +
           browser_wait_for + browser_snapshot）完全替代
         - ocr_path 不在 DIRECT_TOOLS（统一用 ocr_file 处理文件路径/字节）
+        - 2026-10-27 直连面分层：有调用计数证据的高频工具直连，其余经网关可调
         """
-        must_have = {
+        direct_must_have = {
             "agent_guide",
             "exec_python",
-            "exec_apply_patch",
             "capture_screen",
             "memory_get",
             "memory_set",
             "memory_list",
-            "ocr_file",
-            "agent_chat",
-            "list_windows",
             "execute_action",
             # v3 新接口替代 legacy browser_open / browser_click_element
             "browser_session_create",
             "browser_action",
         }
         whitelist = set(DIRECT_TOOLS)
-        missing = must_have - whitelist
-        assert not missing, f"白名单缺少关键工具: {missing}"
+        missing = direct_must_have - whitelist
+        assert not missing, f"白名单缺少关键直连工具: {missing}"
+        # 不在直连面、但必须仍能从网关调到（不能掉进 GATEWAY_EXCLUDE）
+        gateway_reachable = {"exec_apply_patch", "ocr_file", "agent_chat", "list_windows"}
+        assert not (gateway_reachable & whitelist), f"以下工具不应再直连: {gateway_reachable & whitelist}"
+        assert not (gateway_reachable & GATEWAY_EXCLUDE), f"以下工具被误排除: {gateway_reachable & GATEWAY_EXCLUDE}"
 
     def test_form_endpoints_excluded(self):
         """表单端点（form 变体）被排除"""
@@ -127,36 +128,37 @@ class TestMCPWhitelist:
     # screen_wait_for_legacy）。端点本身已删除，GATEWAY_EXCLUDE 中相应条目也移除，
     # 测试 legacy 别名是否在排除列表中已无意义。
 
-    def test_terminal_tools_in_whitelist(self):
-        """终端会话工具在白名单中
+    def test_terminal_tools_split_direct_and_gateway(self):
+        """终端会话工具：detail 直连，spawn/input/kill 经网关（仍可调）
 
-        v3 精简后只保留 spawn + detail + input + kill 四个核心组合；
-        exec_terminals_list / exec_terminal_output / exec_terminal_delete
-        通过 advanced_tool 网关访问（罕用，避免膨胀直连列表）。
+        2026-10-27 直连面分层后，只有有调用计数证据的 exec_terminal_detail 常驻；
+        其余仍能从 parcae_advanced_tool 调到，不能进 GATEWAY_EXCLUDE。
         """
-        terminal_tools = {
-            "exec_terminal_spawn", "exec_terminal_detail",
-            "exec_terminal_input", "exec_terminal_kill",
-        }
-        assert terminal_tools.issubset(set(DIRECT_TOOLS))
+        direct = {"exec_terminal_detail"}
+        gateway = {"exec_terminal_spawn", "exec_terminal_input", "exec_terminal_kill"}
+        assert direct.issubset(set(DIRECT_TOOLS))
+        assert not (gateway & set(DIRECT_TOOLS))
+        assert not (gateway & GATEWAY_EXCLUDE)
 
     def test_discovery_gateways_in_whitelist(self):
         """发现网关在白名单中
 
-        v3 精简后模板发现走 localagent_list_tools 网关，
-        localagent_list_templates / localagent_template_tool 不再直连。
+        v3 精简后模板发现走 parcae_list_tools 网关，
+        parcae_list_templates / parcae_template_tool 不再直连。
         """
         discovery = {
-            "localagent_list_tools", "localagent_advanced_tool",
+            "parcae_list_tools", "parcae_advanced_tool",
         }
         assert discovery.issubset(set(DIRECT_TOOLS))
 
-    def test_task_authorization_tools_are_direct_and_annotated(self):
+    def test_task_authorization_tools_are_annotated_and_reachable(self):
+        """Computer Use 授权工具：注解保留，经网关可调（2026-10-27 不再直连）"""
         authorization_tools = {
             "screen_request_control",
             "screen_release_control",
         }
-        assert authorization_tools.issubset(set(DIRECT_TOOLS))
+        assert not (authorization_tools & set(DIRECT_TOOLS))
+        assert not (authorization_tools & GATEWAY_EXCLUDE)
         assert authorization_tools.issubset(set(TOOL_ANNOTATIONS))
         assert TOOL_ANNOTATIONS["screen_request_control"]["openWorldHint"] is True
         assert TOOL_ANNOTATIONS["screen_release_control"]["idempotentHint"] is True
@@ -210,8 +212,8 @@ class TestAdvancedRegistry:
     def test_gateway_tools_not_in_registry(self):
         """网关工具自身不应出现在注册表中（避免自引用）"""
         gateway_tools = {
-            "localagent_list_tools", "localagent_advanced_tool",
-            "localagent_list_templates", "localagent_template_tool",
+            "parcae_list_tools", "parcae_advanced_tool",
+            "parcae_list_templates", "parcae_template_tool",
         }
         for name in gateway_tools:
             assert name not in advanced._advanced_registry, f"网关工具 {name} 不应在注册表中"
@@ -296,9 +298,9 @@ class TestUnknownOpDefaultPass:
             "params": {},
         })
         assert resp.status_code == 404
-        # 错误信息提示用户用 localagent_list_tools 查可用工具
+        # 错误信息提示用户用 parcae_list_tools 查可用工具
         detail = resp.json().get("detail", "")
-        assert "未知工具" in detail or "localagent_list_tools" in detail, (
+        assert "未知工具" in detail or "parcae_list_tools" in detail, (
             f"404 应提示未知工具，实际: {detail}"
         )
 

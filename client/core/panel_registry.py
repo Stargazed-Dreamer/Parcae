@@ -15,10 +15,28 @@ import pkgutil
 
 from client.core.panel_base import PanelBase
 
-logger = logging.getLogger("localagent.panel_registry")
+logger = logging.getLogger("parcae.panel_registry")
 
 # 侧边栏分组显示顺序（语义序，非字母序）；未知 category 排最后
 _CATEGORY_DISPLAY_ORDER = {"main": 0, "monitor": 1, "advanced": 2}
+
+
+def hidden_panel_ids() -> set[str]:
+    """config.toml [client] hidden_panels 声明的面板（id 或模块名）。
+
+    用途：某个面板还在开发/暂时不用时，从配置里关掉，不必删代码。
+    读取失败或未配置时返回空集合（= 全部加载，行为与以前一致）。
+    同时匹配模块名（chat）与 PANEL_META.id（chat），前者可省掉 import 开销。
+    """
+    try:
+        from lib.config_reader import load_config
+
+        cfg = load_config() or {}
+        raw = (cfg.get("client") or {}).get("hidden_panels") or []
+        return {str(x).strip() for x in raw if str(x).strip()}
+    except Exception as e:  # 配置坏了不该拖死 GUI 启动
+        logger.warning("读取 [client] hidden_panels 失败，按全部加载处理: %s", e)
+        return set()
 
 
 class PanelRegistry:
@@ -30,6 +48,7 @@ class PanelRegistry:
         """从 client/panels/ 自动发现所有 PanelBase 子类
 
         同时扫描 manifest 声明的 workspace 组件面板。
+        跳过 config.toml [client] hidden_panels 里声明的面板。
 
         Returns:
             新发现的 panel 类数量
@@ -50,11 +69,16 @@ class PanelRegistry:
         if not package_path:
             return 0
 
+        hidden = hidden_panel_ids()
         existing_ids = {c.meta().id for c in cls._classes if c.PANEL_META is not None}
         new_count = 0
 
         for _, name, _ in pkgutil.iter_modules(package_path):
             if name.startswith("_"):
+                continue
+            if name in hidden:
+                # 模块名命中：连 import 都不做（chat 这类重面板可省数百毫秒）
+                logger.info("panel %s 在 [client] hidden_panels 中，跳过加载", name)
                 continue
             module_name = f"{package_name}.{name}"
             try:
@@ -69,10 +93,15 @@ class PanelRegistry:
                         and attr is not PanelBase
                         and attr.PANEL_META is not None
                         and attr.__module__ == module.__name__):
-                    if attr.meta().id in existing_ids:
+                    panel_id = attr.meta().id
+                    if panel_id in hidden:
+                        # 模块名没命中但 id 命中（文件名与 id 不一致时的兜底）
+                        logger.info("panel %s 在 [client] hidden_panels 中，不注册", panel_id)
+                        continue
+                    if panel_id in existing_ids:
                         continue
                     cls._classes.append(attr)
-                    existing_ids.add(attr.meta().id)
+                    existing_ids.add(panel_id)
                     new_count += 1
 
         return new_count
@@ -92,10 +121,14 @@ class PanelRegistry:
             return 0
 
         existing_ids = {c.meta().id for c in cls._classes if c.PANEL_META is not None}
+        hidden = hidden_panel_ids()
         new_count = 0
 
         for name, m in manifests.items():
             if not m.enabled or m.client_panel is None:
+                continue
+            if name in hidden:
+                logger.info("组件面板 %s 在 [client] hidden_panels 中，跳过加载", name)
                 continue
             # 按 manifest 声明的 file 动态加载模块（去掉 .py 后缀）
             module_name = f"workspace.{name}.{m.client_panel.file[:-3]}"
@@ -118,6 +151,9 @@ class PanelRegistry:
                 logger.warning("manifest 组件 %s 面板类 %s 无效", name, m.client_panel.class_name)
                 continue
 
+            if panel_class.meta().id in hidden:
+                logger.info("组件面板 %s 在 [client] hidden_panels 中，不注册", panel_class.meta().id)
+                continue
             if panel_class.meta().id in existing_ids:
                 continue
             cls._classes.append(panel_class)

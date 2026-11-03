@@ -39,7 +39,7 @@ from server.llm_pool.key_store import (
     update_key as ks_update_key,
 )
 
-logger = logging.getLogger("localagent.apikey")
+logger = logging.getLogger("parcae.apikey")
 router = APIRouter(prefix="/apikey", tags=["ApiKey"])
 
 # ========== 厂商注册表 ==========

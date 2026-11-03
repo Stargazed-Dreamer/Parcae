@@ -271,7 +271,11 @@ def reg_read_value(root: int, subkey: str, name: str = "") -> Optional[Any]:
 def run_reg(*args: str) -> tuple[int, str]:
     """subprocess 列表形式调 reg（绕开 MSYS 路径转换）。"""
     try:
-        r = subprocess.run(["reg", *args], capture_output=True, text=True, timeout=15)
-        return r.returncode, (r.stdout + r.stderr).strip()
+        # ⛔ reg.exe 输出是 GBK：text=True 会 UnicodeDecodeError 并吞掉中文报错
+        # （2026-10-07 因此把成功误判成失败；此处统一改成 GBK 容错解码）
+        r = subprocess.run(["reg", *args], capture_output=True, timeout=15)
+        out = (r.stdout or b"").decode("gbk", "replace")
+        err = (r.stderr or b"").decode("gbk", "replace")
+        return r.returncode, (out + err).strip()
     except Exception as e:  # noqa: BLE001
         return 1, str(e)

@@ -140,7 +140,9 @@ class TestMigrateFromMemory:
         assert result["todos_migrated"] == 2
         assert result["skipped"] is False
 
-        cur = memory_manager.store.conn.execute("SELECT * FROM todos ORDER BY id")
+        cur = memory_manager.store.conn.execute(
+            "SELECT * FROM tasks WHERE kind IN ('recurring','phased_recurring','triggered') ORDER BY id"
+        )
         rows = [dict(r) for r in cur.fetchall()]
         ids = [r["id"] for r in rows]
         assert "accounting" in ids
@@ -170,7 +172,9 @@ class TestMigrateFromMemory:
         result = migrate_from_memory(memory_manager)
         assert result["wip_migrated"] == 2
 
-        cur = memory_manager.store.conn.execute("SELECT * FROM wip_tasks ORDER BY id")
+        cur = memory_manager.store.conn.execute(
+            "SELECT * FROM tasks WHERE kind IN ('one_shot','long_running') ORDER BY id"
+        )
         rows = [dict(r) for r in cur.fetchall()]
         assert rows[0]["status"] == "paused"
         assert rows[1]["status"] == "active"  # open → active
@@ -200,9 +204,13 @@ class TestMigrateFromMemory:
         assert r2 == {"todos_migrated": 0, "wip_migrated": 0, "skipped": True}
 
         # 数据不重复
-        cur = memory_manager.store.conn.execute("SELECT COUNT(*) FROM todos")
+        cur = memory_manager.store.conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE kind IN ('recurring','phased_recurring','triggered')"
+        )
         assert cur.fetchone()[0] == 1
-        cur = memory_manager.store.conn.execute("SELECT COUNT(*) FROM wip_tasks")
+        cur = memory_manager.store.conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE kind IN ('one_shot','long_running')"
+        )
         assert cur.fetchone()[0] == 1
 
     def test_json_insert_reads_related_memory_keys(self, memory_manager, tmp_path, monkeypatch):
@@ -238,7 +246,7 @@ class TestMigrateFromMemory:
         assert result["wip_migrated"] == 1
 
         cur = memory_manager.store.conn.execute(
-            "SELECT related_memory_keys FROM wip_tasks WHERE id = ?", ("feature_task",)
+            "SELECT related_memory_keys FROM tasks WHERE id = ?", ("feature_task",)
         )
         row = cur.fetchone()
         assert row is not None
@@ -274,7 +282,7 @@ class TestMigrateFromMemory:
         migrate_from_memory(memory_manager)
 
         cur = memory_manager.store.conn.execute(
-            "SELECT related_memory_keys FROM wip_tasks WHERE id = ?", ("no_keys_task",)
+            "SELECT related_memory_keys FROM tasks WHERE id = ?", ("no_keys_task",)
         )
         row = cur.fetchone()
         assert row is not None
@@ -288,10 +296,10 @@ class TestUpdateWipFromFile:
         from server.todos.store import TODOS_SCHEMA_SQL
         memory_manager.store.conn.executescript(TODOS_SCHEMA_SQL)
         memory_manager.store.conn.execute(
-            "INSERT INTO wip_tasks (id, title, status, priority, goal, progress, "
+            "INSERT INTO tasks (id, kind, title, status, priority, goal, progress, "
             "tags, next_steps, related_skills, related_files, current_state, "
             "blocked_reason, related_memory_keys, extra_data, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+            "VALUES (?, 'long_running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
             ("wip_001", "原标题", "paused", "medium", "", 0, "[]", "[]", "[]", "[]",
              "{}", None, '["wip_index"]', "{}"),
         )
@@ -316,7 +324,7 @@ class TestUpdateWipFromFile:
         }
         _update_wip_from_file(memory_manager.store.conn, "wip_001", data, "datetime('now')")
 
-        cur = memory_manager.store.conn.execute("SELECT * FROM wip_tasks WHERE id = ?", ("wip_001",))
+        cur = memory_manager.store.conn.execute("SELECT * FROM tasks WHERE id = ?", ("wip_001",))
         row = dict(cur.fetchone())
         assert row["title"] == "新标题"
         assert row["status"] == "active"
@@ -333,10 +341,10 @@ class TestUpdateWipFromFile:
         from server.todos.store import TODOS_SCHEMA_SQL
         memory_manager.store.conn.executescript(TODOS_SCHEMA_SQL)
         memory_manager.store.conn.execute(
-            "INSERT INTO wip_tasks (id, title, status, priority, goal, progress, "
+            "INSERT INTO tasks (id, kind, title, status, priority, goal, progress, "
             "tags, next_steps, related_skills, related_files, current_state, "
             "blocked_reason, related_memory_keys, extra_data, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+            "VALUES (?, 'long_running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
             ("wip_002", "T", "paused", "medium", "", 0, "[]", "[]", "[]", "[]",
              "{}", None, '["wip_index"]', "{}"),
         )
@@ -345,7 +353,7 @@ class TestUpdateWipFromFile:
         data = {"id": "wip_002", "title": "更新标题"}  # 无 related_memory_keys
         _update_wip_from_file(memory_manager.store.conn, "wip_002", data, "datetime('now')")
 
-        cur = memory_manager.store.conn.execute("SELECT related_memory_keys FROM wip_tasks WHERE id = ?", ("wip_002",))
+        cur = memory_manager.store.conn.execute("SELECT related_memory_keys FROM tasks WHERE id = ?", ("wip_002",))
         row = cur.fetchone()
         assert json.loads(row[0]) == ["wip_index"]
 

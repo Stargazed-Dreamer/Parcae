@@ -7,11 +7,21 @@
   uv run python tools/browser/start_debug_browser.py                    # 默认非交互，不复制用户数据
   uv run python tools/browser/start_debug_browser.py --copy-user-data   # 从源浏览器复制登录态
   uv run python tools/browser/start_debug_browser.py --no-copy          # 显式不复制（同默认）
-  uv run python tools/browser/start_debug_browser.py --browser-path "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"
+  uv run python tools/browser/start_debug_browser.py --browser-path "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
   uv run python tools/browser/start_debug_browser.py --port 9223        # 自定义调试端口
 
-设计原则：非交互（无 input()），适合 agent 通过 exec_python 调用。
+设计原则：非交互（无 input()）。agent 调用必须经后端常驻终端
+（exec_terminal_spawn / POST /terminals/spawn）执行本脚本——禁止 harness 侧
+Bash/run_in_background/exec_python 裸 Popen 拉起（会随会话/任务清理被回收）。
 首次使用若想保留登录态，显式传 --copy-user-data（建议先关闭源浏览器）。
+
+扩展注意（2026-10-24 实测，详见 docs/environment-constraints.md）：
+  ⛔ Chrome 137+ 稳定版**已忽略 --load-extension**（参数进命令行但不加载），所以本脚本
+     不提供该开关，别指望用启动参数给调试实例装扩展。
+  ⛔ 换浏览器打开已有 profile 会**清空原浏览器装的扩展**（MAC seed 不同，校验不过），
+     但 cookie / History 不受影响。
+  ✅ 装扩展的唯一稳路：chrome://extensions 开「开发者模式」→「加载已解压的扩展程序」，
+     一次加载即持久（写进 profile，重启不掉）。
 
 配置优先级（与 server/config.py 的 [browser] 段一致）：
   1. 命令行 --browser-path / --port / --user-data-dir

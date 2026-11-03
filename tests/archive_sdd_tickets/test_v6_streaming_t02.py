@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
+from lib.agent_runtime import (  # noqa: E402
     EventStore,
     MockLLM,
     MockToolExecutor,
@@ -33,14 +33,14 @@ from client.core.agent import (  # noqa: E402
     RunnerDeps,
     SessionRunner,
 )
-from client.core.agent.llm_pool_gateway import (  # noqa: E402
+from lib.agent_runtime.llm_pool_gateway import (  # noqa: E402
     SSE_EVENT_CONTEXT_OVERFLOW,
     SSE_EVENT_DONE,
     SSE_EVENT_PROVIDER_ERROR,
     SSE_EVENT_TEXT_DELTA,
     LLMPoolGateway,
 )
-from client.core.agent.types import (  # noqa: E402
+from lib.agent_runtime.types import (  # noqa: E402
     LLMRequest,
     Message,
 )
@@ -545,7 +545,7 @@ class TestStreamingEventTraceId:
             await runner.run()
 
             # 查所有 streaming 事件（含 invalidated 的）
-            all_events = await store.load_events("s1")
+            all_events = await store.load_events("s1", include_live=True)
             streaming_events = [
                 e for e in all_events
                 if e.type in ("streaming_text_delta", "streaming_thinking_delta", "streaming_tool_call")

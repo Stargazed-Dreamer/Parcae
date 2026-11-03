@@ -117,7 +117,7 @@ upstream_version: 1.1.0
 |------|----------|------|
 | 本地 upstream/ 档案 | `.agents/skills/dev/hallmark/upstream/` | 完整原版 SKILL.md + 4 个根文档（README/LICENSE/ROADMAP）+ docs/ 3 个文档（recipes/study-examples/talk-slides） |
 | references/ 子目录 | `.agents/skills/dev/hallmark/references/` | 25+ 个主题文件 + 5 子目录（components/genres/macrostructures/themes/verbs） |
-| LLM 池 | `localagent_agent_chat` 或 `localagent_advanced_tool(llm_pool_call)` | 生成设计代码 / DNA 提取 / audit 报告时使用 |
+| LLM 池 | `parcae_agent_chat` 或 `parcae_advanced_tool(llm_pool_call)` | 生成设计代码 / DNA 提取 / audit 报告时使用 |
 | 浏览器 | `browser_navigate` + `browser_snapshot` + `browser_take_screenshot` | audit 命令验证现有页面 / study URL mode 读页面 |
 | WebFetch | `WebFetch` | study URL mode 读 HTML/CSS |
 | _index.md / GUIDE_REGISTRY | 写入项目级设计规范后同步 | 若 build/study 产出可复用方法论，路由到 `.agents/skills/<scope>/` 时使用 |

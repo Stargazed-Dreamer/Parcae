@@ -24,9 +24,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-from client.core.agent.event_store import EventStore  # noqa: E402
-from client.core.agent.facade import SessionFacade  # noqa: E402
-from client.core.agent.types import (  # noqa: E402
+from lib.agent_runtime.event_store import EventStore  # noqa: E402
+from lib.agent_runtime.facade import SessionFacade  # noqa: E402
+from lib.agent_runtime.types import (  # noqa: E402
     LLMResponse,
     Message,
     RunnerConfig,
@@ -365,7 +365,7 @@ class TestFacadeClientMessageIdIdempotency:
                         yield {"type": "tool_call_delta", "tool_call": tool_call}
                         yield {"type": "done", "finish_reason": "tool_calls"}
 
-                from client.core.agent.types import ToolResult, ToolResultVariant
+                from lib.agent_runtime.types import ToolResult, ToolResultVariant
 
                 class InterruptTool:
                     async def execute(self, tool_call):

@@ -1,4 +1,4 @@
-"""LocalAgent FastAPI 后端 - 统一入口
+"""Parcae FastAPI 后端 - 统一入口
 
 路由拆分:
   - /ocr/*    → server.ocr     (远程 VL / 经典OCR)
@@ -70,6 +70,79 @@ except ImportError:
 # PaddleX PIR monkey-patch 已移至 server.ocr.ModelManager._apply_pir_patch()
 # 此处在启动时同步 import paddlex 会阻塞 4.3 秒，改为在首次 OCR 调用时懒加载。
 
+
+# ---------------------------------------------------------------------------
+# torch 引入口径取证（wip_d6417a7d，**默认关闭**，2026-10-24）
+#
+# 背景：OCR 只要被加载一次，整套 torch CUDA 栈（torch/lib 映射 ~4GB）就进主进程，
+#       而 unload 不 FreeLibrary ⇒ 进程活多久它留多久（空闲 10s 自动卸载只卸模型，
+#       卸不掉这 4GB）。"触发面"已钉死 = `POST /models/ocr/load`；唯一没钉死的是
+#       **paddlex 的哪个函数 import 的**（候选见 `workspace/windows_forensics/report/`）。
+#
+# 用法（只在点名实验时开，平常零开销）：
+#   PARCAE_TORCH_IMPORT_TRACE=<日志绝对路径> 起后端 → POST /models/ocr/load
+#   → 读该日志里的调用栈点名 → **摘掉变量重启回基线**（否则这 4GB 留在进程里）
+#
+# ⛔ 审计钩子装上就卸不掉，且此后每次 import 都要过一遍回调 ⇒ 必须显式开启，
+#    绝不默认挂：生产入口不留取证代码。
+# ---------------------------------------------------------------------------
+def _install_torch_import_trace() -> None:
+    log_path = (os.environ.get("PARCAE_TORCH_IMPORT_TRACE") or "").strip()
+    if not log_path:
+        return
+    import hashlib
+    import threading
+    import time
+    import traceback
+
+    try:
+        path = os.path.abspath(log_path)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+    except Exception:
+        return  # 路径不可用就当没开，不能拦住启动
+
+    seen: set[str] = set()
+    state = {"n": 0}
+    max_entries = 200
+
+    def _hook(event: str, args: tuple) -> None:
+        if event != "import" or state["n"] >= max_entries:
+            return
+        try:
+            name = str(args[0]) if args else ""
+            # 只记顶层 torch：任何 `torch.xxx` 的首次导入都必然先触发 `torch` 事件，
+            # 而子模块事件（torch._utils / torch.nn …）是噪声，一次 import 能刷几百条
+            if name != "torch":
+                return
+            frames = traceback.format_stack(limit=14)  # 只要最近的调用方
+            sig = name + "|" + hashlib.md5(
+                "".join(frames).encode("utf-8", "replace")).hexdigest()[:8]
+            if sig in seen:
+                return  # 同一 nam+栈 的重复事件（torch 子模块会连发）只留一条
+            seen.add(sig)
+            state["n"] += 1
+            head = (f"\n===== #{state['n']} import {name} | pid={os.getpid()}"
+                    f" | thread={threading.current_thread().name}"
+                    f" | {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+            # 写文件会再触发 "open" 审计事件 → 回调开头即返回，不会递归
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(head + "".join(frames))
+        except BaseException:
+            return  # 审计钩子绝不能往外抛（抛了会毒化解释器）
+
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"\n##### trace installed pid={os.getpid()}"
+                     f" {time.strftime('%Y-%m-%d %H:%M:%S')} #####\n")
+        sys.addaudithook(_hook)
+    except Exception:
+        pass
+
+
+_install_torch_import_trace()
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -86,7 +159,9 @@ from server.apikey import router as apikey_router
 from server.approval_panel_router import router as approval_panel_router
 from server.auto_shutdown import router as auto_shutdown_router
 from server.browser import router as browser_router
+from server.butler.router import router as butler_router
 from server.command_guard import router as command_guard_router
+from server.dbview import router as dbview_router
 from server.docviewer import router as docviewer_router
 from server.exec import output_router as exec_output_router
 from server.exec import router as exec_router
@@ -107,11 +182,14 @@ from server.templates import router as templates_router
 
 # 所有 /memory/* 端点由 server/memory 提供（三层记忆系统）
 from server.todos import router as todos_router
+from server.todos import tasks_router as todos_tasks_router
 from server.todos import wip_router as todos_wip_router
 from server.user_message import router as user_message_router
+from server.version import VERSION  # 版本号唯一真源（见 server/version.py 顶部说明）
+from server.video import router as video_router
 from server.vl.vision import router as vision_router
 
-logger = logging.getLogger("localagent")
+logger = logging.getLogger("parcae")
 
 
 class _TraeNotificationFilter(logging.Filter):
@@ -209,9 +287,7 @@ def _setup_logging():
 
 _setup_logging()
 
-VERSION = "0.53.0"
-
-app = FastAPI(title="LocalAgent API", version=VERSION)
+app = FastAPI(title="Parcae API", version=VERSION)
 
 
 # ========== 异常处理 ==========
@@ -295,7 +371,7 @@ async def unhandled_exception_handler(request, exc: Exception):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|tauri\.localhost)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -325,14 +401,18 @@ app.include_router(approval_panel_router)  # 审批面板（/approvals/*）
 app.include_router(screen_router)
 app.include_router(vision_router)
 app.include_router(memory_router)     # 三层记忆系统 v2（向后兼容旧 KV 接口）
+app.include_router(dbview_router)      # 数据库/文件只读浏览（面板「数据库」页，prefix /db）
 app.include_router(todos_router)       # 待办模块（周期任务）
 app.include_router(todos_wip_router)   # WIP 任务追踪（独立 prefix /wip）
+app.include_router(todos_tasks_router)  # 事务分类/队列（DL2，prefix /tasks）
+app.include_router(butler_router)        # 会话码/上下文/收尾（DL4，prefix /butler）
 app.include_router(mindforge_router)
 app.include_router(model_manager_router)   # Model Lifecycle Manager 控制面（design §10）
 app.include_router(docviewer_router)
 app.include_router(system_router)
 app.include_router(advanced_router)
 app.include_router(templates_router)
+app.include_router(video_router)          # 课程视频按秒取帧（内存直读 ImageContent）
 app.include_router(agent_guide_router)
 app.include_router(user_message_router)
 app.include_router(loop_router)          # Loop 自动触发系统
@@ -340,6 +420,11 @@ app.include_router(headless_router)      # headless-agent-session（中断端点
 app.include_router(inbox_router)          # 收件箱
 app.include_router(activity_router)       # Activity 数据查看/编辑/审核
 app.include_router(probe_router)          # chat-mgmt-probe（对话管理探针）
+
+# 运行时端点：/runtime/port 供客户端与外部前端查询实际端口（端口顺延后仍能找到）
+from server.core.runtime_routes import router as runtime_router
+
+app.include_router(runtime_router)
 
 
 # ========== 核心路由（health/config/shutdown/mcp_stats/llm_pool） ==========
@@ -385,17 +470,128 @@ setup_mcp(app)
 # ========== 静态文件服务 ==========
 
 # workspace 数据（供可视化页面读取）
+# ⛔ 这里不要打印带端口的 URL：模块导入时还不知道最终端口（见文件末尾的
+# 端口预探测），写死 8766 会在端口顺延时给出误导性地址。
 WORKSPACE_DIR = Path(__file__).parent.parent / "workspace"
 if WORKSPACE_DIR.exists():
     app.mount("/workspace", StaticFiles(directory=str(WORKSPACE_DIR)), name="workspace")
-    logger.info("工作区目录: http://127.0.0.1:8766/workspace/")
+    logger.info("工作区静态目录已挂载: /workspace")
 
 
 if __name__ == "__main__":
     import uvicorn
 
+    from lib.port_binding import bind_first_available, diagnose_commands, log_port_environment
+    from lib.runtime_endpoint import (
+        STATUS_BINDING,
+        plan_rewrite_sources,
+        read_declaration,
+        rewrite_consumers,
+        write_declaration,
+    )
     from server.config import get_server_config
+
     cfg = get_server_config()
+    host: str = cfg["host"]
+    preferred_port: int = int(cfg["port"])
+
+    # ========== 端口环境体检（只读，不阻塞启动）==========
+    # 根因层面：动态端口范围被「网络优化 / 游戏加速器」类工具改回低位后，WinNAT 的
+    # 保留块会落到 8766 这类常用端口上，于是某次开机后突然「起不来」。
+    # 体检结果落 data/logs/server.log ⇒ 以后这类改动在日志里可见，不用等下次启动失败才发现。
+    port_env = log_port_environment(preferred_port)
+
+    # ========== 端口预探测（必须在 uvicorn 之前）==========
+    # uvicorn 的 bind 失败发生在 **lifespan startup 之后**，异常被它内部吞掉并退出：
+    # 我们既捕获不到、也无法换端口重试，而文件日志里只会留下「启动完成 → 关闭清理」，
+    # 一条错误都没有（2026-10-19 实际事故：只看 server.log 会误判成"启动成功但莫名自杀"）。
+    # 所以先自己 bind，再通过 server.run(sockets=[sock]) 交给 uvicorn（无 TOCTOU 竞态）。
+    prev_decl = read_declaration()
+    prev_port = prev_decl.get("port") if isinstance(prev_decl, dict) else None
+
+    bind = bind_first_available(host, preferred_port)
+    if bind.sock is None:
+        lines = [
+            f"后端启动失败：从 {preferred_port} 起的 {len(bind.attempts)} 个端口全部不可绑定。",
+            f"  {bind.failure_summary}",
+            "诊断命令（按建议顺序执行）：",
+        ]
+        lines += [f"  {cmd}" for cmd in diagnose_commands(preferred_port)]
+        msg = "\n".join(lines)
+        logger.error(msg)  # 落 data/logs/server.log —— 不再只活在 stderr 里
+        print("\n" + msg + "\n", file=sys.stderr, flush=True)
+        sys.exit(2)
+
+    # 对外声明实际端口：此时服务尚未 listen，故 status=binding；
+    # lifespan 就绪后由 server/core/lifecycle.py 改成 ready。
+    decl = write_declaration(
+        host=host,
+        port=bind.port,
+        preferred_port=preferred_port,
+        degraded=bind.degraded,
+        reason=bind.reason,
+        status=STATUS_BINDING,
+        # 端口环境一并对外：下游查 /runtime/port 就能知道"这次顺延是偶发还是环境被改坏了"
+        extra={"port_env": port_env.as_dict()},
+    )
+
+    if bind.degraded:
+        msg = (
+            f"⚠ 端口顺延：首选 {preferred_port} 不可用，已改用 {bind.port}。\n"
+            f"  原因: {bind.reason}\n"
+            f"  ⛔ 外部 MCP 客户端（IDE）不读我们的声明文件，需把配置里的端口改成 {bind.port} 并重连。"
+        )
+        logger.warning(msg)
+        print(msg, flush=True)
+        # 同步已登记的下游配置文件（改前备份、只替换匹配到的回环 URL）
+        #
+        # ⚠ 源端口不能只试首选端口：上一次若已顺延过，下游文件里写的是**上次的实际端口**
+        # （如 9808）而不是首选端口（8766），只按首选端口匹配会得到 skipped_no_match，
+        # 下游静默停在旧端口 ⇒ MCP 客户端连不上（2026-10-20 实际事故：8766→9808→8908
+        # 两次顺延后，四个下游配置全部 "未见 127.0.0.1:8766" 而没被改写）。
+        _src_ports = plan_rewrite_sources(preferred_port, prev_port, bind.port)
+        for _src in _src_ports:
+            for rep in rewrite_consumers(_src, bind.port):
+                if rep.status == "rewritten":
+                    logger.warning("下游配置已同步: %s → %s（%s）", rep.consumer_id, rep.path, rep.detail)
+                    print(f"  ✔ 已同步下游配置 {rep.consumer_id}: {rep.path}（{rep.detail}）", flush=True)
+                elif rep.status != "skipped_missing":
+                    logger.info("下游配置未改动: %s [%s] %s", rep.consumer_id, rep.status, rep.detail)
+    elif prev_port and int(prev_port) != bind.port:
+        # 上次顺延过、这次首选端口恢复了 ⇒ 把下游改回去，否则它们还指着旧端口
+        for rep in rewrite_consumers(int(prev_port), bind.port):
+            if rep.status == "rewritten":
+                logger.warning("端口已恢复，下游配置回写: %s → %s", rep.consumer_id, rep.path)
+                print(f"  ✔ 端口已恢复，回写下游配置 {rep.consumer_id}: {rep.path}", flush=True)
+
+    logger.info("Parcae 后端: %s", decl["base_url"])
+    print(f"Parcae 后端: {decl['base_url']}", flush=True)
+
     # 传 app 对象而非字符串 "server.main:app"：避免 uvicorn 重新 import server.main 模块
     # 导致顶层代码（auto_tag_routes/setup_mcp/静态挂载等）执行两次（重复启动 + 重复打 tag）
-    uvicorn.run(app, host=cfg["host"], port=cfg["port"])
+    #
+    # timeout_graceful_shutdown 必须显式给值（配置项 server.graceful_shutdown_timeout_secs）：
+    # uvicorn 默认 None = 无限等待「在飞连接/任务结束」（server.py: wait_for(..., timeout=None)）。
+    # 本机未装 httptools ⇒ 走 h11，h11 的 Connection.shutdown() 对「有在飞请求」的连接
+    # 只置 keep_alive=False、不关连接 ⇒ 只要有 1 个请求不返回（LLM 池排队 / 未断开的 SSE /
+    # IDE 的 MCP 长连接），后端就永久停在
+    # "Waiting for connections to close. (CTRL+C to force quit)"，进程永远退不出。
+    # 给了超时后：到点 uvicorn 打 "Cancel N running task(s), timeout graceful shutdown
+    # exceeded"、取消挂起任务，再正常走 lifespan 清理（server/core/lifecycle.py）。
+    #
+    # ⛔ 不能用 uvicorn.run(app, sockets=[...])：0.49 的 run() 不接 sockets 参数
+    # （Config 没有该形参），只有 Server.run/serve 接。所以这里直接构造 Config + Server。
+    uvicorn_config = uvicorn.Config(
+        app,
+        host=host,
+        # 必须传**实际**端口：uvicorn 的启动横幅与访问日志都用它，
+        # 传首选端口会让日志显示 8766 而服务其实在 8767。
+        port=bind.port,
+        timeout_graceful_shutdown=cfg["graceful_shutdown_timeout_secs"],
+    )
+    server = uvicorn.Server(uvicorn_config)
+    try:
+        server.run(sockets=[bind.sock])
+    except KeyboardInterrupt:
+        # 与 uvicorn.run() 内部行为一致：Ctrl+C 走正常关停，不当作错误
+        pass

@@ -17,6 +17,8 @@ def get_model_manager_config() -> dict:
         enabled = true
         poll_interval_sec = 5.0
         reload_fail_cooldown_sec = 30      # per-model 冷却默认值
+        idle_unload_sec = 0                # 空闲回收阈值（0=禁用）；per-model 可覆盖
+        idle_tick_sec = 1.0                # 空闲回收判定间隔
 
         [model_manager.gpu]
         enabled = true
@@ -79,6 +81,8 @@ def get_model_manager_config() -> dict:
         "enabled": bool(mm.get("enabled", True)),
         "poll_interval_sec": poll,
         "reload_fail_cooldown_sec": cooldown_default,
+        "idle_unload_sec": float(mm.get("idle_unload_sec", 0.0) or 0.0),
+        "idle_tick_sec": float(mm.get("idle_tick_sec", 1.0) or 1.0),
         "gpu": _res_cfg("gpu", gpu_sec, enabled_default=True),
         "cpu": _res_cfg("cpu", cpu_sec, enabled_default=False),
         "gpu_min_loaded_seconds": _min_loaded(gpu_sec),
@@ -126,3 +130,20 @@ def get_model_cooldown(cfg: dict, model_id: str) -> float:
 def is_model_evictable(cfg: dict, model_id: str, driver_default: bool) -> bool:
     """配置覆盖优先，未配置用驱动默认值（embedding 默认钉住，design §5.2）"""
     return bool(get_model_override(cfg, model_id, "evictable", driver_default))
+
+
+def get_idle_unload_sec(cfg: dict, model_id: str) -> float:
+    """空闲回收阈值（秒）：模型空闲超过该值即卸载；<=0 表示禁用。
+
+    两层：per-model `[model_manager.models.<id>] idle_unload_sec` 覆盖全局
+    `[model_manager] idle_unload_sec`。**只决定"空闲多久卸"，不决定"要不要卸"**——
+    是否启用由 keep_models（restore_preload）把门：常驻开启的模型永不回收，
+    见 ModelLifecycleManager._idle_sweep()。
+
+    为什么不用 restore_preload 直接当开关：restore_preload 的语义是"被逐出后是否
+    主动重新预加载"（逐出→恢复），与"空闲回收"（使用→释放）是两条相反的边，
+    合并会让 keep=true 既禁止卸载又强制恢复，无法表达"允许释放但不自动恢复"。
+    """
+    return float(get_model_override(
+        cfg, model_id, "idle_unload_sec", cfg.get("idle_unload_sec", 0.0)
+    ) or 0.0)

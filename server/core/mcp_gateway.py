@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Any
 
-logger = logging.getLogger("localagent.mcp_gateway")
+logger = logging.getLogger("parcae.mcp_gateway")
 
 # 响应大小保护：单个 TextContent 超阈值时截断 + 强制上报用户
 MAX_MCP_RESPONSE_CHARS = 50000   # 单个 TextContent 硬上限
@@ -114,8 +114,8 @@ def setup_mcp(app):
 
         mcp = FastApiMCP(
             app,
-            name="LocalAgent MCP",
-            description="LocalAgent Computer Use 工具集 - 截图/窗口/键鼠/视觉AI/记忆",
+            name="Parcae MCP",
+            description="Parcae Computer Use 工具集 - 截图/窗口/键鼠/视觉AI/记忆",
             include_operations=_mcp_include,
         )
 
@@ -146,10 +146,10 @@ def setup_mcp(app):
 
                 # 确定"有效 operation_id"用于审批检查：
                 # - 直接调用 MCP 工具：用 tool_name 本身
-                # - 通过 localagent_advanced_tool 网关调用：用 arguments.tool（目标 operation_id），
+                # - 通过 parcae_advanced_tool 网关调用：用 arguments.tool（目标 operation_id），
                 #   审批绑定到目标 operation 而非网关本身，避免"一次网关审批解锁所有端点"
                 effective_op = tool_name
-                if tool_name == "localagent_advanced_tool" and isinstance(arguments, dict):
+                if tool_name == "parcae_advanced_tool" and isinstance(arguments, dict):
                     target_op = arguments.get("tool", "")
                     if target_op:
                         effective_op = target_op
@@ -415,7 +415,9 @@ def setup_mcp(app):
         mcp._execute_api_tool = _patched_execute_api_tool
 
         mcp.mount_http()
-        logger.info(f"MCP工具接口已挂载: http://127.0.0.1:8766/mcp (直连 {len(_mcp_include)} 个工具，含 ImageContent 补丁)")
+        # ⛔ 不拼端口：模块加载时还不知道最终绑定端口（端口可能被系统保留区顺延），
+        # 写死 8766 会给出误导性地址。实际 URL 由 uvicorn 启动横幅统一打印。
+        logger.info(f"MCP工具接口已挂载: /mcp (直连 {len(_mcp_include)} 个工具，含 ImageContent 补丁)")
 
         # ===== 注入 TOOL_ANNOTATIONS（MCP 协议规范的工具语义标记）=====
         # TOOL_ANNOTATIONS 在 mcp_whitelist.py 定义但此前从未注入 MCP tools/list 响应（死代码）。
@@ -445,11 +447,11 @@ def setup_mcp(app):
         except Exception as _e:
             logger.warning(f"注入 TOOL_ANNOTATIONS 失败（不影响 MCP 功能）: {_e}")
 
-        # 构建高级工具注册表：将非直连 REST operation 收录到 localagent_advanced_tool 网关
+        # 构建高级工具注册表：将非直连 REST operation 收录到 parcae_advanced_tool 网关
         # 这样它们仍可通过 MCP 访问（经网关路由），而非完全不可用
         try:
             _adv_count = _build_advanced_registry(app, _mcp_gateway_ops)
-            logger.info(f"高级工具网关已就绪: {_adv_count} 个工具可通过 localagent_advanced_tool 访问")
+            logger.info(f"高级工具网关已就绪: {_adv_count} 个工具可通过 parcae_advanced_tool 访问")
         except Exception as _e:
             logger.warning(f"构建高级工具注册表失败: {_e}")
 

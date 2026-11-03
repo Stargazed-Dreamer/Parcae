@@ -578,7 +578,7 @@ class ToolLauncherWindow(QMainWindow):
         self._connect_queue_signals()
 
     def _build_ui(self):
-        self.setWindowTitle("LocalAgent 工具启动器")
+        self.setWindowTitle("Parcae 工具启动器")
         self.resize(1100, 750)
 
         central = QWidget()
@@ -801,7 +801,7 @@ class ToolLauncherWindow(QMainWindow):
 def main():
     """独立启动入口"""
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName("LocalAgent 工具启动器")
+    app.setApplicationName("Parcae 工具启动器")
 
     window = ToolLauncherWindow()
     window.show()

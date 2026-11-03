@@ -12,7 +12,7 @@ from collections import OrderedDict
 from server.config import get_screen_config
 from server.screen.windows import _find_window
 
-logger = logging.getLogger("localagent.screen")
+logger = logging.getLogger("parcae.screen")
 
 
 # ========== 安全配置常量 ==========

@@ -353,7 +353,7 @@ CPU 模式的 OCR 加载会直接触发 swap 甚至 OOM，比"不可用"更糟�
 
 当前 VL 能力由远程 API 提供：
 - **默认 provider**：魔搭社区 ModelScope（`https://api-inference.modelscope.cn/v1`）
-- **默认模型不是常量**：`_pick_model_for_tier`（`server/llm_pool/key_store.py`）取该 key 里 `vl` scope 中 **tier 最低**的启用模型，同 tier 则按 `models` 数组顺序取第一个。运行时以 `GET /vision/status` 的 `vl_model` 为准，别照抄文档里的模型名
+- **默认模型不是常量，且随 use_case 变方向**（Ticket 03，2026-10-11）：`server/llm_pool/key_store.py` 取该 key 里 `vl` scope 中 tier 在 `use_case.default_tier` 范围内的启用模型，**遍历方向按 use_case 分策略**——`vl_ocr` / `vl_activity_tracker` 取 **tier 最低**（便宜优先，高频截图分析），`vl_vision` 取 **tier 最高**（质量优先，定位坐标会直接变成点击位置，错的比贵的更糟）。同 tier 按 `models` 数组顺序。方向由 `model_order_for_use_case()` 决定（只有 `vl_vision` 在降序白名单里，未注册 use_case 一律升序，与改造前逐字一致）。运行时以 `GET /vision/status` 的 `vl_model` 为准，别照抄文档里的模型名
 - **魔搭会下架模型 ID**：下架后调用返回 `400 {"error":{"message":"Model id : X , has no provider supported"}}`（官方文档明示"旧模型可能下线不再支持，请配置当前支持的模型 ID"）。2026-09-19 实测 `Qwen/Qwen3-VL-8B-Instruct` 与 `Qwen/Qwen3-VL-235B-A22B-Instruct` 均已失效。**换模型 = 改 keys.json 的 tier/enabled，不改代码**
 - **`has no provider supported` 与 `Invalid provider: X` 是两种错**：前者表示该模型在魔搭没有任何推理提供方绑定（下架，加后缀也救不回来）；后者表示 `<Model-Id>:<ProviderName>` 后缀里的提供方名非法（如 `:DashScope` 是合法名）。外部提供方路线见 `docs/model-service/API-Inference/api-provider`
 - **OpenAI 兼容 chat completions API**，图像以 JPEG base64 data URL 内嵌 messages content
@@ -373,7 +373,8 @@ CPU 模式的 OCR 加载会直接触发 swap 甚至 OOM，比"不可用"更糟�
 ## 管理员权限
 
 - 键鼠操控需要管理员权限，否则 Windows UIPI 阻止 `SetCursorPos`
-- `start.bat` 自动检测并 UAC 提权，启动前杀掉占用 8766 端口的旧进程
+- **用户手动启动**：`start.bat` 自动检测并 UAC 提权，启动前杀掉占用 8766 端口的旧进程
+- **agent 自启动**：一律用非提权命令 `.venv\Scripts\python.exe -m server.main`，不运行 `start.bat`、不替用户点 UAC；非提权后端的 MCP/REST/浏览器/截图/OCR 正常，只有键鼠与 UIA 激活窗口受限
 - `/screen/status` 的 `admin_privileges` 字段指示当前权限状态
 
 ## Playwright 浏览器操作
@@ -424,6 +425,10 @@ CPU 模式的 OCR 加载会直接触发 swap 甚至 OOM，比"不可用"更糟�
 
 ## 调试浏览器实例（通用，支持 Chromium 内核）
 
+> ⛔ **profile 数据安全另见 `docs/browser-profile-safety.md`（2026-10-24 立）**：`chrome_debug/` 是用户真实数据，
+> 跨浏览器打开会触发扩展 MAC 校验失败并**静默删除扩展文件**；动之前先 `tools/browser/profile_guard.py backup`。
+> 本节只讲「怎么起、怎么回收」，不讲「怎么不把数据搞坏」——那在安全文档里。
+
 **项目有专用的调试浏览器实例，agent 应自主启动和管理，不要问用户。** 支持任何 Chromium 内核浏览器（Chrome / Edge / Brave / Vivaldi 等），脚本会自动探测已安装的浏览器。
 
 > ⚠️ **修正（2026-09-19，VM 实测）：上面"agent 应自主启动、不要问用户"在本项目的 VM 上不成立。**
@@ -443,11 +448,39 @@ CPU 模式的 OCR 加载会直接触发 swap 甚至 OOM，比"不可用"更糟�
 > 后端名下，不受 harness 会话清理影响）。**禁止**用 harness 侧 Bash / `run_in_background`
 > 启动浏览器。验证方式照旧：`browser_status` 或 `GET /json/version`。
 
+> ⚠️ **补丁（2026-10-24，宿主机实测）：光"浏览器走后端"不够，后端自己也不能挂 harness。**
+> 把后端本身用 harness 的 Bash / `run_in_background` 拉起（`(python -m server.main &)`）时，
+> 会话清理会把**后端**一起硬杀：日志在某一秒戛然而止、**没有任何 shutdown / close_all 记录**，
+> 随后 shutdown 钩子（或进程树）带走全部 session page，最后一个 tab 关掉时 Chrome 整体退出，
+> 9222 随之消失——现象与"浏览器神秘死亡"一模一样，真因却在上游。实测：17:53 起的后端、
+> 18:35 用 `/terminals/spawn` 起的 Chrome 都正常，18:43 后端日志断在一行 loop 上，9222 同时消失。
+> **判据**：① 后端日志末行是否 shutdown；② 父进程链——后端父应是 `cmd.exe` ← `taskeng/svchost`
+> （计划任务），而不是 harness 的 bash/cmd。**冷启动脱离 harness 的办法**：一次性计划任务
+> 跑一个引导 bat（`@echo off` / `cd /d <项目根>` / `.venv\Scripts\python.exe -m server.main >> logs\…`），
+> `schtasks /Create /SC ONCE /ST 23:59 /F` → `/Run` → 起好后 `/Delete`（进程不受删除影响）。
+> 另：启动浏览器用 `cmd_list` 数组（`["<venv python>","tools/browser/start_debug_browser.py"]`）
+> 就能绕开 cmd.exe 引号陷阱，**不需要写临时 bat 文件**——写 bat 再让终端跑 bat，是没查 `cmd_list` 才走的弯路。
+
+> 📋 **后端空闲回收机制（2026-10-10 查证 `server/browser/session/manager.py`，必要管理而非故障）**：
+> SessionManager 对浏览器 session 有**静默租约回收**：有主 session 900s（owner 每次操作
+> 自动续租）、anonymous 300s（没人续租，更快收），后台每 60s 扫一遍，回收时
+> `close_page=True` **连 tab 一起关**。参数在 config.toml `[browser]`
+> `session_idle_timeout_secs` / `session_anon_idle_timeout_secs` / `session_max_count`
+> （当前 config.toml 未配 `[browser]` 段，全走 `server/config.py` 默认值）。
+> **连带效应：被回收的 tab 若是窗口里最后一个，Chrome 进程整体退出，9222 随之消失。**
+> 因此「9222 没了」**先查回收证据，不要叫"神秘死亡"也不要盲目重启**：
+> 1. 墓碑查询：对已回收 session 的操作会 404，`debug_detail` 自带
+>    `已于 HH:MM:SS 被关闭：idle_timeout / lru_evicted_anon / manual:<caller>，owner=…，url=…`；
+> 2. 后端日志搜 `idle 超时已清理` / `LRU 淘汰`；
+> 3. 长任务保活 = 让 owner session **周期性有操作**（每次操作即续租），而不是想办法关掉回收。
+> 另：后端 shutdown 会 `close_all()`（关全部 session page + 断开 CDP）——后端重启时
+> 调试浏览器里的任务页同样会被收，长任务别横跨后端重启。
+
 - **启动脚本**：`tools/browser/start_debug_browser.py`（旧名 `start_debug_chrome.py` 作为薄包装保留）
 - **启动命令**：
   - 默认（非交互，空白配置）：`uv run python tools/browser/start_debug_browser.py`
   - 复制登录态：`uv run python tools/browser/start_debug_browser.py --copy-user-data`（建议先关闭源浏览器）
-  - 显式指定浏览器：`uv run python tools/browser/start_debug_browser.py --browser-path "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"`
+  - 显式指定浏览器：`uv run python tools/browser/start_debug_browser.py --browser-path "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"`（本机默认即 Chrome，通常**不需要**传；只有要临时换 Edge/Brave 时才用）
   - 自定义端口/目录：`--port 9223 --user-data-dir /path/to/dir`
 - **工作原理**：
   1. 检查 9222 端口是否已有浏览器在监听
@@ -455,7 +488,14 @@ CPU 模式的 OCR 加载会直接触发 swap 甚至 OOM，比"不可用"更糟�
   3. 以 `--remote-debugging-port=9222 --user-data-dir=chrome_debug` 启动独立浏览器实例
   4. 等待就绪后返回
 - **浏览器探测优先级**：未指定 `--browser-path` 时，按 Chrome → Edge → Brave → Vivaldi 顺序探测默认安装路径
-- **移植配置与浏览器版本的兼容性（2026-09-05 实测）**：本机调试浏览器生产配对是 **Edge 152**（`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`；用户目录下另有旧版 Chrome 135）。新版浏览器写入的用户数据目录，旧版 Chrome 启动即闪退（能打出 `DevTools listening` 但立刻 exit 3）。配置目录跨浏览器/跨版本移植后必须用目标浏览器实测；`chrome_debug/` 为 Edge 谱系配置，config.toml 未钉 `browser_path` 时自动探测会选中 Chrome 导致闪退，需显式 `--browser-path` 指向 Edge
+- **浏览器选型：优先 Chrome（2026-10-24 重测，撤回 09-05 结论）**
+  - **旧结论已失效**：09-05 那条「生产配对 Edge 152 / `chrome_debug/` 是 Edge 谱系 / 未钉 `browser_path` 时 Chrome 启动即闪退，必须 `--browser-path` 指向 Edge」**在本机不成立，已撤回**。实机核对：Edge 只有 `138.0.3351.109` 一个版本目录（2025-07-30 安装，从未有过 152），Chrome 也不是「旧版 135」而是 `140.0.7339.208`（比 Edge 新）。当初那次闪退是**降级方向**（旧版浏览器读新版 profile）的表现，被误写成「必须用 Edge」这条生态结论，之后一路被照抄。
+  - **2026-10-24 实测（升级方向安全）**：用 `Chrome 140.0.7339.208` 打开由 `Edge 138.0.3351.109` 写入的同一个 `chrome_debug/`，**正常启动无闪退**，`GET /json/version` 返回 `Chrome/140.0.7339.208`，CDP `contexts[0].cookies()` 读到 **308 条 cookie / 99 个域**（297 条有值，`bilibili` 17、`feishu` 8、`xiaohongshu` 8、`modelscope` 7 全在）⇒ 跨浏览器共用一个 user-data-dir 在这条方向上是安全的，登录态没有丢。
+  - **判定方法（换浏览器/跨版本后照这个验，不要照抄任何人写死的结论）**：① 起一次，`curl 127.0.0.1:9222/json/version` 看 `Browser` 字段是不是你要的那个；② 连 CDP 数 `contexts[0].cookies()` 的**条数 + 域分布 + 非空值比例**，和迁移前比；③ 只有**降级方向**（旧版浏览器打开新版 profile）才会闪退，表现为打出 `DevTools listening` 后立刻 `exit 3`。
+  - **已钉配置**：`config.toml [chrome] browser_path = "C:\Program Files\Google\Chrome\Application\chrome.exe"`，让自动探测的 Chrome 优先变成显式声明，不随安装情况漂移。`BROWSER_CANDIDATES` 本来就是 Chrome 优先，以后**默认不要传 `--browser-path` 指 Edge**。
+  - ⚠ **但「安全」只对数据成立，扩展会被清空（2026-10-24 实测代价）**：Chrome 140 首次打开这份 Edge 138 写入的 profile 后，`Default/Extensions/` 下 13 个扩展目录**只剩空壳**（无 `manifest.json`），`Secure Preferences` 里保留 29 条 `extensions.settings` 但 `path` 为空，目录 mtime `18:38:03` 正是 Chrome 启动之后。原因：扩展条目的 MAC 由**各 profile 自己的 seed** 签名，别的浏览器写的条目校验不过 ⇒ 判定篡改 ⇒ 删文件、留残条。cookie（308 条）与 History（48MB）不受影响。**结论：切浏览器可以，但要按「扩展需要重新注册一次」来预估，别以为拷了 profile 就全都带过去。**
+  - **Chrome 137+ 稳定版已忽略 `--load-extension`（同日实测）**：参数确实进了命令行（`chrome://version` 可见），但扩展不加载（`/json/list` 只有内置扩展、`chrome://extensions` 卡片数 0）。所以「给调试实例离线装扩展」不能靠启动开关。
+  - **离线装扩展唯一稳路**：`chrome://extensions` → 开右上「开发者模式」→「加载已解压的扩展程序」→ 选**自己解包出来的目录**（2026-10-24 裁决：扩展源码不再入库，原 `tools/browser/extensions/` 已删；需要时从 CRX 解包到仓库之外，如 `%LOCALAPPDATA%\Parcae\extensions\`，别放进仓库——第三方扩展自带的 `.html` 会撞 C3 硬规则、4MB 源码也只是体积负担）。这一步**一次即可持久**（注册写进 profile，重启不掉），代价是启动时顶部有「请停用以开发者模式运行的扩展」提示。⛔ 纯拷文件到 `Default/Extensions/` **不生效**（同上 MAC 校验），必须让它自己注册一次。**ID 是否保留取决于 manifest 有无 `key` 字段**：有 `key`（如 KeePassXC-Browser 1.10.3）⇒ ID 仍是官方值 ⇒ 依赖官方 ID 的原生消息宿主白名单能对上；无 `key` ⇒ ID 由路径派生，会连不上 native host。
 - **与工作浏览器隔离**：调试浏览器使用独立的 `chrome_debug/` 用户数据目录（可在 config.toml `[browser] user_data_dir` 配置），**绝对不会影响用户正在使用的工作浏览器**
 - **自主操作流程**：
   1. 用 `browser_status` 检查调试浏览器是否已运行
@@ -466,6 +506,116 @@ CPU 模式的 OCR 加载会直接触发 swap 甚至 OOM，比"不可用"更糟�
   4. **不要问用户"要我来开还是你来开"**——直接开（**VM 上例外**：agent 起的进程活不过命令
      结束，见本节开头 2026-09-19 修正，那种情况要让用户人工常驻）
   5. **不要打开用户的工作浏览器**——只用调试实例
+
+## 端口保留区（WinNAT / Hyper-V 动态保留，会让服务"绑不上端口"）
+
+> **症状**：服务启动失败，报 `WinError 10013`（`[Errno 13] Permission denied`）；端口明明没被占用、也没有权限问题。
+> **本机已发生三次**：本地后端 8766、adb server 5037、调试浏览器 9222。
+
+**机制**：Hyper-V / WinNAT 会从**动态端口范围**里划走若干"保留块"，块内端口**任何进程都绑不上**——注意报的是 `10013`（访问权限不允许），**不是**"已被占用"的 `10048`，所以极易误判成权限/防火墙问题。
+
+**判据（可复用，按顺序读）**：
+
+```bash
+netsh int ipv4 show excludedportrange protocol=tcp          # ① 保留区清单
+python -c "import socket; socket.socket().bind(('127.0.0.1',<PORT>))"   # ② 直接探针：10013=被保留
+netsh int ipv4 show dynamicport tcp                          # ③ 目标端口落在哪段动态范围
+```
+
+- 保留区条目**带 `*`** = 持久保留（注册表 `...\Tcpip\Parameters\PersistentPortExclusions`），**停 WinNAT 没用**；**不带 `*`** = WinNAT 动态保留，⛔ **每次开机重新随机分配** ⇒ 「昨天能起、今天起不来」是正常现象，不是代码问题。
+- ⛔ **别用「端口有没有被占用」判**：`netstat` 里查不到 ≠ 能绑上。
+- 对照探针很重要：再绑一个同类高端口，若它 OK ⇒ 排除权限/防火墙通病，锁定"这个端口被保留"。
+
+**⛔ 本机真凶（2026-10-12 查清，解释了"为什么以前从没出过这事"）**：
+
+`HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\MaxUserPort = 15000`
+
+Windows 默认动态端口范围是 **49152–65535**；`MaxUserPort` 把它压成 **1024–15000**（`netsh int ipv4 show dynamicport tcp` 显示「启动端口 1024 / 端口数 13977」，13977 = 15000−1024+1，完全吻合）。WinNAT 只能从动态范围里划块，范围被压到低位后，划出的块就落到低位 ⇒ 撞上 5037、8766 这类常用端口。
+
+**Windows 默认配置下 WinNAT 的块全在 49152 以上，5037 / 8766 永远不会有事。** 所以这不是"突然坏了"，是**一直在雷区边上走**，看每次开机划到哪儿。同键下另有 `ReservedPorts`（本机实测 `{1433-1434}`）。
+
+**已发生的三次**：
+
+| 端口 | 服务 | 表现 | 处理 |
+|---|---|---|---|
+| **8766** | 本地后端 | `[Errno 13] ... winerror 10013` | `tools/disk_io_audit/fix_port_and_start.py`（`net stop winnat` → 起后端 → `net start winnat`）；完整判据见 `tools/disk_io_audit/README.md` |
+| **5037** | adb server | MAA 报 `could not read ok from ADB Server` / `failed to start daemon` | 换端口 23456，启动器 `<data_drive>:/<green_apps_root>\MAA-v5.17.2-win-x64\StartMAA-adb23456.bat` |
+| **9222** | 调试浏览器（CDP） | ⚠️ **表现与上两条不同**：没有 `WinError` 异常栈，chrome 主进程与子进程都活着、`netstat` 查不到监听，`start_debug_browser.py` 只报「调试端口未就绪」并 `exit 1` | 换未保留端口（2026-10-19 实测 **7000** 一次成功）。真因只在 chrome 自己的 stderr：`net\socket\tcp_socket_win.cc bind() returned an error: 0x271D (WSAEACCES)` + `Cannot start http server for devtools`。⛔ 别去杀进程 / 查占用——那不是"被占用" |
+
+> **9222 不再是无条件可用的约定端口**：`docs/browser-anti-detection.md` 与各 skill 的 `connect_over_cdp("http://127.0.0.1:9222")` 仍然正确，但**起浏览器那一步要先确认 9222 不在保留区**（`netsh int ipv4 show excludedportrange protocol=tcp`；2026-10-19 本机 `9208-9307` 这一段就吃掉了 9222）。
+> ⚠️ `tools/browser/start_debug_browser.py` 把 Popen 的 stdout/stderr 丢进 `DEVNULL`，**真因被掩盖**；诊断时自己 `subprocess` 起一次并把 stderr 落到文件，否则只能看到"未就绪"。
+
+**已内置自动顺延（2026-10-19，本机第三次复发后落地）**
+
+后端启动时**在 uvicorn 之前**自己试绑端口（`lib/port_binding.py`），撞到 10013 就按序往后找，并且**整段跳过保留区**（读 `netsh ... show excludedportrange`；本机保留段首尾相连到 9807，逐 1 顺延永远跳不出去）。跳段不占尝试次数配额。全部失败才 `exit 2` 并打印诊断命令。
+
+结果写进 `data/runtime/server_port.json`（`preferred_port` / `port` / `pid` / `degraded` / `reason` / `status`），**任何消费方都不该再自己拼端口**：
+
+- 查询：`GET /runtime/port`、`GET /runtime/consumers`
+- 代码内：`from lib.runtime_endpoint import resolve_base_url`（客户端 / 后端自环 / exec 子进程的 `PARCAE_API` 都走它）
+- 下游登记：`data/runtime/consumers.json`，端口变更时自动把 `127.0.0.1:<旧端口>` 改成新端口（改前备份 `.bak_portrewrite`、只匹配回环 URL、无匹配不写）
+
+⛔ **IDE 的 MCP 客户端不读这个声明**，它只认自己配置里的 URL；自动改写只覆盖"已登记且内容里确实出现旧端口"的项，改完仍需**重连 IDE** 才生效。
+
+⚠ 排查时别只看 `data/logs/server.log`：uvicorn 自己的 bind 报错走 stderr，历史上正是因此表现为"启动完成后莫名关闭"。现在预探测发生在 uvicorn 之前，端口问题一定会进文件日志。
+
+**对策一：换端口 —— 选大于 `MaxUserPort` 的端口（推荐，零管理员、零重启）**
+
+端口只要**不在动态范围内**，WinNAT 就抢不到，一劳永逸。本机动态范围上界是 15000 ⇒ **选 16385 / 20000 / 23456 这类**。低端口里只有 **>6126** 才安全（2026-10-12 实测保留区含 `4859-5258`、`5357`、`5426-6126`，所以 5555、6001 同样中招；10000 与 16384 则分别被占用/是模拟器端口）。
+
+adb 的换法（零改码、零系统改动）：
+
+```bash
+ANDROID_ADB_SERVER_PORT=23456 adb.exe start-server
+ANDROID_ADB_SERVER_PORT=23456 adb.exe connect 127.0.0.1:16384 && \
+ANDROID_ADB_SERVER_PORT=23456 adb.exe devices
+```
+
+- ⛔ **变量名是 `ANDROID_ADB_SERVER_PORT`，不是 `ADB_SERVER_PORT`** —— 实测 `adb.exe` 二进制里两个字符串都有，但**只有前者生效**（2026-10-12 按二进制字符串猜错、实测无效后更正）。
+- 客户端与被它拉起的 server 共用该变量；子进程会继承（`CreateProcessW` 第 7 参传 `nullptr`）。
+- ⚠️ 给 MAA 换端口**必须走启动器**（bat 内 `set` 后启 `MAA.exe`）：直接双击 `MAA.exe` 不带该变量时仍只找 5037，照样失败。
+- ⚠️ 边界：只解 MAA 自己；MuMu 若另有依赖 5037 的部分不受影响（本次未发现）。
+
+**对策二：临时解堵（只治这一次）**
+
+```
+net stop winnat  →  启动目标服务  →  net start winnat
+```
+
+需管理员；期间网络/WSL 会短暂中断几秒；⛔ **重启后仍会复发**（`MaxUserPort` 没改）。
+
+**对策三：根治（需管理员 + 重启；动手前先查清 `MaxUserPort` 是谁设的）**
+
+```bash
+netsh int ipv4 set dynamicport tcp start=49152 num=16384
+```
+
+改回 Windows 默认范围后，WinNAT 划块回到高位。⚠️ `MaxUserPort=15000` 可能是某个软件的要求（历史遗留 / 软件优化），**改前先确认来源**，别在没查清前提动系统参数。
+
+### 改完必须重启，且要防着被改回去（2026-10-19 实测）
+
+`netsh ... set dynamicport` 改的是**动态端口范围**，而 WinNAT 的保留块是**每次开机按当时的范围重新划分**的，
+已经划走的那批块不会因为改范围而立刻释放。本机实测：改完 `show dynamicport tcp` 已是 `49152 / 16384`，
+但 `show excludedportrange` 仍占着 `8708–9807`，后端照样顺延到 9808 ⇒ **不重启等于没改**。
+
+⚠️ 这类值最容易被「网络优化 / 游戏加速器 / 系统精简脚本」在装机或清理时写回低位，而症状要等到
+**下一次开机正好撞上保留块**才出现（表现是"昨天还能起，今天一启动就关"，且日志里一条报错都没有）。
+现在有三层可见性，不用等故障才发现：
+
+| 层 | 怎么查 | 说明 |
+|---|---|---|
+| 启动体检 | `data/logs/server.log` 搜 `[parcae.port] WARNING` | 每次启动都查；**只有真会让端口绑不上的配置才 WARNING**（动态端口起点 < 49152、首选端口落在保留区） |
+| 运行时查询 | `GET /runtime/port` 的 `port_env` 字段 | 含 `start/count/end/max_user_port/problems/notes/healthy`，下游（管家前端）可据此提示 |
+| 改动留痕 | `python -m workspace.disk_manager.settings_watch.watch diff --item tcp_port_range` | 纳入快照后能 diff 出值被改；`restore` 默认干跑，`--apply` 才写 HKLM（需管理员） |
+
+`problems` 与 `notes` **分两档，不要合并**：前者计入 `healthy` 并打 WARNING，后者只记录（日志 DEBUG、`/runtime/port` 可见）。\
+遗留 `MaxUserPort` 属后者 —— Vista+ 已由 `dynamicport` 接管，本机 `netsh` 报 `49152/16384` 与
+`MaxUserPort=15000` 并存即证明它不参与端口分配。把它计入 `problems` 会让 `healthy` 恒为 false、
+每次启动都 WARNING，真正的风险反而被稀释。
+
+`MaxUserPort` 与 `DynamicPortRange*` 的关系：Vista+ 以 `dynamicport` 为准，`MaxUserPort` 是 XP 时代遗留项。
+⚠️ Windows 对**默认值不落注册表** —— 设成 49152/16384 之后 `DynamicPortRangeStartPort` 反而查不到，
+这是正常的（等于默认 ⇒ 删值），不要当成异常去"修"。
 
 ## 网络与环境查询技巧
 
@@ -581,6 +731,51 @@ netstat -ano | grep ":443 .*LISTENING"   # 拿到 PID 再 tasklist /FI "PID eq <
 本例 `www.zenodo.org` 解出 188.185.43.153，但 httpx 连接失败。
 判"可达"必须用真实请求（带超时的 GET/HEAD），不能只查解析。
 
+### api.github.com REST：用 `curl --resolve` 绕过 hosts 黑洞（2026-10-17 实测）
+
+上一节说「`--resolve` 打 git 端点推不动」是对的，但**别把它推广成"GitHub 全挂"**——
+`api.github.com` 的 **REST 面**可以用 `--resolve` 完整跑通，这是 hosts 被 Steam++ 写黑时
+唯一不用改任何系统配置的只读通道。
+
+```bash
+# ① nslookup 不读 hosts，能拿到真值（getaddrinfo 会读到 127.0.0.1）
+nslookup api.github.com          # → 20.205.243.168
+# ② 把域名钉到真 IP
+curl -s --resolve api.github.com:443:20.205.243.168 -H "User-Agent: parcae" \
+  "https://api.github.com/repos/<owner>/<repo>/git/trees/<branch>?recursive=1"
+```
+
+实测一次拉到 14004 个文件的子树、多个目录各自 recursive 均 200。三个坑：
+
+- **响应在 ~2MB 处会被传输层截断**，症状是 `Unterminated string starting at: ...`，
+  **不是** GitHub 的 `truncated` 标记。判据：JSON 解析失败就退化为**非递归逐层下钻**，
+  别当成偶发失败去重试（同一请求再发一次常常就直接成功了）。
+- 路径可能含裸控制字符（`[uc]lua` 这类目录名），`json.loads(txt, strict=False)` 才解得了。
+- 未认证限流 **60 次/小时**：按顶层目录分别 `recursive=1` 合并着拉，别逐目录递归展开。
+
+### 夸克网盘分享页的清单抓取（2026-10-17 实测）
+
+`pan.quark.cn/s/<pwd_id>` 是 SPA，列表要走 PC 端接口，**无需登录**：
+
+```bash
+# ① 取 stoken（唯一需要 POST 的一步）
+curl -s -X POST "https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token" \
+  -H "Content-Type: application/json" -H "Referer: https://pan.quark.cn/s/<pwd_id>" \
+  --data-binary '{"pwd_id":"<pwd_id>","passcode":""}'
+# ② 分页列目录：pdir_fid=0 是根，子目录用条目的 fid 继续
+curl -s "https://drive-pc.quark.cn/1/clouddrive/share/sharepage/detail?pwd_id=<pwd_id>\
+&stoken=<stoken>&pdir_fid=0&_page=1&_size=100&_fetch_total=1&_sort=file_type:asc,file_name:asc"
+```
+
+token 返回里 `data.title` 是分享标题、`data.file_num` 是**顶层**条目数——**先看这两个字段再决定
+要不要展开**。这两项就能直接回答"这个分享是什么"，能省掉几千次请求。
+
+⛔ **坑：GET 请求千万别带 `Content-Type`**。带了会返回 `400 code=14001 "非法token"`，
+看着像 stoken 失效，实际是 header 的问题。只有 POST 那一步需要 Content-Type。
+
+目录树可能又深又碎（实测 797 个目录 / 8 层，每个目录只 2~6 项），要**分层并发**遍历，
+否则会先撞上自己设的请求上限，误以为抓完了。并发度先问用户——第三方站点有封 IP 风险。
+
 ### 查 PaddlePaddle 可用 wheel 版本
 
 GPU 版**只发在官方索引**，PyPI 上只有 CPU 版：
@@ -656,6 +851,79 @@ git clone --bare --progress \
 - 测速时注意：本例中 `curl -o /dev/null` 的写入会被沙箱拒绝（表现为 `size=0` / `curl: (23)`），
   **必须落盘到真实文件**才能拿到可信的 `speed_download` —— 否则会误判成"所有站点都 0 B/s"。
 
+#### 补充（2026-10-12 复测）：证书是**另一个独立故障**，两个都要治
+
+**⛔ 证书问题：本机 git 的 `openssl` 后端认不了 GitHub 证书**
+
+本机 `<data_drive>:/<apps_root>/Git/etc/gitconfig` 是 `http.sslbackend=openssl` + `http.sslcainfo=<git 自带 ca-bundle.crt>`，直连 GitHub 报：
+
+```
+fatal: unable to access 'https://github.com/...': SSL certificate problem: unable to get local issuer certificate
+```
+
+**`schannel` 后端（走 Windows 证书库）可以**。它与"限速"是**两个互相独立的故障**：只治限速不改后端，会卡在证书上；只治证书不加镜像，会限速到断流。
+
+**零持久化注入法（git 2.31+ 环境变量，子进程全继承，不改任何全局配置）**：
+
+```bash
+GIT_CONFIG_COUNT=2
+GIT_CONFIG_KEY_0=http.sslBackend                 GIT_CONFIG_VALUE_0=schannel
+GIT_CONFIG_KEY_1=url.https://gh-proxy.com/https://github.com/.insteadOf
+                                                 GIT_CONFIG_VALUE_1=https://github.com/
+git fetch --no-tags --depth 1 upstream "refs/tags/<tag>:refs/tags/<tag>"
+```
+
+命令行等价：`git -c http.sslBackend=schannel -c url."https://gh-proxy.com/https://github.com/".insteadOf=https://github.com/ fetch ...`
+
+**复测数字（2026-10-12）**：
+
+| 走法 | 结果 |
+|---|---|
+| 直连 `git fetch` 单个 tag | ❌ 9 分钟只到 **63%**（17.5 MiB / ~35 KiB/s），随后 `error: RPC failed; curl 56 Recv failure: Connection was reset` + `fatal: early EOF` |
+| 直连 codeload 抓 8MB range | 102 KB/s |
+| gh-proxy 抓同样 8MB range | **218 KB/s** |
+| **经 gh-proxy + schannel `fetch --depth 1`** | ✅ **23.5 秒**落地 |
+
+⚠️ 本机 2026-09 曾测到 gh-proxy **3.8 MB/s**，本次只有 **218 KB/s** —— **加速器也在退化，别拿旧速度估时间**。
+
+**只拉单个 tag，别全量**：`git fetch --no-tags upstream "refs/tags/<tag>:refs/tags/<tag>" --depth 1` 秒级且失败原因可见；全量 `--tags` 在本机曾要 **~15 分钟**，且配 `2>$null` 会把失败原因吞掉，导致误报"tag 不存在"（真实原因是限速/证书/超时）。
+
+#### 补充（2026-10-15 复测）：gh-proxy 已 403，改走 ghfast.top；且 **Range 不可用**
+
+**⛔ 镜像站会翻面，别抄上一轮的名字**。2026-10-15 复测：`gh-proxy.com` 对 **git 端点与 codeload 都返回 403**（此前 09-17 是 3.8 MB/s、10-12 是 218 KB/s，一路退化到不可用）。
+
+**当日实测数字**（同一仓库 `zai-org/ZCode` 的 85 MiB 快照，15–30 秒短探针）：
+
+| 走法 | 结果 |
+|---|---|
+| `git clone --depth 1` 直连 github.com + schannel | **~78 KB/s**（3 分钟只到 14 MiB） |
+| `codeload.github.com` 直连 | **~30 KB/s** |
+| `github.com/<o>/<r>/archive/<ref>.tar.gz` 直连 | **~65–80 KB/s** |
+| **`https://ghfast.top/` 前缀 + archive tarball** | ✅ **~690 KB/s**（85 MiB 用 60 秒；另一仓库 32 MiB 用 23 秒） |
+| `ghproxy.net` 前缀 | 57 KB/s（能通但没优势） |
+| `hub.gitmirror.com` / `gh.llkk.cc` / `github.moeyy.xyz` | ❌ `code=000` 连不上 |
+
+- **证书仍是独立故障**：`git` 直连必须 `-c http.sslBackend=schannel`（见上一节）；curl 加 `--ssl-no-revoke`，否则 CRL/OCSP 检查超时伪装成"网站不通"。
+- **⛔ 该链路不支持 HTTP Range**：`-r 0-N` 拿到的是 `200` + 整个文件（不是 206），`-C -` 续传直接 `rc=33 CURLE_RANGE_ERROR`。
+  ⇒ **不能做多连接分段并行**，只能「单连接 + 长 `--max-time` + 换镜像重试」。脚本里写续传循环会原地空转 30 次然后失败。
+- **⛔ `tar` 的 `F:` 冒号陷阱**：msys 的 `tar` 把 `F:/...` 解析成「远程主机 `F` + rsh」，报
+  `tar (child): Cannot connect to F: resolve failed`。**archive 路径与 `-C` 目标都必须写成 msys 风格 `/f/...`**。
+  注意这不通用：`curl.exe -o` 反而**必须**写字面 `F:/`（见上文），两者要求相反。
+- **快照（tarball）vs git 仓库怎么选**：只要 `--depth 1`，两者价值几乎等价（都没有历史）。
+  按 `git clone` 78 KB/s vs `ghfast` 690 KB/s 的差距，**默认走 ghfast + tarball**，落地后补一份 `SOURCE.md` 记 commit 与拉取方式即可。
+
+**⚠️ 拉之前先看仓库体积**：`gh api repos/<owner>/<repo> --jq '{size_kb:.size,default_branch}'`
+（`api.github.com` 不受影响，秒回）。例：`openclaw/openclaw` 实测 **9.4 GB**，整体拉取不可行；
+这种「只要一两个文件」的场景改用 contents API 单文件回源，2 次调用即可拿到 ★ 级证据：
+
+```bash
+gh api repos/<owner>/<repo>/git/trees/main?recursive=1 --jq '.tree[].path' | grep 'agent-loop\.ts'
+gh api repos/<owner>/<repo>/contents/<path>?ref=main --jq .content | base64 -d > agent-loop.ts
+```
+
+**⚠️ 被中断的 fetch 会留下僵尸锁**：`.git/shallow.lock`，后续操作报
+`fatal: Unable to create '...shallow.lock': File exists`。确认没有 git 进程在跑后删掉即可。
+
 ### 超时杀不掉的 git 子进程
 
 `subprocess.run(["git", ...], timeout=N)` 在 Windows 上可能**杀不干净**：git 会派生
@@ -665,3 +933,40 @@ git clone --bare --progress \
 
 - 排查：`Get-Process git,python` 看有没有「启动时间 = 最后一条日志时间」、CPU 极低的残留进程。
 - 处理：按 PID 逐个 `Stop-Process -Force`（**别误杀后端 python 进程**，用启动时间区分），再清理工作目录。
+
+### curl 抓 HTTPS 报 000 / 退出码 35 ⇒ 先加 `--ssl-no-revoke`
+
+本机走 schannel 后端时，`curl` 会去查证书吊销列表（CRL/OCSP），国内网络下这一步常超时 ⇒ 表现为
+**HTTP 000 / 退出码 35（SSL connect error）**，看着像"网站不通"，其实是**吊销检查被卡住**，不是 TLS 握不上。
+
+- 先加 `--ssl-no-revoke` 重试；能通就确认是吊销检查问题。
+- 与"限速"是**两个互相独立的故障**（见上文「GitHub 仓库克隆被限速」）：只治限速不改后端会卡在证书上，只治证书不加镜像会限速到断流。
+
+### 查"模型/资源存不存在"（免鉴权入口）
+
+- OpenRouter 全量模型清单：`https://openrouter.ai/api/v1/models`（**免鉴权**，直接 curl）。
+- HuggingFace 按作者列模型：`https://huggingface.co/api/models?author=<org>`。
+- ⚠ 列表里的日期是**上架/建库日**，不是训练或发版日，别拿它做版本判断。
+- HF 许可证读 API 返回的 `tags` 里的 `license:X`，**别去猜页面文本**；配校验：repo 名与记录里的参数规模 token 取**交集，空则拒写**。
+
+### 抓站点数据：先找结构化负载，别用"grep 命中数"判断有无数据
+
+按顺序试，三条都各自救过场：
+
+1. 先翻 `<script type="application/ld+json">`——不少站点把结构化数据直接挂在页面里。
+2. **页面很大却 grep 0 命中** ⇒ 数据在 Next.js 的 flight 流里：搜 `self.__next_f.push`。
+3. **付费 API 返 401 时先 curl 对应页面**——页面本身可能公开，只是 API 要鉴权。
+
+⛔ 数据可能被转义、分包或延迟注入，**命中 0 ≠ 没数据**，别据此下"页面没有该数据"的结论。
+
+### 别人送来的改动：先查"声称了但没做"
+
+拿到他人（或 AI）提交的改动，先做一次低成本核对：
+`grep -rn "<对方声称的函数名>" --include="*.py" src/`；README / commit 注释里的承诺同理。
+补完后要配**反向验证锚**——造一个真会抛的输入，确认捕获真的生效，否则那是一段死代码。
+（与上文「验证历史 bug 已修复要有铁证」是一组：一个查"做了没做"，一个查"改对了没"。）
+
+### 找"找不到的素材"别只搜工作树
+
+按顺序找：① 同级的压缩包（`*.7z` / `*.zip`）；② 被 `.gitignore` 排除的目录；③ 用户后补的文件。
+⚠ 文档里写的**绝对路径属于写它的那台机器**，在本机解析不到 **≠** 该素材不可得。

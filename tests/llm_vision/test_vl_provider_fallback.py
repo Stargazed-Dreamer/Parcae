@@ -180,7 +180,7 @@ class TestProviderExhaustedMark:
         冷却按 key 级 ⇒ 同 key 其余 model 一起停。日志若只说"provider 额度耗尽"，
         读日志的人查不到是哪个 model 把它拖停的，只能猜。
         """
-        with caplog.at_level(logging.WARNING, logger="localagent.remote_vl"):
+        with caplog.at_level(logging.WARNING, logger="parcae.remote_vl"):
             vl_client._mark_provider_exhausted(
                 "ms", "HTTP Error 503", kind="upstream_overload",
                 source="modelscope", model="qwen3-vl")

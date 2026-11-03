@@ -52,7 +52,7 @@ from typing import Any
 
 from server.activity_tracker.activity_signal import compute_intensity
 
-logger = logging.getLogger("localagent.vl_quota")
+logger = logging.getLogger("parcae.vl_quota")
 
 # 默认值：可通过 config.toml [loops.activity_tracker] 覆盖
 _DEFAULT_DAILY_QUOTA = 100

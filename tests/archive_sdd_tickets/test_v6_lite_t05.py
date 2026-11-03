@@ -33,7 +33,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
+from lib.agent_runtime import (  # noqa: E402
     AGENT_CALLER_HEADER_VALUE,
     CHAT_TOOLS_PATH,
     EventStore,
@@ -49,7 +49,7 @@ from client.core.agent import (  # noqa: E402
     ToolEntry,
     ToolRegistry,
 )
-from client.core.agent.types import (  # noqa: E402
+from lib.agent_runtime.types import (  # noqa: E402
     TOOL_SAFETY_APPROVAL_REQUIRED,
     TOOL_SAFETY_READ_ONLY,
     TOOL_STATUS_COMPLETED,
@@ -488,7 +488,7 @@ class TestFormatConversion:
 class TestHttpClientToolExecutor:
     def test_implements_tool_executor_protocol(self):
         """T05: HttpClientToolExecutor 实现 ToolExecutor 协议（runtime_checkable）。"""
-        from client.core.agent.types import ToolExecutor
+        from lib.agent_runtime.types import ToolExecutor
         reg = ToolRegistry()
         ex = HttpClientToolExecutor(registry=reg, base_url="http://fake.test")
         assert isinstance(ex, ToolExecutor)
@@ -614,7 +614,7 @@ class TestHttpClientToolExecutor:
 class TestLLMPoolGateway:
     def test_implements_llm_gateway_protocol(self):
         """T05: LLMPoolGateway 实现 LLMGateway 协议。"""
-        from client.core.agent.types import LLMGateway
+        from lib.agent_runtime.types import LLMGateway
         gw = LLMPoolGateway(base_url="http://fake.test")
         assert isinstance(gw, LLMGateway)
 
@@ -782,7 +782,7 @@ class TestLLMPoolGateway:
 class TestRunnerToolRegistryIntegration:
     def test_runner_deps_has_tool_registry_field(self):
         """T05: RunnerDeps 含 tool_registry 字段（默认 None）。"""
-        from client.core.agent import MockLLM
+        from lib.agent_runtime import MockLLM
         deps = RunnerDeps(llm_gateway=MockLLM())
         assert deps.tool_registry is None
 
@@ -792,7 +792,7 @@ class TestRunnerToolRegistryIntegration:
         T25/D8 设计：REST 端点折叠成 1 个桶工具（rest_endpoints），
         不再每个端点一个独立工具。_materialize 物化仍返回 3 个 entries。
         """
-        from client.core.agent import MockLLM
+        from lib.agent_runtime import MockLLM
         reg = ToolRegistry()
         reg._entries = reg._materialize(_make_test_openapi_spec())
         # 物化仍返回 3 个 entries（list_dir / exec_python / echo_with_id，
@@ -811,7 +811,7 @@ class TestRunnerToolRegistryIntegration:
 
     def test_build_request_no_registry_no_tools(self):
         """T05: 无 tool_registry 时 tools 为空（T01/T02 行为，向后兼容）。"""
-        from client.core.agent import MockLLM
+        from lib.agent_runtime import MockLLM
         runner = SessionRunner(
             deps=RunnerDeps(llm_gateway=MockLLM()),
             config=RunnerConfig(session_id="test"),
@@ -821,7 +821,7 @@ class TestRunnerToolRegistryIntegration:
 
     def test_runner_sets_safety_from_registry(self, store):
         """T05: runner 解析 tool_calls 后从 registry 查 ToolEntry 设置 safety。"""
-        from client.core.agent import MockLLM, MockToolExecutor
+        from lib.agent_runtime import MockLLM, MockToolExecutor
         reg = ToolRegistry()
         reg._entries = reg._materialize(_make_test_openapi_spec())
 
@@ -858,7 +858,7 @@ class TestRunnerToolRegistryIntegration:
 
     def test_runner_sets_approval_safety_from_registry(self, store):
         """T05: approval_required 工具的 safety 正确设置。"""
-        from client.core.agent import MockLLM, MockToolExecutor
+        from lib.agent_runtime import MockLLM, MockToolExecutor
         reg = ToolRegistry()
         reg._entries = reg._materialize(_make_test_openapi_spec())
 
@@ -893,7 +893,7 @@ class TestRunnerToolRegistryIntegration:
 
     def test_runner_fallback_safety_when_registry_has_no_entry(self, store):
         """T05: registry 中找不到工具时 safety fallback 为 read_only。"""
-        from client.core.agent import MockLLM, MockToolExecutor
+        from lib.agent_runtime import MockLLM, MockToolExecutor
         reg = ToolRegistry()  # 空 registry
 
         async def run():

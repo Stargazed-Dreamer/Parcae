@@ -21,7 +21,7 @@ from fastapi import APIRouter
 
 from lib.schema import BaseSchema
 
-logger = logging.getLogger("localagent.model_manager.routes")
+logger = logging.getLogger("parcae.model_manager.routes")
 
 router = APIRouter(prefix="/models", tags=["ModelManager"])
 

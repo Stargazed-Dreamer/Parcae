@@ -41,17 +41,31 @@ def create_session(sess, url=None):
 def close_session(sess, session_id):
     """关闭浏览器 session（容忍失败）。
 
-    close_page=True：同时关闭浏览器 tab，避免测试套件累积上百个 tab。
-    历史：曾因 close_page=True 触发 Chrome CDP "Failed to open a new tab"（后续
-    create_session 500 + Chrome 崩溃）而改为 False，依赖 idle cleanup 兜底——但
-    idle 超时 900s，单轮测试后 page 全部残留（2026-09-03 实测 19 个 tab 泄漏）。
-    经 2026-08-05 验证该异常在当前 Playwright/Chrome 版本已不复现，恢复 True
-    （与 test_browser_e2e_full.py 的 close_session 决策一致）。
+    ⛔ 2026-11-02：这台浏览器可能被多个 agent / 多个测试进程共用。同一个 page
+    上可能还挂着别人的 session（`url_pattern` 接管、`force=true`、另一个 pytest
+    进程），`close_page=True` 会把别人的页一起关掉。所以先读
+    `/browser/sessions` 的 `page_ref_count`：共享时只解绑，独占时才关页。
+
+    close_page=True 的历史：避免测试套件累积上百个 tab（2026-09-03 实测 19 个泄漏）。
+    独占时仍保持这个行为。
     """
+    close_page = True
+    try:
+        r = sess.get(f"{BASE_URL}/browser/sessions", timeout=5)
+        if r.status_code == 200:
+            for s in r.json().get("sessions", []):
+                if s.get("session_id") != session_id:
+                    continue
+                # page_ref_count 是 2026-11-01 新增字段；老后端没有 → 按独占处理
+                if int(s.get("page_ref_count") or 1) > 1:
+                    close_page = False
+                break
+    except Exception:  # noqa: BLE001 - 查询失败不影响关闭本身
+        pass
     try:
         sess.post(
             f"{BASE_URL}/browser/sessions/close",
-            json={"session_id": session_id, "close_page": True},
+            json={"session_id": session_id, "close_page": close_page},
             timeout=10,
         )
     except Exception:
@@ -79,22 +93,36 @@ def navigate_to(sess, session_id, url, timeout=15.0):
 
 # ========== autouse 清理 fixture（与 test_browser_e2e_full.py 同构） ==========
 
+# 2026-11-01 事故：无条件关闭所有 session 会把用户真实标签页一起关掉
+# （当天 06:37 关没了用户开着的 neoschool 页面）。改为只清本套件新建的。
+_PREEXISTING_SESSIONS: set[str] | None = None
+
+
 @pytest.fixture(autouse=True)
 def clean_browser_sessions(real_browser):
-    """每条用例结束后清空 session 表，兜住用例失败/提前 return 漏关的路径。
+    """每条用例结束后清空**本套件建的** session，兜住用例失败/提前 return 漏关的路径。
 
-    close_page=True：同时关闭浏览器 tab，避免测试套件累积上百个 tab。
+    关页交给 `close_session` 判断：独占时关（避免累积上百个 tab），被共享时只解绑。
+    ⛔ 只关本套件新建的；测试开始前就存在的 session（用户真实的 tab）一律不碰。
     """
+    global _PREEXISTING_SESSIONS
+    if _PREEXISTING_SESSIONS is None:
+        try:
+            r0 = real_browser.get(f"{BASE_URL}/browser/sessions", timeout=10)
+            _PREEXISTING_SESSIONS = (
+                {s["session_id"] for s in r0.json().get("sessions", [])}
+                if r0.status_code == 200 else set()
+            )
+        except Exception:  # noqa: BLE001
+            _PREEXISTING_SESSIONS = set()
     yield
     r = real_browser.get(f"{BASE_URL}/browser/sessions")
     if r.status_code == 200:
         for s in r.json().get("sessions", []):
             sid = s.get("session_id")
-            if sid:
-                real_browser.post(
-                    f"{BASE_URL}/browser/sessions/close",
-                    json={"session_id": sid, "close_page": True}, timeout=10,
-                )
+            if sid and sid not in _PREEXISTING_SESSIONS:
+                # 共享页只解绑、不关页（close_session 内部按 page_ref_count 判断）
+                close_session(real_browser, sid)
 
 
 # ========== 场景 5：dialog waiter 真实并发 E2E ==========

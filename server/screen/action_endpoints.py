@@ -48,12 +48,14 @@ from server.screen.routes import (
     _COORDINATE_ACTIONS,
     _FOCUS_RETRY_DELAY,
     _KEYBOARD_ACTIONS,
+    NOT_ELEVATED_STATUS,
     _enforce_session_permission,
     _ensure_takeover_approved,
     _task_authorization_is_active,
     _touch_task_authorization_after_delivery,
     _verify_snapshot_freshness,
     logger,
+    not_elevated_message,
     router,
 )
 
@@ -202,8 +204,11 @@ def _verify_postcondition(expected: dict | None, pil_image) -> str:
 
 # ========== 端点 ==========
 
+# C901 例外（2026-10-24）：复杂度 81 / 阈值 80，超出部分全部来自 §0 提权闸门与 §6.8 UIA 融合分支。
+# 本函数 ~520 行，拆分属独立重构（需单独一轮测试验证），发版前不拆；0.55.0 之后按
+# 「闸门 → helper / UIA 融合 → helper」两步收敛，届时移除本 noqa。
 @router.post("/action", response_model=ActionResponse, operation_id="execute_action")
-def execute_action(req: ActionRequest):
+def execute_action(req: ActionRequest):  # noqa: C901
     """执行键鼠操作（含安全检查和确认机制）
 
     评估文档 P0 新约束：
@@ -221,14 +226,30 @@ def execute_action(req: ActionRequest):
     写入 apps/<process_name>.md 供下次使用。
     """
 
-    # 0. 会话权限检查（T14：副作用端点 403 拦截，无权限时 raise HTTPException(403)）
-    # 放在最前面——无权限 = 无入口，emergency/参数检查均无需进入。
+    # 0. 提权闸门（2026-10-22）：必须在 403 授权引导与 takeover 弹窗**之前**。
+    # 未提权时键鼠注入会被 UIPI 静默丢弃，先弹窗问用户、再让 agent 发现点击无效是错的
+    # （用户要求：不可用时直接拒绝并明确未提权）。
+    # 例外：strategy="uia_only" 的 click 走纯 UIA invoke（零键鼠事件），未提权也能成立，
+    # 由下面第 6.8 步的 UIA 融合分支判定；融合未命中直接 blocked，绝不回退键鼠。
+    if not _ADMIN_STATUS and not (req.action == "click" and req.strategy == "uia_only"):
+        return ActionResponse(
+            success=False,
+            status=NOT_ELEVATED_STATUS,
+            message=not_elevated_message("键鼠操控（execute_action）"),
+            focus_check_status="skipped",
+            transport_status="not_sent",
+            delivery_status="skipped",
+            postcondition_status="not_checked",
+        )
+
+    # 0.1 会话权限检查（T14：副作用端点 403 拦截，无权限时 raise HTTPException(403)）
+    # 提权闸门之后的第二道闸——无权限 = 无入口，emergency/参数检查均无需进入。
     # emergency 触发会同步 release session 到 no_permission，所以 Ctrl+` 后此处直接 403；
     # 若用户立刻重新授权，emergency cooldown 仍能在 step 1 拦截。
     session_status = _enforce_session_permission()
     current_mode = session_status.get("mode", "normal")
 
-    # 0.1 config 接线
+    # 0.2 config 接线
     from server.config import get_screen_config
     screen_cfg = get_screen_config()
     explicit_confirm = req.require_confirm is True
@@ -717,8 +738,14 @@ def focus_window(req: FocusWindowRequest):
 
     Tip — 激活前可先调 screen_match_app 查该软件经验，了解 UIA 友好度和已知坑。
     """
+    # 提权闸门（2026-10-22）：抢前台焦点靠 SetForegroundWindow/AttachThreadInput，
+    # 未提权必被 UIPI 拦下。放在 403 与弹窗之前，直接说清未提权。
     if not _ADMIN_STATUS:
-        return {"success": False, "message": "需要管理员权限才能激活窗口"}
+        return {
+            "success": False,
+            "status": NOT_ELEVATED_STATUS,
+            "message": not_elevated_message("窗口焦点激活（focus_window）"),
+        }
 
     # T14：副作用端点 403 拦截（focus_window 强抢前台焦点，属副作用操作）
     _enforce_session_permission()

@@ -396,10 +396,26 @@ class TestResetEndpoint:
             }],
             "provider_exhausted": {"ms": {"trigger_model": "qwen3-vl"}},
         }
-        monkeypatch.setattr(remote_vl_mod.remote_vl, "status", lambda: payload)
+        seen: dict = {}
+
+        def fake_status(use_case=None):
+            # Ticket 06：端点必须把 use_case 透传给 status()（链序由它决定）
+            seen["use_case"] = use_case
+            return payload
+
+        monkeypatch.setattr(remote_vl_mod.remote_vl, "status", fake_status)
         monkeypatch.setattr(remote_vl_mod.remote_vl, "reload_config", lambda: None)
 
         data = client.get("/vision/providers").json()
         assert data["providers"][0]["models"][0]["name"] == "qwen3-vl"
         # provider_exhausted 一并暴露：客户端只看 /vision/providers 时也能查到触发模型
         assert data["provider_exhausted"]["ms"]["trigger_model"] == "qwen3-vl"
+        # Ticket 06：默认走定位链（质量优先），并回显 use_case / 解冻倒计时
+        assert seen["use_case"] == "vl_vision"
+        assert data["use_case"] == "vl_vision"
+        assert "dead_reset_in_s" in data
+
+        # 换 OCR 链（便宜优先）时 use_case 也要如实透传下去
+        data2 = client.get("/vision/providers", params={"use_case": "vl_ocr"}).json()
+        assert seen["use_case"] == "vl_ocr"
+        assert data2["use_case"] == "vl_ocr"

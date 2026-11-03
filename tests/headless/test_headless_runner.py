@@ -1,18 +1,14 @@
-"""headless-agent-session Ticket 02 验收测试：headless_runner.py 主 agent 启动逻辑
+"""headless-agent-session Ticket 02 验收测试：headless_runner.py 主 agent 提交逻辑
 
 覆盖 Ticket 02 acceptance（temp/sdd/headless-agent-session/tickets.md）：
 - [x] 新建 headless_runner.py，实现 run_main_agent 函数签名
-- [x] import client.core.agent 各组件
-- [x] 组装 deps（base_url=http://127.0.0.1:8766，创建 asyncio.Event）
-- [x] 组装 config（session_id=f"headless-{uuid4.hex[:12]}"，mode="headless"）
-- [x] 调 facade.start(session_id, trigger_text)
-- [x] 从 EventStore 取主 agent 最后 20 条 assistant 消息
+- [x] session_id=f"headless-{uuid4.hex[:12]}"，mode="headless"
+- [x] 从 runtime 取主 agent 最后 20 条 assistant 消息
 - [x] 返回 MainAgentResult(session_id, outcome, last_assistant_messages)
-- [x] finally 块关 EventStore
-- [x] 单元测试：mock LLM 验证启动流程（不真实调 LLM）
-- [x] 单元测试：验证 session_id 格式（headless- 前缀）
-- [x] 单元测试：验证 mode="headless" 写入 sessions 表
-- [x] 单元测试：验证 trigger_text 传给 facade.start
+- [x] 单元测试：scripted runtime client 验证提交与结果处理
+
+butler-runtime T6 起：8766 进程不再组装 deps / 不跑 SessionFacade，
+run_main_agent 只做 submit → 等终态 → 取消息/账本。
 """
 
 from __future__ import annotations
@@ -26,15 +22,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
-    EventStore,
-    Message,
-    MockLLM,
-    MockToolExecutor,
-    SessionFacade,
+from fake_runtime import FakeRuntimeClient, assistant  # noqa: E402
+
+from lib.agent_runtime.event_store import EventStore  # noqa: E402
+from lib.agent_runtime.runtime_client import (  # noqa: E402
+    DEFAULT_WAIT_TIMEOUT,
+    RuntimeUnavailable,
 )
+from lib.agent_runtime.types import Message  # noqa: E402
+from server.activity_tracker import headless_runner as hr  # noqa: E402
 from server.activity_tracker.headless_runner import (  # noqa: E402
-    DEFAULT_BASE_URL,
     DEFAULT_JUDGE_MAX_ITERATIONS,
     HEADLESS_JUDGE_PREFIX,
     HEADLESS_MAIN_PREFIX,
@@ -43,12 +40,10 @@ from server.activity_tracker.headless_runner import (  # noqa: E402
     _extract_last_assistant_messages,
     _generate_judge_session_id,
     _generate_main_session_id,
-    get_interrupt_event,
-    interrupt_session,
+    _make_runtime_client,
+    _wait_timeout,
     parse_headless_config,
-    register_interrupt_event,
     run_main_agent,
-    unregister_interrupt_event,
 )
 
 # ============================================================================
@@ -111,54 +106,75 @@ def test_parse_headless_config_override():
 
 
 # ============================================================================
-# 3. interrupt registry（Ticket 07 提前留接口）
+# 3. runtime 客户端构造（T6：中断注册表已移入 runtime）
 # ============================================================================
 
 
-def test_interrupt_registry_register_and_get():
-    """Ticket 02/07: 注册 interrupt_event 后能查到。"""
-    ev = asyncio.Event()
-    register_interrupt_event("test-sess-1", ev)
-    try:
-        assert get_interrupt_event("test-sess-1") is ev
-    finally:
-        unregister_interrupt_event("test-sess-1")
+def test_make_runtime_client_uses_configured_runtime_url():
+    """T6: config.runtime_url 显式给出时，客户端直接用它。"""
+    client = _make_runtime_client(
+        HeadlessConfig(runtime_url="http://127.0.0.1:19999")
+    )
+    assert client.base_url == "http://127.0.0.1:19999"
 
 
-def test_interrupt_registry_unregister():
-    """Ticket 02/07: 清理后查不到。"""
-    ev = asyncio.Event()
-    register_interrupt_event("test-sess-2", ev)
-    unregister_interrupt_event("test-sess-2")
-    assert get_interrupt_event("test-sess-2") is None
+def test_make_runtime_client_env_override(monkeypatch):
+    """T6: 配置留空时按环境变量 PARCAE_RUNTIME_API 解析。"""
+    monkeypatch.setenv("PARCAE_RUNTIME_API", "127.0.0.1:18888")
+    client = _make_runtime_client(HeadlessConfig())
+    assert client.base_url == "http://127.0.0.1:18888"
 
 
-def test_interrupt_registry_unregister_idempotent():
-    """Ticket 02/07: 清理不存在的 session 不报错。"""
-    unregister_interrupt_event("nonexistent-sess")  # 不抛异常
-
-
-def test_interrupt_session_triggers_event():
-    """Ticket 02/07: interrupt_session 触发 event.set()。"""
-    ev = asyncio.Event()
-    register_interrupt_event("test-sess-3", ev)
-    try:
-        assert not ev.is_set()
-        result = interrupt_session("test-sess-3")
-        assert result is True
-        assert ev.is_set()
-    finally:
-        unregister_interrupt_event("test-sess-3")
-
-
-def test_interrupt_session_nonexistent_returns_false():
-    """Ticket 02/07: 中断不存在的 session 返回 False。"""
-    result = interrupt_session("nonexistent-sess")
-    assert result is False
+def test_wait_timeout_adds_margin_and_default():
+    """T6: 等终态的超时 = 墙钟预算 + 收尾余量；0 预算用默认超时。"""
+    assert _wait_timeout(60) == 180.0
+    assert _wait_timeout(0) == DEFAULT_WAIT_TIMEOUT
 
 
 # ============================================================================
-# 4. _extract_last_assistant_messages（Ticket 02 acceptance）
+# 4. run_main_agent 结果处理（scripted runtime client）
+# ============================================================================
+
+
+def test_run_main_agent_uses_runtime_outcome_status(monkeypatch):
+    """T6: 主 agent 的终态来自 runtime（interrupted 原样上报）。"""
+    fake = FakeRuntimeClient()
+    fake.on("headless", status="interrupted", stop_reason="user_interrupted")
+    monkeypatch.setattr(hr, "_make_runtime_client", lambda config: fake)
+
+    async def run():
+        return await run_main_agent(
+            trigger_text="test",
+            config=HeadlessConfig(),
+        )
+
+    result = asyncio.run(run())
+    assert result.error == ""
+    assert result.outcome is not None
+    assert result.outcome.status == "interrupted"
+    assert result.outcome.stop_reason == "user_interrupted"
+
+
+def test_run_main_agent_submit_failure_returns_error(monkeypatch):
+    """T6: runtime 提交失败 → MainAgentResult(error=...)，不抛出。"""
+    fake = FakeRuntimeClient()
+    fake.submit_error = RuntimeUnavailable("runtime down")
+    monkeypatch.setattr(hr, "_make_runtime_client", lambda config: fake)
+
+    async def run():
+        return await run_main_agent(
+            trigger_text="test",
+            config=HeadlessConfig(),
+        )
+
+    result = asyncio.run(run())
+    assert isinstance(result, MainAgentResult)
+    assert result.outcome is None
+    assert "runtime down" in result.error
+
+
+# ============================================================================
+# 5. _extract_last_assistant_messages（Ticket 02 acceptance）
 # ============================================================================
 
 
@@ -176,7 +192,7 @@ def test_extract_last_assistant_messages_returns_assistant_only(tmp_db_path):
             await store.append_message("s1", Message(role="assistant", content="hello 2", source="assistant"))
             await store.append_message("s1", Message(role="assistant", content="hello 3", source="assistant"))
 
-            msgs = await _extract_last_assistant_messages(store, "s1", 20)
+            msgs = _extract_last_assistant_messages(await store.load_messages("s1"), 20)
             assert len(msgs) == 3
             assert "hello 1" in msgs[0]
             assert "hello 2" in msgs[1]
@@ -198,14 +214,15 @@ def test_extract_last_assistant_messages_respects_count(tmp_db_path):
                     "s2", Message(role="assistant", content=f"msg {i}", source="assistant")
                 )
 
+            messages = await store.load_messages("s2")
             # count=20 取最后 20 条
-            msgs = await _extract_last_assistant_messages(store, "s2", 20)
+            msgs = _extract_last_assistant_messages(messages, 20)
             assert len(msgs) == 20
             assert "msg 5" in msgs[0]  # 第 6 条（index 5）是最早的
             assert "msg 24" in msgs[-1]  # 最后一条
 
             # count=3 取最后 3 条
-            msgs3 = await _extract_last_assistant_messages(store, "s2", 3)
+            msgs3 = _extract_last_assistant_messages(messages, 3)
             assert len(msgs3) == 3
             assert "msg 22" in msgs3[0]
             assert "msg 24" in msgs3[-1]
@@ -221,7 +238,7 @@ def test_extract_last_assistant_messages_empty_session(tmp_db_path):
         store.init()
         try:
             await store.create_session(session_id="s3", mode="headless")
-            msgs = await _extract_last_assistant_messages(store, "s3", 20)
+            msgs = _extract_last_assistant_messages(await store.load_messages("s3"), 20)
             assert msgs == []
         finally:
             store.close()
@@ -237,7 +254,7 @@ def test_extract_last_assistant_messages_no_assistant_msgs(tmp_db_path):
             await store.create_session(session_id="s4", mode="headless")
             await store.append_message("s4", Message(role="user", content="hi", source="user"))
             await store.append_message("s4", Message(role="user", content="again", source="user"))
-            msgs = await _extract_last_assistant_messages(store, "s4", 20)
+            msgs = _extract_last_assistant_messages(await store.load_messages("s4"), 20)
             assert msgs == []
         finally:
             store.close()
@@ -245,64 +262,36 @@ def test_extract_last_assistant_messages_no_assistant_msgs(tmp_db_path):
 
 
 # ============================================================================
-# 5. run_main_agent 端到端（mock LLM，不真实调 LLM）
+# 6. run_main_agent 端到端（scripted runtime client）
 # ============================================================================
 
 
 def test_run_main_agent_with_mock_llm(tmp_db_path, monkeypatch):
-    """Ticket 02: run_main_agent 用 MockLLM 跑通完整流程。
-
-    mock 策略：
-    - LLMPoolGateway → 工厂函数返回 MockLLM
-    - ToolRegistry → mock 类（refresh no-op）
-    - HttpClientToolExecutor → mock 类（接受 registry + base_url 参数）
+    """Ticket 02: run_main_agent 提交后从 runtime 读回终态/消息/账本。
 
     验证：
     - session_id 以 "headless-" 开头
-    - mode="headless" 写入 sessions 表
-    - trigger_text 传给 facade.start（user message 写入）
-    - 主 agent 跑完后能取到 assistant 消息
-    - MainAgentResult 含 session_id + outcome + last_assistant_messages
-    - finally 块关 EventStore（store.closed 后无法再读，间接验证）
-    - interrupt registry 注册后清理
+    - 以 mode="headless" 提交、trigger_text 原样发出
+    - 主 agent 的 assistant 消息从 runtime API 读回
+    - MainAgentResult 含 session_id + outcome + last_assistant_messages + evidence
     """
-    # 准备 MockLLM（脚本化响应）
-    mock_llm = MockLLM(default_text="headless test ok")
-
-    # mock LLMPoolGateway：替换为返回 MockLLM 的工厂
-    class MockLLMPoolGateway:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        async def call(self, request):
-            return await mock_llm.call(request)
-        async def stream(self, request):
-            async for ev in mock_llm.stream(request):
-                yield ev
-
-    # mock ToolRegistry：refresh no-op
-    class MockToolRegistry:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        def refresh(self, *, timeout: float = 10.0) -> int:
-            return 0
-
-    # mock HttpClientToolExecutor：接受 registry + base_url（签名兼容）
-    class MockHttpClientToolExecutor(MockToolExecutor):
-        def __init__(self, registry=None, base_url=DEFAULT_BASE_URL, **kwargs):
-            super().__init__(**kwargs)
-
-    # 关键：monkeypatch client.core.agent 模块内的类（headless_runner 函数内 import 的来源）
-    import client.core.agent as agent_pkg
-    monkeypatch.setattr(agent_pkg, "LLMPoolGateway", MockLLMPoolGateway)
-    monkeypatch.setattr(agent_pkg, "ToolRegistry", MockToolRegistry)
-    monkeypatch.setattr(agent_pkg, "HttpClientToolExecutor", MockHttpClientToolExecutor)
+    fake = FakeRuntimeClient()
+    fake.on(
+        "headless",
+        messages=[
+            {"role": "user", "content": "回复'headless test ok'即可，不要调任何工具"},
+            assistant("headless test ok"),
+        ],
+        tool_summary={"total": 0, "counts": {}, "non_success": [], "rejected_terminal_writes": 0},
+        total_tokens=42,
+    )
+    monkeypatch.setattr(hr, "_make_runtime_client", lambda config: fake)
 
     config = HeadlessConfig(
         trigger_text="回复'headless test ok'即可，不要调任何工具",
         max_iterations=5,
         # B2: 删 max_budget_usd 字段
         wall_clock_budget_secs=60,
-        db_path=tmp_db_path,
     )
 
     async def run():
@@ -322,174 +311,106 @@ def test_run_main_agent_with_mock_llm(tmp_db_path, monkeypatch):
     # 验证 outcome 存在
     assert result.outcome is not None
     assert result.outcome.session_id == result.session_id
+    assert result.outcome.status == "completed"
 
-    # 验证 mode="headless" 写入 sessions 表
-    # 注意：run_main_agent finally 块会关 store，需要重新打开验证
-    verify_store = EventStore(db_path=tmp_db_path)
-    verify_store.init()
-    try:
-        async def verify():
-            session = await verify_store.get_session(result.session_id)
-            assert session is not None
-            assert session.mode == "headless"
+    # 验证提交内容（mode / trigger_text / 资源限制）
+    assert len(fake.submits) == 1
+    submitted = fake.submits[0]
+    assert submitted["session_id"] == result.session_id
+    assert submitted["mode"] == "headless"
+    assert submitted["text"] == config.trigger_text
+    assert submitted["max_iterations"] == 5
 
-            # 验证 trigger_text 传给 facade.start（user message 写入）
-            messages = await verify_store.load_messages(result.session_id)
-            user_msgs = [m for m in messages if m.role == "user"]
-            assert len(user_msgs) >= 1
-            assert "headless test ok" in user_msgs[0].content
+    # 验证从 runtime 读回的 assistant 消息
+    assert len(result.last_assistant_messages) == 1
+    assert "headless test ok" in result.last_assistant_messages[-1]
 
-            # 验证主 agent 跑完后有 assistant 消息
-            assistant_msgs = [m for m in messages if m.role == "assistant"]
-            assert len(assistant_msgs) >= 1
-
-            # 验证 last_assistant_messages 含 assistant 内容
-            assert len(result.last_assistant_messages) >= 1
-            assert "headless test ok" in result.last_assistant_messages[-1]
-        asyncio.run(verify())
-    finally:
-        verify_store.close()
-
-    # 验证 interrupt registry 已清理（run_main_agent 结束后应 unregister）
-    assert get_interrupt_event(result.session_id) is None
+    # 验证执行账本
+    assert result.execution_evidence["total"] == 0
 
 
 def test_run_main_agent_with_explicit_session_id(tmp_db_path, monkeypatch):
     """Ticket 02: 支持外部传入 session_id（不自动生成）。"""
-    mock_llm = MockLLM(default_text="ok")
-
-    class MockLLMPoolGateway:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        async def call(self, request):
-            return await mock_llm.call(request)
-        async def stream(self, request):
-            async for ev in mock_llm.stream(request):
-                yield ev
-
-    class MockToolRegistry:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        def refresh(self, *, timeout: float = 10.0) -> int:
-            return 0
-
-    class MockHttpClientToolExecutor(MockToolExecutor):
-        def __init__(self, registry=None, base_url=DEFAULT_BASE_URL, **kwargs):
-            super().__init__(**kwargs)
-
-    import client.core.agent as agent_pkg
-    monkeypatch.setattr(agent_pkg, "LLMPoolGateway", MockLLMPoolGateway)
-    monkeypatch.setattr(agent_pkg, "ToolRegistry", MockToolRegistry)
-    monkeypatch.setattr(agent_pkg, "HttpClientToolExecutor", MockHttpClientToolExecutor)
+    fake = FakeRuntimeClient()
+    fake.on("headless", messages=[assistant("ok")])
+    monkeypatch.setattr(hr, "_make_runtime_client", lambda config: fake)
 
     explicit_sid = "headless-explicit-test1"
 
     async def run():
         return await run_main_agent(
             trigger_text="test",
-            config=HeadlessConfig(db_path=tmp_db_path, max_iterations=3),
+            config=HeadlessConfig(max_iterations=3),
             session_id=explicit_sid,
         )
 
     result = asyncio.run(run())
     assert result.session_id == explicit_sid
     assert result.error == ""
+    assert fake.submits[0]["session_id"] == explicit_sid
 
 
-def test_run_main_agent_registers_interrupt_event(tmp_db_path, monkeypatch):
-    """Ticket 02/07: run_main_agent 启动时注册 interrupt_event，结束后清理。"""
-    mock_llm = MockLLM(default_text="ok")
-
-    class MockLLMPoolGateway:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        async def call(self, request):
-            return await mock_llm.call(request)
-        async def stream(self, request):
-            async for ev in mock_llm.stream(request):
-                yield ev
-
-    class MockToolRegistry:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        def refresh(self, *, timeout: float = 10.0) -> int:
-            return 0
-
-    class MockHttpClientToolExecutor(MockToolExecutor):
-        def __init__(self, registry=None, base_url=DEFAULT_BASE_URL, **kwargs):
-            super().__init__(**kwargs)
-
-    import client.core.agent as agent_pkg
-    monkeypatch.setattr(agent_pkg, "LLMPoolGateway", MockLLMPoolGateway)
-    monkeypatch.setattr(agent_pkg, "ToolRegistry", MockToolRegistry)
-    monkeypatch.setattr(agent_pkg, "HttpClientToolExecutor", MockHttpClientToolExecutor)
-
-    captured_sid = []
+def test_run_main_agent_passes_resource_limits(tmp_db_path, monkeypatch):
+    """Ticket 02/11: 资源限制进入 submit 载荷（由 runtime 执行）。"""
+    fake = FakeRuntimeClient()
+    fake.on("headless", messages=[assistant("ok")])
+    monkeypatch.setattr(hr, "_make_runtime_client", lambda config: fake)
 
     async def run():
-        # 在 run_main_agent 内部无法直接检查 registry（因为是异步的），
-        # 但可以通过 monkeypatch facade.start 在调用时检查
-        original_start = SessionFacade.start
-
-        async def patched_start(self, session_id, text, *, mode="dialogue", model_override=""):
-            captured_sid.append(session_id)
-            # 验证此时 interrupt_event 已注册
-            ev = get_interrupt_event(session_id)
-            assert ev is not None, "interrupt_event should be registered during run"
-            return await original_start(self, session_id, text, mode=mode, model_override=model_override)
-
-        monkeypatch.setattr(SessionFacade, "start", patched_start)
         return await run_main_agent(
             trigger_text="test",
-            config=HeadlessConfig(db_path=tmp_db_path, max_iterations=3),
+            config=HeadlessConfig(
+                max_iterations=3,
+                wall_clock_budget_secs=45,
+                model="test-model",
+            ),
         )
 
     result = asyncio.run(run())
-    assert len(captured_sid) == 1
-    assert result.session_id == captured_sid[0]
-    # 结束后应已清理
-    assert get_interrupt_event(result.session_id) is None
+    assert result.error == ""
+    submitted = fake.submits[0]
+    assert submitted["max_iterations"] == 3
+    assert submitted["wall_clock_budget_secs"] == 45
+    assert submitted["model_override"] == "test-model"
 
 
-def test_run_main_agent_failure_returns_error(tmp_db_path, monkeypatch):
-    """Ticket 02: 内部异常时返回 MainAgentResult(error=...)，不抛出。"""
-    # mock LLMPoolGateway 抛异常
-    class FailingGateway:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        async def call(self, request):
-            raise RuntimeError("simulated LLM failure")
-        async def stream(self, request):
-            raise RuntimeError("simulated LLM failure")
-            yield  # unreachable: 让 stream 成为 async generator（noqa 无效，改注释说明）
-
-    class MockToolRegistry:
-        def __init__(self, base_url=DEFAULT_BASE_URL):
-            self.base_url = base_url
-        def refresh(self, *, timeout: float = 10.0) -> int:
-            return 0
-
-    class MockHttpClientToolExecutor(MockToolExecutor):
-        def __init__(self, registry=None, base_url=DEFAULT_BASE_URL, **kwargs):
-            super().__init__(**kwargs)
-
-    import client.core.agent as agent_pkg
-    monkeypatch.setattr(agent_pkg, "LLMPoolGateway", FailingGateway)
-    monkeypatch.setattr(agent_pkg, "ToolRegistry", MockToolRegistry)
-    monkeypatch.setattr(agent_pkg, "HttpClientToolExecutor", MockHttpClientToolExecutor)
+def test_run_main_agent_returns_execution_evidence(tmp_db_path, monkeypatch):
+    """T13: 执行账本从 runtime 读回（judge 的结构化证据）。"""
+    evidence = {
+        "total": 2,
+        "counts": {"completed": 1, "failed": 1},
+        "non_success": [{"id": "c2", "name": "exec_cmd", "status": "failed"}],
+        "rejected_terminal_writes": 0,
+    }
+    fake = FakeRuntimeClient()
+    fake.on("headless", messages=[assistant("done")], tool_summary=evidence)
+    monkeypatch.setattr(hr, "_make_runtime_client", lambda config: fake)
 
     async def run():
         return await run_main_agent(
             trigger_text="test",
-            config=HeadlessConfig(db_path=tmp_db_path, max_iterations=3),
+            config=HeadlessConfig(),
         )
 
-    # SessionRunner 内部可能捕获 LLM 异常转为 failed outcome，也可能冒泡
-    # 无论哪种，run_main_agent 不应抛出，应返回 MainAgentResult
+    result = asyncio.run(run())
+    assert result.error == ""
+    assert result.execution_evidence == evidence
+
+
+def test_run_main_agent_runtime_unavailable_returns_error(tmp_db_path, monkeypatch):
+    """Ticket 02: runtime 不可达时返回 MainAgentResult(error=...)，不抛出。"""
+    fake = FakeRuntimeClient()
+    fake.submit_error = RuntimeUnavailable("cannot reach butler runtime")
+    monkeypatch.setattr(hr, "_make_runtime_client", lambda config: fake)
+
+    async def run():
+        return await run_main_agent(
+            trigger_text="test",
+            config=HeadlessConfig(max_iterations=3),
+        )
+
     result = asyncio.run(run())
     assert isinstance(result, MainAgentResult)
     assert result.session_id.startswith(HEADLESS_MAIN_PREFIX)
-    # 可能 outcome 非 None（failed status）或 error 非空（异常冒泡被 try/except 捕获）
-    # 两种都算 pass，关键是 run_main_agent 不抛出
-    # interrupt registry 仍应清理
-    assert get_interrupt_event(result.session_id) is None
+    assert result.outcome is None
+    assert "cannot reach butler runtime" in result.error

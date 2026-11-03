@@ -28,7 +28,7 @@ deletion test 验证：删除 compat shim 后复杂度集中在 `key_store.py`�
 ## Decision
 
 1. **`UseCaseDef` + `USE_CASE_REGISTRY` + `TIER_NAMES` + `_LEGACY_TIER_MAP` + `SENSITIVE_USES` 迁入 `types.py`**：这些都是纯数据声明（frozen dataclass + dict literal + set comprehension），与 `LLMKey`/`ProviderPolicy` 同属"数据结构"层。`types.py` 不再 lazy import `key_store`。
-2. **`key_store.py` 反向导入这些符号**：`from server.llm_pool.types import USE_CASE_REGISTRY, ...` 保持外部 `from server.llm_pool.key_store import USE_CASE_REGISTRY` 兼容（`apikey.py`、`tests/test_key_store.py` 等无需改动）。
+2. **`key_store.py` 反向导入这些符号**：`from server.llm_pool.types import USE_CASE_REGISTRY, ...` 保持外部 `from server.llm_pool.key_store import USE_CASE_REGISTRY` 兼容（`apikey.py`、`tests/llm_vision/test_key_store.py` 等无需改动）。
 3. **`key_manager.py` 有用函数迁入 `key_store.py` 末尾**：`_load_provider_policy`、`_get_status_dict`、`_load_keys_records`、`_read_text_lines`、`_extract_key_records_from_file`、`_collect_key_records_from_files`。这些与 `key_store._read_raw_keys_file`/`_load_keys_cached` 同属"key 文件读写"职责。
 4. **`__init__.py` 改为从 `key_store` 导入**：用 `as` 别名保留 compat 名称（`load_provider_keys`/`check_keys_health`/`cleanup_expired_keys`），调用方可逐步切换到 `key_store` 原名，无需一次性改完全项目。
 5. **删除死代码**：`_TEST_MESSAGES`、`HEALTH_CHECK_MAX_FAILS`（注：`key_store.py` 自己已有同名常量）、`save_tested_keys`、`_save_keys_records`、`_backup_keys_file`、`_should_run_health_check_legacy`、`load_keys_from_tested_file`。

@@ -62,8 +62,7 @@ class TestParseHeadlessConfigComplete:
             "judge_max_iterations": 5,
             # B2: 删 judge_max_budget_usd 配置项
             "judge_wall_clock_budget_secs": 120,
-            "base_url": "http://127.0.0.1:9999",
-            "db_path": "/tmp/test_agent.db",
+            "runtime_url": "http://127.0.0.1:19999",
         }
         cfg = parse_headless_config(cfg_dict)
         assert cfg.trigger_text == "查 dmca-backup 日志"
@@ -77,8 +76,7 @@ class TestParseHeadlessConfigComplete:
         assert cfg.judge_max_iterations == 5
         # B2: 删 judge_max_budget_usd 字段
         assert cfg.judge_wall_clock_budget_secs == 120
-        assert cfg.base_url == "http://127.0.0.1:9999"
-        assert cfg.db_path == "/tmp/test_agent.db"
+        assert cfg.runtime_url == "http://127.0.0.1:19999"
 
     def test_empty_config_all_defaults(self):
         """空配置：所有字段用默认值（spec 默认值）。"""
@@ -97,9 +95,8 @@ class TestParseHeadlessConfigComplete:
         assert cfg.judge_max_iterations == 10
         # B2: 删 judge_max_budget_usd 字段
         assert cfg.judge_wall_clock_budget_secs == 300
-        # 其他默认值
-        assert cfg.base_url == "http://127.0.0.1:8766"
-        assert cfg.db_path == ""
+        # 其他默认值：runtime 地址留空 = 读运行时声明文件
+        assert cfg.runtime_url == ""
 
     def test_partial_config_uses_defaults_for_missing_fields(self):
         """部分配置：缺失字段用默认值。"""
@@ -177,10 +174,10 @@ class TestDefaultValues:
         # B2: 删 judge_max_budget_usd 字段
         assert cfg.judge_wall_clock_budget_secs == 300  # 5 分钟
 
-    def test_default_base_url(self):
-        """默认 base_url 指向后端 8766 端口。"""
+    def test_default_runtime_url(self):
+        """默认 runtime_url 为空 = 按运行时声明文件解析。"""
         cfg = HeadlessConfig()
-        assert cfg.base_url == "http://127.0.0.1:8766"
+        assert cfg.runtime_url == ""
 
     def test_default_one_shot_is_false(self):
         """默认 one_shot=False（周期性任务），一次性任务需显式设 true。"""

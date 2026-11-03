@@ -56,17 +56,11 @@ class MemoryConfig:
     # --- 维护器 (maintainer) ---
     maintain_interval_hours: int = 6          # 维护器运行间隔（小时）
     maintain_stale_days: int = 7              # 超过 N 天未更新视为 stale
-    maintain_enable_validate: bool = True     # 是否启用 LLM 验证 stale 记忆
-    # v5：验证器一次能看到多少字符。旧值 800 是误判主因——实测 120/151 条 fact
-    # 超过 800 字符，且 81 条的前 800 字符以 JSON 元数据脚手架开头，
-    # cheap 模型因此给出"内容被截断/乱码/无语义"的 archive 判决。
-    validate_preview_chars: int = 2400
-    # v5：单轮验证条数上限。archive 标签改为可过期重验后会有一次性积压
-    # （实测 109 条 archive），限流避免把 cheap 池 quota 一次打空。
-    validate_batch_limit: int = 25
-    # v5：同一条记忆两次验证的最小间隔（天）。此前 keep/update 每 6 小时
-    # 就被 aging 重新置回 pending，等于对每条 stale 记忆无限重验。
-    validate_revalidate_days: int = 30
+    # 2026-10-31 删除 LLM 验证器，连带删掉四个开关（enable_validate / preview_chars /
+    # batch_limit / revalidate_days）。理由：162 次判定 157 次 keep，唯一能执行的
+    # archive 判决又从不执行，每天最多烧 20 万输入 token 只换来日志。
+    # 形态检查已移交中枢 L7 的 G-* 判据；真伪交给人看（`30_架构与设计/28` §2.6）。
+    # 旧 config.toml 里 [memory.maintain] 的这几个键会被**静默忽略**，删不删都不影响运行。
 
     # --- 清理 ---
     orphan_cleanup_days: int = 30  # 孤立记忆清理阈值（已压缩消息）
@@ -145,15 +139,8 @@ def get_memory_config() -> MemoryConfig:
             cfg.maintain_interval_hours = int(maintain["interval_hours"])
         if "stale_days" in maintain:
             cfg.maintain_stale_days = int(maintain["stale_days"])
-        if "enable_validate" in maintain:
-            cfg.maintain_enable_validate = bool(maintain["enable_validate"])
-        # v5：验证器可见窗口 / 单轮条数 / 重验间隔
-        if "preview_chars" in maintain:
-            cfg.validate_preview_chars = int(maintain["preview_chars"])
-        if "batch_limit" in maintain:
-            cfg.validate_batch_limit = int(maintain["batch_limit"])
-        if "revalidate_days" in maintain:
-            cfg.validate_revalidate_days = int(maintain["revalidate_days"])
+        # 2026-10-31 起不再解析 enable_validate / preview_chars / batch_limit /
+        # revalidate_days：验证器已删除，留着解析只会让人以为还能开回来。
 
         # Evidence Ledger 子配置（A）
         if "enable_evidence_ledger" in mem:
@@ -181,12 +168,12 @@ def get_memory_config() -> MemoryConfig:
     except Exception as e:
         logger.warning(f"加载 config.toml [memory] 失败，使用默认配置: {e}")
 
-    # 环境变量覆盖（测试隔离用）：LOCALAGENT_MEMORY_DB_PATH / LOCALAGENT_MEMORY_RECENT_DIR
+    # 环境变量覆盖（测试隔离用）：PARCAE_MEMORY_DB_PATH / PARCAE_MEMORY_RECENT_DIR
     # 优先级高于 config.toml，确保测试进程可重定向到临时 DB，不污染生产 memory.db
-    env_db_path = os.environ.get("LOCALAGENT_MEMORY_DB_PATH", "").strip()
+    env_db_path = os.environ.get("PARCAE_MEMORY_DB_PATH", "").strip()
     if env_db_path:
         cfg.db_path = env_db_path
-    env_recent_dir = os.environ.get("LOCALAGENT_MEMORY_RECENT_DIR", "").strip()
+    env_recent_dir = os.environ.get("PARCAE_MEMORY_RECENT_DIR", "").strip()
     if env_recent_dir:
         cfg.recent_dir = env_recent_dir
 

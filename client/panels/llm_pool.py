@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
     QStackedWidget,
     QTableWidget,
@@ -30,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from client.core.http_client import HttpClient
 from client.core.panel_base import PanelBase, PanelMeta
-from lib.ui import tokens
+from lib.ui import icon_button, tokens
 from lib.ui.theme import set_kind, set_text_role
 
 # Tier 颜色
@@ -61,6 +62,43 @@ def _section_label(text: str) -> QLabel:
     return lbl
 
 
+# VL 降级链视角（Task 06）：顺序由 use_case 决定，面板必须显式说明在看哪条链。
+# 取值与 server/llm_pool/key_store.py::_MODEL_ORDER_DESC_USE_CASES 对应：
+# 只有 vl_vision 是 tier 降序（质量优先），其余升序（便宜优先）。
+_VL_USE_CASES = [
+    ("vl_vision", "视觉定位（质量优先）"),
+    ("vl_ocr", "截图 OCR（便宜优先）"),
+    ("vl_activity_tracker", "活动追踪（便宜优先）"),
+]
+_VL_DEFAULT_USE_CASE = "vl_vision"
+
+# 模型在降级链里的角色 → 颜色（只用设计系统语义 token，不新增 hex）
+_VL_ROLE_COLORS = {
+    "在服务": "SUCCESS_TEXT",
+    "今日失效": "DANGER_TEXT",
+    "待命": "TEXT_SECONDARY",
+    "未启用": "TEXT_TERTIARY",
+}
+
+
+def _role_color(role: str) -> str:
+    return getattr(tokens, _VL_ROLE_COLORS.get(role, "TEXT_SECONDARY"), tokens.TEXT_SECONDARY)
+
+
+def _fmt_countdown(seconds) -> str:
+    """把"距 00:00 解冻"的秒数格式化成 3h12m / 48m / 已到点"""
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    if s <= 0:
+        return "已到点"
+    h, m = divmod(s // 60, 60)
+    if h > 0:
+        return f"{h}h{m:02d}m"
+    return f"{m}m"
+
+
 class ModelPoolPanel(PanelBase):
     """模型池监控面板（含 LLM/VL/OCR/AIGC 子面板）"""
 
@@ -83,12 +121,22 @@ class ModelPoolPanel(PanelBase):
         self._pool_recent_calls: dict | None = None
         # VL 数据
         self._vl_providers: dict | None = None
+        # VL 降级链视角（Ticket 06）：决定 /vision/providers 的 models[] 顺序
+        self._vl_use_case: str = _VL_DEFAULT_USE_CASE
+        self._vl_dead_reset_in_s: int = 0
+        self._vl_thread = None
         self._refresh_btn: QPushButton | None = None
         self._refresh_thread = None
         # 摘要 labels（按子面板分组）
         self._llm_summary_labels: dict[str, QLabel] = {}
         self._vl_summary_labels: dict[str, QLabel] = {}
         self._ocr_summary_labels: dict[str, QLabel] = {}
+        # OCR 模型控制（加载/卸载/常驻）：真源在后端，面板只发命令 + 回读 /health
+        self._ocr_keep_state: bool = False
+        self._ocr_busy: bool = False
+        self._ocr_load_btn: QPushButton | None = None
+        self._ocr_unload_btn: QPushButton | None = None
+        self._ocr_keep_btn: QPushButton | None = None
         # 子面板切换
         self._subcombo: QComboBox | None = None
         self._sub_stack: QStackedWidget | None = None
@@ -372,28 +420,40 @@ class ModelPoolPanel(PanelBase):
         layout = QVBoxLayout(w)
         layout.setContentsMargins(0, 6, 0, 0)
         layout.setSpacing(6)
-        hint = QLabel("VL providers 详情（来自 /vision/providers；标记为隐私不安全）")
-        set_text_role(hint, "caption")
-        layout.addWidget(hint)
 
-        self._vl_providers_table = QTableWidget(0, 8)
-        self._vl_providers_table.setHorizontalHeaderLabels([
-            "Label", "Model", "可用", "并发", "冷却(s)", "隐私", "Base URL", "最近错误",
+        head = QHBoxLayout()
+        hint = QLabel("VL 降级链（来自 /vision/providers；子行顺序=该视角下的真实调用顺序；标记为隐私不安全）")
+        set_text_role(hint, "caption")
+        head.addWidget(hint)
+        head.addStretch()
+        use_case_label = QLabel("链路视角:")
+        set_text_role(use_case_label, "secondary")
+        head.addWidget(use_case_label)
+        self._vl_use_case_combo = QComboBox()
+        for value, text in _VL_USE_CASES:
+            self._vl_use_case_combo.addItem(text, userData=value)
+        self._vl_use_case_combo.setToolTip(
+            "决定降级链的遍历方向：定位兜底质量问题（tier 降序），\n"
+            "高频截图 OCR 成本优先（tier 升序）。切换后重新拉取该视角的链。"
+        )
+        self._vl_use_case_combo.currentIndexChanged.connect(self._on_vl_use_case_changed)
+        head.addWidget(self._vl_use_case_combo)
+        layout.addLayout(head)
+
+        self._vl_providers_tree = QTreeWidget()
+        self._vl_providers_tree.setColumnCount(6)
+        self._vl_providers_tree.setHeaderLabels([
+            "Key / Model", "角色", "Tier", "并发", "说明 · 原因", "操作",
         ])
-        self._vl_providers_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._vl_providers_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._vl_providers_table.setAlternatingRowColors(True)
-        hdr = self._vl_providers_table.horizontalHeader()
-        hdr.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        hdr.resizeSection(0, 140)
-        hdr.resizeSection(2, 60)
-        hdr.resizeSection(3, 80)
-        hdr.resizeSection(4, 80)
-        hdr.resizeSection(5, 60)
-        hdr.resizeSection(6, 200)
-        self._vl_providers_table.verticalHeader().setVisible(False)
-        layout.addWidget(self._vl_providers_table, 1)
+        self._vl_providers_tree.setAlternatingRowColors(True)
+        vhdr = self._vl_providers_tree.header()
+        vhdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        vhdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        vhdr.resizeSection(1, 90)
+        vhdr.resizeSection(2, 50)
+        vhdr.resizeSection(3, 70)
+        vhdr.resizeSection(5, 60)
+        layout.addWidget(self._vl_providers_tree, 1)
         return w
 
     def _build_vl_hours_tab(self) -> QWidget:
@@ -425,18 +485,50 @@ class ModelPoolPanel(PanelBase):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
 
-        # 行 1: OCR 加载状态
+        # 行 1: OCR 状态摘要
         row1 = QHBoxLayout()
         row1.setSpacing(8)
         row1.addWidget(_section_label("OCR 模块"))
         for key, label_text in [
             ("ocr_loaded", "OCR 加载"),
-            ("keep_models", "Keep Models"),
+            ("keep_models", "常驻"),
+            ("idle", "空闲回收"),
             ("ocr_model", "OCR 模型"),
         ]:
             row1.addWidget(self._make_summary_card(key, label_text, self._ocr_summary_labels))
         row1.addStretch()
         layout.addLayout(row1)
+
+        # 行 2: 模型控制（显式加载/卸载 + 常驻开关）
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)
+        row2.addWidget(_section_label("模型控制"))
+
+        self._ocr_load_btn = QPushButton("加载模型")
+        self._ocr_load_btn.setToolTip("预加载 PaddleOCR 到内存（冷启动 10–30s，之后秒级响应）")
+        self._ocr_load_btn.clicked.connect(self._on_ocr_load_clicked)
+        row2.addWidget(self._ocr_load_btn)
+
+        self._ocr_unload_btn = QPushButton("卸载模型")
+        self._ocr_unload_btn.setToolTip("立即卸载并释放显存；下次 OCR 调用会重新冷加载")
+        self._ocr_unload_btn.clicked.connect(self._on_ocr_unload_clicked)
+        row2.addWidget(self._ocr_unload_btn)
+
+        self._ocr_keep_btn = QPushButton("开启常驻")
+        self._ocr_keep_btn.setToolTip("开启后 OCR 加载一次即常驻内存，不参与空闲回收")
+        self._ocr_keep_btn.clicked.connect(self._on_ocr_keep_clicked)
+        row2.addWidget(self._ocr_keep_btn)
+
+        row2.addStretch()
+        layout.addLayout(row2)
+
+        hint = QLabel(
+            "关闭常驻后，OCR 空闲超过配置秒数（默认 10s）无请求会自动卸载并释放显存，"
+            "下面「空闲回收」卡显示倒计时；下次 OCR 调用会冷启动 10–30s。"
+        )
+        set_text_role(hint, "secondary")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
         layout.addStretch()
         return w
@@ -480,6 +572,7 @@ class ModelPoolPanel(PanelBase):
             self._pool_models = None
             self._pool_recent_calls = None
             self._vl_providers = None
+            self._vl_dead_reset_in_s = 0
 
     @Slot(dict)
     def on_health_changed(self, health: dict) -> None:
@@ -488,6 +581,10 @@ class ModelPoolPanel(PanelBase):
         self._update_llm_summary_from_health()
         self._update_vl_summary_from_health()
         self._update_ocr_summary_from_health()
+        # 链状态并入既有 health 轮询（Ticket 06）：只在本面板可见且没有在飞请求时拉。
+        # 判定用 isVisible()，测试里未 show() 的面板不会产生额外请求。
+        if self.isVisible():
+            self._vl_refresh_async()
 
     # —— 子面板切换 ——
 
@@ -509,9 +606,10 @@ class ModelPoolPanel(PanelBase):
         from PySide6.QtCore import QThread
 
         class RefreshThread(QThread):
-            def __init__(self, http):
+            def __init__(self, http, use_case):
                 super().__init__()
                 self._http = http
+                self._use_case = use_case
                 self.health = None
                 self.pool_status = None
                 self.pool_models = None
@@ -526,9 +624,11 @@ class ModelPoolPanel(PanelBase):
                     self.pool_recent_calls = self._http.get(
                         "/llm/pool/recent-calls", params={"limit": 20}
                     )
-                    self.vl_providers = self._http.get("/vision/providers")
+                    self.vl_providers = self._http.get(
+                        "/vision/providers", params={"use_case": self._use_case}
+                    )
 
-        self._refresh_thread = RefreshThread(self._http)
+        self._refresh_thread = RefreshThread(self._http, self._vl_use_case)
         self._refresh_thread.finished.connect(self._on_refresh_done)
         self._set_loading(True)
         self._refresh_thread.start()
@@ -547,7 +647,43 @@ class ModelPoolPanel(PanelBase):
         self._pool_models = t.pool_models
         self._pool_recent_calls = t.pool_recent_calls
         self._vl_providers = t.vl_providers
+        self._vl_dead_reset_in_s = int((t.vl_providers or {}).get("dead_reset_in_s", 0) or 0)
         self._update_all()
+
+    def _vl_refresh_async(self) -> None:
+        """只拉 VL 链路（/vision/providers?use_case=…）。
+
+        并入既有 health 轮询：/health 每 BACKEND_POLL_INTERVAL_MS 一次，
+        本方法由 on_health_changed 触发，于是"今日失效/解冻倒计时/复位结果"
+        不用切面板或点刷新就自己更新。复用客户端既有常量，面板不写死数字。
+        """
+        if self._vl_thread is not None and self._vl_thread.isRunning():
+            return
+        from PySide6.QtCore import QThread
+
+        class VLThread(QThread):
+            def __init__(self, http, use_case):
+                super().__init__()
+                self._http = http
+                self._use_case = use_case
+                self.payload = None
+
+            def run(self):
+                self.payload = self._http.get(
+                    "/vision/providers", params={"use_case": self._use_case}
+                )
+
+        self._vl_thread = VLThread(self._http, self._vl_use_case)
+        self._vl_thread.finished.connect(self._on_vl_refresh_done)
+        self._vl_thread.start()
+
+    def _on_vl_refresh_done(self) -> None:
+        t = self._vl_thread
+        if t is None or t.payload is None:
+            return
+        self._vl_providers = t.payload
+        self._vl_dead_reset_in_s = int(t.payload.get("dead_reset_in_s", 0) or 0)
+        self._update_vl_providers_tree()
 
     # —— 更新 UI ——
 
@@ -559,7 +695,7 @@ class ModelPoolPanel(PanelBase):
         self._update_llm_models_table()
         self._update_llm_calls_table()
         self._update_vl_summary_from_health()
-        self._update_vl_providers_table()
+        self._update_vl_providers_tree()
         self._update_vl_hours_table()
         self._update_ocr_summary_from_health()
 
@@ -986,57 +1122,203 @@ class ModelPoolPanel(PanelBase):
         )
         self._vl_summary_labels["vl_last_call"].setText(str(last_call))
 
-    def _update_vl_providers_table(self) -> None:
-        """更新 VL providers 表"""
-        table = self._vl_providers_table
-        table.setRowCount(0)
+    def _update_vl_providers_tree(self) -> None:
+        """把 VL 降级链画成 key→model 两层树（Ticket 06）。
+
+        一行一个 key，子行是该 key 在该视角下的模型（顺序=真实调用顺序）。
+        "在服务"= 这次会先调的那个；"今日失效"= 判死并给出原因与解冻倒计时；
+        "待命"= 还能用但排在后面；"未启用"= keys.json 里被关掉的 vl 模型。
+        """
+        tree = self._vl_providers_tree
+        tree.clear()
         vp = self._vl_providers or {}
         if not vp.get("enabled"):
-            table.setRowCount(1)
-            table.setItem(0, 0, self._placeholder_item("（VL 未启用）"))
+            self._add_tree_placeholder_row(tree, "（VL 未启用）")
             return
         providers = vp.get("providers", []) or []
         if not providers:
-            table.setRowCount(1)
-            table.setItem(0, 0, self._placeholder_item("（无 VL provider）"))
+            self._add_tree_placeholder_row(tree, "（无 VL provider）")
             return
-        table.setRowCount(len(providers))
-        for i, p in enumerate(providers):
-            label = p.get("label") or p.get("key_id", "?")
-            model = p.get("model", "?") or "?"
-            available = bool(p.get("available", False))
-            active = p.get("active_count", 0)
-            max_c = p.get("max_concurrency", 0)
-            cooldown = p.get("cooldown_remaining", 0)
-            privacy = bool(p.get("privacy_warning", ""))
-            base_url = p.get("base_url", "") or ""
-            last_error = p.get("last_error", "") or ""
+        for p in providers:
+            item = self._build_vl_provider_item(p)
+            tree.addTopLevelItem(item)
+            # 行内复位按钮必须在 item 入树之后再挂：QTreeWidget.setItemWidget 对
+            # 尚未入树的 item 不生效（挂上去也取不回来）。
+            self._attach_vl_reset_button(item, p)
+        tree.expandAll()
+        # 顶部摘要的 Provider/Model 也跟随当前视角，免得"摘要说 A、链首行说 B"
+        # （这正是 Ticket 03 留下的"状态口 current ≠ 真实选路"缺口）。
+        for p in providers:
+            if p.get("available"):
+                lbl = p.get("label") or p.get("key_id", "")
+                model = p.get("model", "") or "—"
+                self._vl_summary_labels["vl_provider"].setText(str(lbl or "—"))
+                self._vl_summary_labels["vl_model"].setText(str(model))
+                self._vl_summary_labels["vl_model"].setToolTip(
+                    f"当前链路视角: {self._vl_use_case}"
+                )
+                break
 
-            cells = [
-                label,
-                model,
-                "✓" if available else "✗",
-                f"{active}/{max_c}",
-                f"{cooldown}",
-                "⚠️" if privacy else "✓",
-                base_url,
-                last_error,
-            ]
-            for col, txt in enumerate(cells):
-                item = QTableWidgetItem(txt)
-                if col == 0:
-                    item.setForeground(QColor(tokens.TEXT_PRIMARY))
-                elif col == 2:
-                    item.setForeground(QColor(tokens.SUCCESS_TEXT if available else tokens.DANGER_TEXT))
-                elif col == 4 and cooldown > 0:
-                    item.setForeground(QColor(tokens.WARNING_TEXT))
-                elif col == 5:
-                    item.setForeground(QColor(tokens.WARNING_TEXT if privacy else tokens.SUCCESS_TEXT))
-                elif col == 7 and last_error:
-                    item.setForeground(QColor(tokens.DANGER_TEXT))
-                else:
-                    item.setForeground(QColor(tokens.TEXT_SECONDARY))
-                table.setItem(i, col, item)
+    def _build_vl_provider_item(self, p: dict) -> QTreeWidgetItem:
+        label = p.get("label") or p.get("key_id", "?")
+        key_id = p.get("key_id", "")
+        available = bool(p.get("available", False))
+        active = p.get("active_count", 0)
+        max_c = p.get("max_concurrency", 0)
+        cooldown = float(p.get("cooldown_remaining", 0) or 0)
+        privacy = p.get("privacy_warning", "") or ""
+        base_url = p.get("base_url", "") or ""
+        last_error = p.get("last_error", "") or ""
+        models = p.get("models", []) or []
+        dead_models = [m for m in models if m.get("dead_today")]
+
+        if dead_models and available:
+            key_role, key_color = "警告", tokens.WARNING_TEXT
+        elif dead_models:
+            key_role, key_color = "全判死", tokens.DANGER_TEXT
+        elif cooldown > 0:
+            key_role, key_color = f"冷却 {cooldown:.0f}s", tokens.WARNING_TEXT
+        elif available:
+            key_role, key_color = "可用", tokens.SUCCESS_TEXT
+        else:
+            key_role, key_color = "不可用", tokens.TEXT_TERTIARY
+
+        privacy_tag = " ⚠️" if privacy else ""
+        item = QTreeWidgetItem([
+            f"{label}{privacy_tag}",
+            key_role,
+            "—",
+            f"{active}/{max_c}",
+            last_error[:120],
+            "",
+        ])
+        item.setForeground(0, QColor(tokens.TEXT_PRIMARY))
+        item.setForeground(1, QColor(key_color))
+        item.setForeground(2, QColor(tokens.TEXT_TERTIARY))
+        item.setForeground(4, QColor(tokens.DANGER_TEXT if last_error else tokens.TEXT_TERTIARY))
+
+        tip = [f"key_id: {key_id}"]
+        if base_url:
+            tip.append(f"base_url: {base_url}")
+        if privacy:
+            tip.append(f"隐私不安全: {privacy}")
+        if last_error:
+            tip.append(f"最近错误: {last_error}")
+        if dead_models:
+            tip.append(
+                "今日判死: " + "、".join(m.get("name", "?") for m in dead_models)
+                + f"（{_fmt_countdown(self._vl_dead_reset_in_s)} 后自动解冻）"
+            )
+        item.setToolTip(0, "\n".join(tip))
+        item.setToolTip(4, "\n".join(tip))
+
+        # ⛔ 不重排：models[] 的顺序就是后端给的降级链顺序，重排等于骗人
+        for m in models:
+            item.addChild(self._build_vl_model_item(m))
+
+        return item
+
+    def _attach_vl_reset_button(self, item: QTreeWidgetItem, p: dict) -> None:
+        """行内复位（Ticket 06）：只有"今天真有判死模型"的行才给动作。
+
+        动作走后端唯一入口 POST /vision/reset；没有判死模型的行说明为什么没有按钮。
+        """
+        key_id = p.get("key_id", "")
+        dead_models = [m for m in (p.get("models", []) or []) if m.get("dead_today")]
+        if not dead_models:
+            item.setText(5, "—")
+            item.setForeground(5, QColor(tokens.TEXT_TERTIARY))
+            item.setToolTip(5, "本条 key 今日没有判死模型，无需复位")
+            return
+        btn = icon_button("refresh", "复位今日判死标记", color=tokens.WARNING_TEXT)
+        btn.setToolTip(
+            f"清除今日 {len(dead_models)} 条 (key,model) 判死标记与 key 级冷却，\n"
+            "让上游已放回的模型立刻重新参与选路（不必等次日 00:00）。\n"
+            "注：后端复位入口是全局的，会一并清掉其它 key 的当日标记。"
+        )
+        btn.clicked.connect(lambda _e, k=key_id, b=btn: self._on_vl_reset_clicked(k, b))
+        item.setToolTip(5, "复位今日全部判死标记")
+        self._vl_providers_tree.setItemWidget(item, 5, btn)
+
+    @staticmethod
+    def _vl_model_role(m: dict) -> str:
+        """模型在链里的角色（Ticket 06）：在服务 / 今日失效 / 待命 / 未启用"""
+        if m.get("dead_today"):
+            return "今日失效"
+        if not m.get("enabled", True):
+            return "未启用"
+        if m.get("current"):
+            return "在服务"
+        return "待命"
+
+    def _build_vl_model_item(self, m: dict) -> QTreeWidgetItem:
+        name = m.get("name", "?") or "?"
+        role = self._vl_model_role(m)
+        tier = m.get("tier")
+        tier_txt = f"T{tier}" if isinstance(tier, int) else "—"
+        reason = (m.get("dead_reason") or "").strip()
+
+        note = ""
+        if role == "今日失效":
+            countdown = _fmt_countdown(self._vl_dead_reset_in_s)
+            note = f"{reason or '上游判定永久不可用'} · {countdown} 后解冻"
+        elif role == "在服务":
+            note = "本次调用会先选它"
+        elif role == "未启用":
+            note = "keys.json 里已停用，不参与选路"
+        elif role == "待命":
+            note = "前面模型被判死时按序接班"
+
+        item = QTreeWidgetItem([f"└ {name}", role, tier_txt, "—", note, ""])
+        item.setForeground(0, QColor(tokens.TEXT_SECONDARY))
+        item.setForeground(1, QColor(_role_color(role)))
+        item.setForeground(2, QColor(_tier_color(tier if isinstance(tier, int) else 3)))
+        item.setForeground(4, QColor(tokens.DANGER_TEXT if role == "今日失效" else tokens.TEXT_TERTIARY))
+        # UI 规范：长文本 elide 上屏、全文进 tooltip（顺带对齐 last_error 的旧偏差）
+        if reason:
+            item.setToolTip(4, reason)
+        if role == "今日失效":
+            item.setToolTip(1, f"判死原因: {reason or '（未记录）'}")
+        return item
+
+    def _on_vl_use_case_changed(self, _idx: int) -> None:
+        if self._vl_use_case_combo is None:
+            return
+        self._vl_use_case = self._vl_use_case_combo.currentData() or _VL_DEFAULT_USE_CASE
+        # 链序换了，必须重拉（缓存里的顺序对应的是旧视角）
+        self._vl_refresh_async()
+
+    def _on_vl_reset_clicked(self, key_id: str, btn) -> None:
+        """行内复位：置灰 + 进行中提示 → POST /vision/reset → 成功后重拉。"""
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setToolTip("复位中…")
+        worker = self._make_worker("post", "/vision/reset")
+        worker.done.connect(lambda result, k=key_id, b=btn: self._on_vl_reset_done(k, b, result))
+        worker.failed.connect(lambda err, k=key_id, b=btn: self._on_vl_reset_failed(k, b, err))
+        worker.start()
+
+    def _on_vl_reset_done(self, key_id: str, btn, result) -> None:
+        if btn is not None:
+            btn.setEnabled(True)
+        if result is None:
+            self._on_vl_reset_failed(key_id, btn, "后端返回空响应（可能未启动或请求被拒）")
+            return
+        cleared = result.get("dead_models_cleared", 0)
+        self._vl_dead_reset_in_s = 0
+        self._vl_refresh_async()
+        QMessageBox.information(
+            self, "已复位",
+            f"已解除 {cleared} 条今日判死标记"
+            + (f"（涉及 {result.get('dead_model_keys_cleared', 0)} 个 key）"
+               if result.get("dead_model_keys_cleared") else "")
+            + "。\n上游已放回的模型现在立刻重新参与选路。",
+        )
+
+    def _on_vl_reset_failed(self, key_id: str, btn, err: str) -> None:
+        if btn is not None:
+            btn.setEnabled(True)
+        QMessageBox.warning(self, "复位失败", f"解除今日判死标记失败：{err}")
 
     def _update_vl_hours_table(self) -> None:
         """更新 VL 小时分布表"""
@@ -1084,6 +1366,7 @@ class ModelPoolPanel(PanelBase):
         ocr_loaded = bool(ocr.get("ocr_loaded", False))
         keep_models = bool(ocr.get("keep_models", False))
         ocr_model = ocr.get("ocr_model", "") or "—"
+        self._ocr_keep_state = keep_models
 
         self._ocr_summary_labels["ocr_loaded"].setText("是" if ocr_loaded else "否")
         self._ocr_summary_labels["ocr_loaded"].setStyleSheet(
@@ -1094,6 +1377,63 @@ class ModelPoolPanel(PanelBase):
             f"color: {tokens.SUCCESS_TEXT};" if keep_models else f"color: {tokens.TEXT_TERTIARY};"
         )
         self._ocr_summary_labels["ocr_model"].setText(str(ocr_model))
+
+        # 空闲回收：常驻开启 → "常驻"；未配置阈值 → "未启用"；已加载 → 倒计时
+        idle_sec = float(ocr.get("idle_unload_sec") or 0.0)
+        idle_remain = ocr.get("idle_remaining_sec")
+        idle_label = self._ocr_summary_labels["idle"]
+        if keep_models:
+            idle_text, idle_color = "常驻中", tokens.TEXT_TERTIARY
+        elif idle_sec <= 0:
+            idle_text, idle_color = "未启用", tokens.TEXT_TERTIARY
+        elif not ocr_loaded or idle_remain is None:
+            idle_text, idle_color = "—", tokens.TEXT_TERTIARY
+        else:
+            idle_text = f"{float(idle_remain):.0f}s"
+            idle_color = tokens.WARNING_TEXT if float(idle_remain) <= 3.0 else tokens.INFO_TEXT
+        idle_label.setText(idle_text)
+        idle_label.setStyleSheet(f"color: {idle_color};")
+
+        self._update_ocr_buttons()
+
+    def _update_ocr_buttons(self) -> None:
+        """按钮可用性与文案（busy 时全禁用，防连点发出冲突命令）"""
+        if self._ocr_keep_btn is not None:
+            self._ocr_keep_btn.setText("关闭常驻" if self._ocr_keep_state else "开启常驻")
+        for btn in (self._ocr_load_btn, self._ocr_unload_btn, self._ocr_keep_btn):
+            if btn is not None:
+                btn.setEnabled(not self._ocr_busy)
+
+    # —— OCR 模型控制 ——
+
+    def _on_ocr_load_clicked(self) -> None:
+        self._ocr_post("/ocr/models/preload/json", {"engine": "ocr"})
+
+    def _on_ocr_unload_clicked(self) -> None:
+        self._ocr_post("/ocr/models/unload/json", {"engine": "ocr"})
+
+    def _on_ocr_keep_clicked(self) -> None:
+        # 文案 = 即将进行的操作，故取反当前状态
+        self._ocr_post("/ocr/models/keep/json", {"keep": not self._ocr_keep_state})
+
+    def _ocr_post(self, path: str, body: dict) -> None:
+        """发一条 OCR 控制命令 → 完成后回读 /health 刷新（真相在 /health，不在本地推断）"""
+        if self._ocr_busy:
+            return
+        self._ocr_busy = True
+        self._update_ocr_buttons()
+        worker = self._make_worker("post", path, json=body)
+        worker.done.connect(lambda _r: self._on_ocr_action_done(None))
+        worker.failed.connect(self._on_ocr_action_done)
+        worker.start()
+
+    def _on_ocr_action_done(self, err) -> None:
+        self._ocr_busy = False
+        self._update_ocr_buttons()
+        if err:
+            QMessageBox.warning(self, "OCR 操作失败", str(err))
+            return
+        self._refresh_async()
 
     # —— 通用 ——
 

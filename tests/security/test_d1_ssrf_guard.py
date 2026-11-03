@@ -22,15 +22,15 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent.builtin_tools.ssrf_guard import (  # noqa: E402
+from lib.agent_runtime.builtin_tools.ssrf_guard import (  # noqa: E402
     BLOCKED_CIDRS,
     check_url,
     extract_mapped_ipv4,
     is_ip_blocked,
     ssrf_guarded_lookup,
 )
-from client.core.agent.builtin_tools.web_fetch import WebFetchTool  # noqa: E402
-from client.core.agent.types import ToolCall  # noqa: E402
+from lib.agent_runtime.builtin_tools.web_fetch import WebFetchTool  # noqa: E402
+from lib.agent_runtime.types import ToolCall  # noqa: E402
 
 # ============================================================================
 # Part 1: BLOCKED_CIDRS 覆盖测试

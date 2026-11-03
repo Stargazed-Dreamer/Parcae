@@ -22,7 +22,7 @@ models/
 # evidence.py / search_tracer.py 未进仓库，release 包后端启动即崩）。
 # 运行时记忆 DB 在 data/memory/ 下，已被下方 data/* 规则覆盖。
 # 运行时数据（LLM池/记忆DB/活动追踪/inbox 等）不进仓库，仅保留项目结构基线
-# 显式声明：data/secret/（secrets.toml 密钥文件）和 data/llm/（keys.json LLM 密钥库）
+# 显式声明：data/secret/（secrets.toml 密钥文件）、data/llm/（keys.json LLM 密钥库）
 # 均已被 data/* 覆盖，切勿添加 !data/secret/ 或 !data/llm/ 例外规则
 data/*
 !data/project_structure.json
@@ -66,14 +66,14 @@ release/public_repo/
 release/triage/
 
 # temp 子目录例外：长期探索产出（非敏感），豁免出 ignore 以便纳入版本跟踪
-# ⚠ 这四条自 2026-09-22 才真正生效——上面写成 `temp/` 时 git 无法重新纳入被排除目录下的文件，
+# ⚠ 这三条自 2026-09-22 才真正生效——上面写成 `temp/` 时 git 无法重新纳入被排除目录下的文件，
 #   豁免等于没写。改成 `temp/*` 后它们开始影响 git status，加新豁免前先想清楚要不要公开。
-# 未列入豁免的子目录仍由 temp/* 兜住：chat_mgmt_probe(对话db)/disk_scan_cache(本机路径)/
+# 未列入豁免的子目录仍由 temp/* 兜住：chat_mgmt_probe(对话db)/probe(探针落盘)/disk_scan_cache(本机路径)/
 #   pdf_extract(版权)/pytest_tmp(测试产物)/探索-unfinish(个人信息档案)/杂文档产出-待消化(账单流水)
+#   html(浏览器预览/演示文件与 smoke 脚本，2026-10-14 大文件清理退出豁免)
 !temp/architecture_analysis/
 !temp/sdd/
 !temp/planning_archive/
-!temp/html/
 # temp/sdd 例外中的例外：SDD 流程产物（spec/tickets/checklist）是当轮工作记忆，
 # AGENTS.md 明写"不进 git"，真源另有 docs/ 与 CHANGELOG。上面改成 temp/* 后
 # !temp/sdd/ 从死规则变成活规则，18 个草稿目录开始污染 git status，故在此按名重新挡掉。
@@ -114,11 +114,19 @@ workspace/community_review/自主发展/
 workspace/community_review/自主规划/
 workspace/niuke_review/state/
 workspace/niuke_review/saved_pdfs/
+# chat_digest 算法板子原稿（用户提供的 PDF 存档，单文件 3-4MB；汇总稿在 digests/ 入库）
+workspace/chat_digest/banzi/*.pdf
 # official_gacha 每次跑新增的时间戳运行产物不入库；state/latest_scan.json 例外（机会型台账 mtime 判据锚点，保留入库）
 workspace/official_gacha/state/scan_*.json
 workspace/official_gacha/state/join_*.json
 workspace/official_gacha/state/explore_*.json
 workspace/disk_manager/scan/
+# SSD 耐久采样：CSV 是可累积的本机遥测（会一直变长），state 是纯运行时基线 ⇒ 都不入库，
+# schema 与判读方法见 tools/disk_io_audit/README.md
+workspace/disk_manager/ssd_wear_log.csv
+workspace/disk_manager/ssd_wear_log.csv.bak-schema
+workspace/disk_manager/ssd_intensity_state.json
+workspace/disk_manager/ssd_wear_snapshot.log
 workspace/bilibili_video/
 workspace/wenzhang_review/
 workspace/image_organize/
@@ -132,7 +140,10 @@ workspace/image_organize_remote_vl_sample/run_state.json
 workspace/image_organize_remote_vl_sample/sample_manifest.json
 workspace/web_archive/*/images/
 workspace/yihuan_gacha/test_samples/
-workspace/yihuan_gacha/backup/
+# backup/ 是数据库快照等大文件，不入库；但 backup/raw/ 是「raw 永不删除」的归档落点，
+# 必须入库 —— 否则 archive_raw_files() 一跑，git 里跟踪的 raw/ 就变成删除状态（2026-10-30 踩到）
+workspace/yihuan_gacha/backup/*
+!workspace/yihuan_gacha/backup/raw/
 # 稀有度待复核裁片（游戏截图 + 索引，个人数据，量大且不进库）
 workspace/yihuan_gacha/pending_rarity/
 workspace/wechat_collection/
@@ -141,8 +152,8 @@ workspace/wechat_file_cleanup/state/
 workspace/wechat_file_cleanup/reports/
 workspace/wechat_file_cleanup/evidence/
 workspace/exam_prep/
-# 本机取证归档（含本机路径/防火墙规则清单/健康快照，只留本地）
-workspace/windows_forensics/
+# 本机取证归档：选择性入库——代码/文档/方法论纳入备份，大件与原始证据留本地
+# 白名单与排除理由见 workspace/windows_forensics/.gitignore（原始采样含本机路径/防火墙/网络事件，不入库）
 # 微信 Linux 客户端审计产出（含本机 machine-id/MAC/状态文件哈希，只留本地）
 workspace/wechat_linux_audit/reports/
 workspace/wechat_linux_audit/state/
@@ -162,7 +173,14 @@ workspace/model_data/
 
 # IDE 平台内部产物（不进仓库）
 # 注：.trae/documents/ 下设计文档历史上一并纳入仓库，新文档由用户决定
+# ⛔ 禁止对本目录 `git add -f`：含本机路径与私人记录；一旦被 tracked，本规则对它立即失效，会一路推到公开远端
 .workbuddy/
+
+# 共享记忆空间（`.agents/memory/`）的**日志**不入库 —— 它是给各 harness 共享/追溯用的，
+# 不是备份；真源部分（TOPIC_*.md、machine/**）仍然入库。规矩见 AGENTS.md「记忆与日志规矩」。
+.agents/memory/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md
+# 记忆投影的一次性本机备份（覆盖前回滚用；真源同上行注释）
+.agents/memorybackup.txt
 
 # workspace/stock_advisor 数据库（行情快照+报告元数据+wisdom 调用记录，不入仓库）
 # holdings_personal.json 和 reports/ 已挪到 private_vault/stock_advisor/（obsidian vault，不进 release）
@@ -180,11 +198,14 @@ workspace/web_archive/xiaoheihe/
 workspace/web_archive/weixin/
 workspace/web_archive/feishu/
 workspace/web_archive/tencent/
+# 小红书笔记归档（第三方笔记正文+评论+图片，2026-10-12 起支持，不入库；reports/ 目录已整体排除）
+workspace/web_archive/xiaohongshu/
 # doc.weflow.top 全站归档（第三方笔记全文 + WARC + 离线镜像，与上面各站点同类不入库）
 workspace/web_archive/weflow/
 # 个人文档链接收藏（与已移出仓库的 urls*.json 同类）
 workspace/web_archive/inputs/urls_feishu.json
 workspace/web_archive/inputs/urls_tencent.json
+workspace/web_archive/inputs/urls_xiaohongshu.json
 # 微信会话链接清单（含群号/个人链接，2026-09-17 退出版本跟踪，仍由 [backup].paths 覆盖）
 workspace/web_archive/inputs/urls_wechat_source.json
 # reports/ 的索引与报告含各站文章标题与链接，可见性跟随各站正文（SKILL.md 规矩 5）。
@@ -219,6 +240,7 @@ workspace/maa-patch/*
 !workspace/maa-patch/LESSONS.md
 !workspace/maa-patch/mumu-keepalive.patch
 !workspace/maa-patch/sync-maa-patch.ps1
+!workspace/maa-patch/ensure_gui_latest.py
 !workspace/maa-patch/UPSTREAM_ISSUE_RECORD.md
 
 # ZCode 编辑器本地目录（plans/*.md 单次会话 plan 快照、watchdog 插件运行态，均不进仓库）
@@ -301,6 +323,19 @@ workspace/video_digest/packets/
 workspace/video_digest/reports/
 workspace/video_digest/temp/
 
+# stt_cloud_batch 工作区派生数据（2026-10-21 建，判据同 video_digest）：
+# out/ = 云端批量转录产物（.transcript.txt 含口播原文 + .srt + .meta.json + 可选 mp3 缓存），
+# 全部可由源视频重生成且属个人学习数据，不入库；脚本与 README 入库。
+workspace/stt_cloud_batch/out/
+
+# course_digest 工作区派生数据（2026-10-21 建）：
+# _shots/ = 分诊时从用户视频抽出的拼图（画面内容本身，含个人信息）；
+# course_manifest.json = 每支视频的时长/字幕/画面类型测量表（含真实文件名）。均不入库，脚本入库。
+workspace/course_digest/_shots/
+workspace/course_digest/course_manifest*.json
+# out/ = 转录/结构化提取/帧/课稿，全部含用户课程原文或画面，可由源视频重生成，不入库。
+workspace/course_digest/out/
+
 # wechat_linux_audit/ = 微信 Linux 采集面审计（2026-09-30 起 ignore，经用户点单）：
 # 仪器脚本与观测数据绑定本机（盘序列号 / MAC / cgroup / 登录态路径），属机器特定数据不入库；
 # 结论与交接卡沉淀在项目记忆与 SKILL.md，不在仓库。
@@ -316,3 +351,63 @@ workspace/engineering_talk/
 # （temp 会被定期清理，脚本会"昨天能跑今天就崩"）。装在 tools/disk_io_audit/lib/
 # 用法：uv run python tools/disk_io_audit/srum_attrib.py --db <SRUDB.dat> --lib tools/disk_io_audit/lib
 tools/disk_io_audit/lib/
+
+# chat_digest 一次性调试产物（2026-10-08 未提交文件审计新增）：
+# temp/ 内含 message_5.db.pre_fastpath_test —— 3.5MB 微信消息库副本，真实群聊行级数据，
+# 与已排除的 workspace/chat_digest/backup/ 和 digests/ 同隐私级别；另两个是一次性压测脚本。
+# 先例见 workspace/video_digest/temp/ 同名规则。
+workspace/chat_digest/temp/
+
+# 带日期戳的备份 *.bak_YYYYMMDD（2026-10-08 新增）：
+# 既有 *.bak 只匹配无后缀形式，.bak_20261005 这类漏网；备份含本机绝对路径
+# （如 <data_drive>:/<apps_root>\VMware\vmrun.exe），与 *.bak 及
+# workspace/bilibili_gacha/*.bak-* 同处理。误伤评估：已跟踪文件中无 .bak_/.bak- 结尾者。
+*.bak_*
+
+# 带序号后缀的备份 *.bak2 / *.bak3 / *.bak4（2026-10-19 新增）：
+# 既有 *.bak 只匹配无后缀形式；jev_series 采集/补采脚本每次都留一份 .bakN 全量快照，
+# 属同一批数据的历史副本，重跑采集脚本即可重建。误伤评估：已跟踪文件中无 .bakN 结尾者。
+*.bak[0-9]
+
+# tool_dojo 运行产物（2026-10-08 新增）：
+# runs/ = 每轮体检的 dispatch 包与 traces（可能含 subagent 的真实工具调用记录），
+# sandbox/ = local_reversible 档探针的落盘沙箱。两者都是可再生产物，不入库。
+# state/inventory.json 是工具清单快照，属于有价值的历史基线，故意不排除。
+workspace/tool_dojo/runs/
+workspace/tool_dojo/sandbox/
+
+# 2026-10-14 大文件清理：截图/缓存/生成物退出跟踪（磁盘保留，历史由 filter-repo 剔除）
+# watchdog-mode 调试截图 8 张 17.7MB（借 planning_archive 豁免混入；豁免内重新挡掉，先例见 temp/sdd 例外中的例外）
+temp/planning_archive/sdd/watchdog-mode/*.png
+# homework video_probe 抽帧幻灯片截图 5 张 4MB（由 slides.json + 视频可重新生成）
+workspace/homework/records/video_probe/slides/
+# stock_advisor wisdom 嵌入缓存（WisdomEmbedder 启动自动重建）
+workspace/stock_advisor/wisdom/embeddings_cache.json
+# gh_mirror release 抓取快照与 dryrun 报告（release_sparse/scripts 可重新生成）
+workspace/gh_mirror/release_sparse/release_details.json
+workspace/gh_mirror/release_sparse/dryrun_report.txt
+# task_room 2026-09-12 全量分类快照（私人聊天记录，同 backup/ resource/ 隐私级别）
+workspace/task_room/classified/2026-09-12.md
+# homework t13_deck.pptx 构建产物（hw_ppt_build.py + t13_spec.json 可重新生成，expect.json 保留入库）
+workspace/homework/tools/*.pptx
+
+# 事务盘点 H 层「分源产出」= 从本机 5 个 harness 会话库抽出的会话卡片（2116 文件 / 50 MB，
+# 含个人对话原文与人名），脱敏只做在卡片层、原文不外发 ⇒ 整棵不入库；01/02/03 的方法与模板入库。
+workspace/local_butler/07_事务盘点/20_分源产出/
+
+# 根目录调试日志与崩溃栈转储（工具临时产物，2026-11-03 提交时归档）
+debug.log
+*.stackdump
+# 带日期后缀的备份 *.bak-<date>（*.bak / *.bak_* / *.bakN 已有，补这一形态；已跟踪文件中无此类）
+*.bak-*
+# 砺儒云作业抓取的初稿搭建（正式记录在 workspace/homework/records/）
+workspace/temp_req.json
+# chat_digest 演示名映射表（replace_demo_names.py 运行产物，含真实群昵称两边对应，可重生成）
+workspace/chat_digest/dev/name_mapping.json
+
+# 会话内临时产物（切片 / 中间转换 / 打包预览），可随时重建，刻意不入库
+workspace/temp/
+workspace/chat_digest/temp_*/
+.trae-html-share-packages/
+# 屏幕截图目录（空壳，只剩一个空的 .tmp/；IDE/工具按下时自动创建）
+.screenshots/

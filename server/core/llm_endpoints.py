@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from lib.schema import BaseSchema
 from server.core.lifecycle import _ensure_pool_initialized
 
-logger = logging.getLogger("localagent.llm_endpoints")
+logger = logging.getLogger("parcae.llm_endpoints")
 
 
 # ============================================================================

@@ -1,7 +1,7 @@
 """操作模板网关 - 双层 MCP 架构的第三个网关
 
 预定义常见操作模式（截图+OCR、浏览器导航+等待、表单填写、游戏抽卡循环等），
-通过 localagent_template_tool + localagent_list_templates 访问。
+通过 parcae_template_tool + parcae_list_templates 访问。
 
 设计目标：
   - 减少 AI 重复编写 exec_python 代码
@@ -24,7 +24,7 @@ from pydantic import Field
 
 from lib.schema import BaseSchema
 
-logger = logging.getLogger("localagent.templates")
+logger = logging.getLogger("parcae.templates")
 router = APIRouter(prefix="/templates", tags=["操作模板网关"])
 
 
@@ -205,12 +205,18 @@ async def main():
         browser = await p.chromium.connect_over_cdp('{cdp_url}')
         context = browser.contexts[0]
         url_pat = '{url_pattern}'
+        # 2026-11-01：url_pattern 为空时不再"取第一个 tab"——浏览器里可能开着
+        # 用户的页，也可能是别的脚本的采集现场。必须自己说清要哪一张。
+        if not url_pat:
+            print('ERROR: url_pattern 为空，不替你挑标签页。请指定 URL 子串，'
+                  '或先用 browser_session_create 自己开一个。')
+            return
         page = None
         for pg in context.pages:
-            if not url_pat or url_pat in pg.url:
+            if url_pat in pg.url:
                 page = pg; break
         if not page:
-            print('ERROR: no matching tab'); return
+            print('ERROR: 没有 URL 含该子串的标签页'); return
         collected = []
         seen = set()
         for i in range({scroll_count}):
@@ -519,7 +525,7 @@ def _render_template(template_str: str, params: dict) -> str:
 
 # ========== 路由 ==========
 
-@router.get("/list", response_model=ListTemplatesResponse, operation_id="localagent_list_templates")
+@router.get("/list", response_model=ListTemplatesResponse, operation_id="parcae_list_templates")
 async def list_templates(category: str | None = None):
     """List all available operation templates.
 
@@ -531,7 +537,7 @@ async def list_templates(category: str | None = None):
     - file: content search, recent files
     - system: window focus
 
-    Each template has parameters with defaults. Call via localagent_template_tool.
+    Each template has parameters with defaults. Call via parcae_template_tool.
     Pass category= to filter.
     """
     cats: dict[str, list[TemplateInfo]] = {}
@@ -556,21 +562,21 @@ async def list_templates(category: str | None = None):
     )
 
 
-@router.post("/run", response_model=TemplateExecResponse, operation_id="localagent_template_tool")
+@router.post("/run", response_model=TemplateExecResponse, operation_id="parcae_template_tool")
 async def template_tool(req: TemplateExecRequest):
     """Execute a pre-defined operation template by name.
 
     This is a TEMPLATE GATEWAY (second-tier MCP tool) that runs pre-built exec_python
     code for common workflows, avoiding the need to write boilerplate.
 
-    Use localagent_list_templates to discover available templates and their parameters.
+    Use parcae_list_templates to discover available templates and their parameters.
     Pass template=<name> and params={...}.
 
     Examples:
-    - localagent_template_tool(template="screenshot_and_ocr", params={"mode":"window","window_title":"游戏"})
-    - localagent_template_tool(template="browser_navigate_and_wait", params={"url":"https://example.com"})
-    - localagent_template_tool(template="game_wait_and_click", params={"wait_text":"确认","click_x":500,"click_y":400})
-    - localagent_template_tool(template="file_search_content", params={"directory":"server","pattern":"def capture","file_glob":"*.py"})
+    - parcae_template_tool(template="screenshot_and_ocr", params={"mode":"window","window_title":"游戏"})
+    - parcae_template_tool(template="browser_navigate_and_wait", params={"url":"https://example.com"})
+    - parcae_template_tool(template="game_wait_and_click", params={"wait_text":"确认","click_x":500,"click_y":400})
+    - parcae_template_tool(template="file_search_content", params={"directory":"server","pattern":"def capture","file_glob":"*.py"})
 
     Templates handle parameter escaping and code generation internally.
     Returns exec_python stdout/stderr.
@@ -580,7 +586,7 @@ async def template_tool(req: TemplateExecRequest):
         available = sorted(_TEMPLATE_INDEX.keys())
         raise HTTPException(
             status_code=404,
-            detail=f"未知模板: {req.template}。用 localagent_list_templates 查看可用模板。已注册: {available}",
+            detail=f"未知模板: {req.template}。用 parcae_list_templates 查看可用模板。已注册: {available}",
         )
 
     # 合并参数（用默认值填充缺失项）

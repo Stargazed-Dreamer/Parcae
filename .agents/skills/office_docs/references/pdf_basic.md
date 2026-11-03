@@ -166,7 +166,7 @@ doc = SimpleDocTemplate(
     pagesize=A4,
     leftMargin=2*cm, rightMargin=2*cm,
     topMargin=2.5*cm, bottomMargin=2*cm,
-    title="报告", author="LocalAgent"
+    title="报告", author="Parcae"
 )
 doc.build(story, onFirstPage=header_footer, onLaterPages=header_footer)
 ```
@@ -724,7 +724,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 
-def create_watermark(output_path, text="LOCALAGENT INTERNAL"):
+def create_watermark(output_path, text="PARCAE INTERNAL"):
     c = canvas.Canvas(output_path, pagesize=A4)
     c.saveState()
     c.setFont('Helvetica', 40)
@@ -1030,7 +1030,7 @@ def md_to_pdf(md_text, output_path):
         output_path, pagesize=A4,
         leftMargin=2*cm, rightMargin=2*cm,
         topMargin=2.5*cm, bottomMargin=2*cm,
-        title="日报", author="LocalAgent"
+        title="日报", author="Parcae"
     )
     story = md_to_story(md_text)
     doc.build(story, onFirstPage=header_footer, onLaterPages=header_footer)

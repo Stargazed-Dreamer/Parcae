@@ -19,8 +19,8 @@
 
 按 `AGENTS.md` "MCP 工具优先原则"和"工具选择决策树"4 层结构：
 1. **直连 MCP 工具**（白名单，见 `server/mcp_whitelist.py`）→ 直接用
-2. **`localagent_advanced_tool` 网关**（运行时从 OpenAPI 动态构建，GET 类免审批）
-3. **`localagent_template_tool`**（预定义工作流）
+2. **`parcae_advanced_tool` 网关**（运行时从 OpenAPI 动态构建，GET 类免审批）
+3. **`parcae_template_tool`**（预定义工作流）
 4. **`exec_python`**（仅用于真正需要运行代码的场景）
 
 只有当 MCP 工具无法满足需求时，才写自定义脚本，且必须写到 `temp/` 目录。
@@ -245,7 +245,7 @@ GUIDE_REGISTRY 的 `match_task_candidates` 五路加权打分：
 - [ ] `_CATEGORY_PREFIXES` 是否添加新前缀（todos_, wip_）？
 - [ ] `/health` 是否返回 todos 状态？
 - [ ] `agent_guide.py` 中相关条目的 first_action / mcp_tools_priority 是否更新？
-- [ ] 涉及读详情/CRUD 的 task_type，first_action 是否提示用 `localagent_advanced_tool`（而非 exec_python 发 HTTP）？
+- [ ] 涉及读详情/CRUD 的 task_type，first_action 是否提示用 `parcae_advanced_tool`（而非 exec_python 发 HTTP）？
 - [ ] 启动时迁移逻辑是否幂等（检查 schema_info 标志）？
 
 ## 项目结构变更
@@ -371,3 +371,16 @@ uv run python tools/run_tests_batched.py  # 验证没破坏功能（分批全量
 **判卷标准**：测试修复若让测试"通过"但不验证真实行为（跳过过时测试 / try-except 吞 crash / 盲目放宽断言），算修复失败，必须重做。
 
 详见 `docs/dev-workflow.md` "测试修复铁律" 章节。
+
+### 批量模型推理的数据留存纪律（强制，2026-10-15 用户教训）
+
+> **触发**：此前跑图片类模型时只存精简文本结果、磁盘上扣扣搜搜，中途输出丢失或事后需要新指标时无法增量恢复/重分析，被迫全量重跑白烧 GPU 时。
+
+**核心原则：GPU 时间贵、磁盘便宜。批量推理的产物按"丢了不用重跑"的标准留，不按"够看一眼"的标准留。**
+
+跑批量模型推理（OCR / embedding / 打标 / 姿态 / 转写等 ≥ 几百张）时强制检查：
+
+- [ ] **边跑边落盘**：逐条（或小批）append 写 jsonl，配断点续跑（done 集判重 + 增量跳过），单条失败记账后继续、不拖垮批
+- [ ] **存模型原始输出全字段**（分数/坐标/box/中间结果/关键中间图裁剪），不只存文本结论——事后重分析、换指标、抓 bug 都不许重推理
+- [ ] **随产物存运行快照**：模型名/权重路径/参数/代码版本写成 manifest，保证"这批数字是谁跑出来的"永远可回答
+- [ ] **拿不准要不要存 → 存**：中间产物删得，重跑删不得

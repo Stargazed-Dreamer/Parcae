@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from client.core.constants import SERVER_URL  # 8-9: 端口单一真源
+from client.core.constants import get_server_url  # 8-9: 端口单一真源（运行时解析，支持端口顺延）
 from lib.ui import tokens as T
 
 HTTP_TIMEOUT_S = 5.0
@@ -206,7 +206,7 @@ class ApprovalCard(QFrame):
         """倒计时归零：上报 timeout，转为只读态。"""
         try:
             requests.post(
-                f"{SERVER_URL}/approvals/{self._approval_id}/decision",
+                f"{get_server_url()}/approvals/{self._approval_id}/decision",
                 json={"decision": "timeout", "feedback": ""},
                 timeout=HTTP_TIMEOUT_S,
             )
@@ -243,7 +243,7 @@ class ApprovalCard(QFrame):
         def _post() -> None:
             try:
                 resp = requests.post(
-                    f"{SERVER_URL}/approvals/{self._approval_id}/decision",
+                    f"{get_server_url()}/approvals/{self._approval_id}/decision",
                     json={"decision": decision, "feedback": feedback},
                     timeout=HTTP_TIMEOUT_S,
                 )
@@ -269,7 +269,7 @@ class ApprovalCard(QFrame):
         """点"收到"移除已超时卡片。"""
         try:
             resp = requests.post(
-                f"{SERVER_URL}/approvals/{self._approval_id}/ack",
+                f"{get_server_url()}/approvals/{self._approval_id}/ack",
                 timeout=HTTP_TIMEOUT_S,
             )
             if resp.status_code == 200:

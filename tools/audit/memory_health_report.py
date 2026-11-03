@@ -129,8 +129,10 @@ def section_labels(conn: sqlite3.Connection, snap: Snapshot) -> None:
     LINES.append("\n## C. 维护器标签 vs 实际使用")
     facts_total = val(snap, "facts_total")
     vc = extra_of(snap, "facts_archived")
-    note_line(f"validation_status 分布: {vc.get('status_counts')}")
-    note_line(f"archive 占比 = {pct(val(snap, 'facts_archived'), facts_total)}")
+    note_line(f"已归档（facts.archived_at）: {vc.get('archived_total')}"
+              f"｜占比 = {pct(val(snap, 'facts_archived'), facts_total)}")
+    note_line("memory_meta.validation_status 自 2026-10-31 起是**冻结的历史字段**"
+              "（LLM 验证器已删除），不再反映现状，故本节不再据它算占比")
 
     conflicts = val(snap, "archive_high_freq_conflicts")
     c_x = extra_of(snap, "archive_high_freq_conflicts")
@@ -160,7 +162,7 @@ def section_labels(conn: sqlite3.Connection, snap: Snapshot) -> None:
         emit("C", "ok", "fact_type 全部落在 closed taxonomy 内")
 
 
-def section_index_hygiene(conn: sqlite3.Connection, snap: Snapshot, preview_chars: int) -> None:
+def section_index_hygiene(conn: sqlite3.Connection, snap: Snapshot, window_chars: int) -> None:
     LINES.append("\n## D. 索引卫生")
     sup = val(snap, "superseded_message_versions")
     sup_x = extra_of(snap, "superseded_message_versions")
@@ -212,10 +214,10 @@ def section_index_hygiene(conn: sqlite3.Connection, snap: Snapshot, preview_char
     else:
         emit("D", "ok", "索引里没有指向已删除消息的孤儿行")
 
-    oversize = val(snap, "facts_oversize_for_validator")
+    oversize = val(snap, "facts_oversize")
     note_line(
-        f"正文超过验证窗口（{preview_chars} 字）的 fact: "
-        f"{pct(oversize, val(snap, 'facts_total'))}——这些走\"archive 延判\"路径"
+        f"正文超过 {window_chars} 字的 fact: {pct(oversize, val(snap, 'facts_total'))}"
+        "——上屏前必须走「摘要 + 原文指针」，否则一条就吃掉整页预算"
     )
 
 
@@ -262,7 +264,7 @@ def section_trends(conn: sqlite3.Connection, has_metrics: bool, days: int) -> No
         note_line("日表缺失，无趋势")
         return
     for metric in (
-        "db_size_mb", "surfaced_ratio", "facts_oversize_for_validator",
+        "db_size_mb", "surfaced_ratio", "facts_oversize",
         "archive_high_freq_conflicts", "projection_calls",
         "superseded_message_versions",
     ):
@@ -298,14 +300,10 @@ def main() -> int:
         print(f"[red] 记忆库不存在: {db}")
         return 1
 
-    from server.memory.config import get_memory_config
-    from server.memory.metrics import compute_metrics
+    from server.memory.metrics import OVERSIZE_CHARS, compute_metrics
 
-    cfg = get_memory_config()
     conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
-    snap: Snapshot = compute_metrics(
-        conn, db_path=str(db), validator_window_chars=cfg.validate_preview_chars
-    )
+    snap: Snapshot = compute_metrics(conn, db_path=str(db))
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     ver_row = conn.execute(
@@ -316,8 +314,8 @@ def main() -> int:
     LINES.append("")
     LINES.append(f"- 库文件: `{db}`")
     LINES.append(f"- 库内 schema 版本: {schema_ver}（代码版本见 `server/memory/schema.py:SCHEMA_VERSION`）")
-    LINES.append(f"- 验证窗口: {cfg.validate_preview_chars} 字｜单轮验证上限: "
-                 f"{cfg.validate_batch_limit} 条｜重验间隔: {cfg.validate_revalidate_days} 天")
+    LINES.append(f"- LLM 验证器: 已于 2026-10-31 删除（形态检查移交中枢 L7）；"
+                 f"本节「超长」按 {OVERSIZE_CHARS} 字展示窗口计")
 
     has_metrics = table_exists(conn, "memory_metrics_daily")
     metric_days = 0
@@ -329,7 +327,7 @@ def main() -> int:
     section_scale(conn, snap)
     section_funnel(conn, snap)
     section_labels(conn, snap)
-    section_index_hygiene(conn, snap, cfg.validate_preview_chars)
+    section_index_hygiene(conn, snap, OVERSIZE_CHARS)
     section_telemetry(conn, has_metrics, metric_days)
     section_trends(conn, has_metrics, args.days)
     section_open_questions()

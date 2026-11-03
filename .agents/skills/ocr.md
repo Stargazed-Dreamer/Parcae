@@ -13,7 +13,7 @@ task_type: adhoc.ocr
 识别图片、OCR、读取图片、文字识别、图片转文字
 
 ## 概述
-LocalAgent 提供两种 OCR 引擎：**经典 PaddleOCR**（本地、快速、输出可靠文字坐标）和**远程 VL**（文档解析、复杂版面理解、输出 Markdown）。截图/Computer Use 的文字定位默认使用经典 OCR；远程 VL 主要用于描述和文档结构，不作为普通文字定位默认路径。
+Parcae 提供两种 OCR 引擎：**经典 PaddleOCR**（本地、快速、输出可靠文字坐标）和**远程 VL**（文档解析、复杂版面理解、输出 Markdown）。截图/Computer Use 的文字定位默认使用经典 OCR；远程 VL 主要用于描述和文档结构，不作为普通文字定位默认路径。
 
 ## 前置条件
 - 后端已启动：`uv run python -m server.main`（端口 8766）
@@ -97,7 +97,7 @@ POST /screen/ocr {mode:"window", hwnd:123, engine:"ocr"}
 
 ### Model Lifecycle Manager 统一控制面（推荐）
 
-OCR 作为 ModelLifecycleManager 注册的 4 个驱动之一（其余：memory_embedding / guide_embedding / mindforge_searcher），可通过统一 `/models/*` 端点手动控制：
+OCR 作为 ModelLifecycleManager 注册的 4 个驱动之一（其余：memory_embedding / guide_embedding / mindforge_searcher），可通过统一 `/models/*` 端点手动控制（⚠ 2026-10-27 起 MCP 网关只留 `models_unload`；`models_load` 已摘除、`pause`/`resume` 未进网关，三者走 REST + 审批）：
 
 | 路径 | 方法 | 说明 | 审批级别 |
 |------|------|------|----------|

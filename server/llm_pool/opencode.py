@@ -23,9 +23,9 @@ import uuid
 from urllib.parse import urlsplit
 
 _HOST_SUFFIX = "opencode.ai"
-CLIENT_ID = "localagent"
+CLIENT_ID = "parcae"
 # 项目标识用常量：仅作上游侧区分，不外泄内部项目名
-PROJECT_ID = "localagent"
+PROJECT_ID = "parcae"
 
 
 def is_opencode_endpoint(base_url: str) -> bool:
@@ -69,8 +69,11 @@ def derive_session_id(messages: list[dict], namespace: str = "") -> str:
 
 def _user_agent() -> str:
     try:
-        from server.main import VERSION  # 延迟导入避免循环依赖
-        return f"localagent/{VERSION}"
+        # ⛔ 不要改成 `from server.main import VERSION`：以 `-m server.main` 启动时
+        # 该 import 会重新执行整个入口模块（建 app / 挂路由 / 挂 MCP 跑两遍）。
+        from server.version import VERSION
+
+        return f"parcae/{VERSION}"
     except Exception:
         return CLIENT_ID
 

@@ -1,0 +1,40 @@
+{"id": "gq01", "query": "butler survey", "gold_keys": ["local_butler_survey_20261003"], "query_style": "trace", "source": "search_traces:2026-10-03", "note": "真实检索留痕"}
+{"id": "gq02", "query": "GKD 签到 规则失效", "gold_keys": ["gkd_signin_automation", "reference_gkd_honor_burst_matching"], "query_style": "trace", "source": "search_traces:2026-10-03", "note": "真实检索留痕；规则失效对应匹配脉冲与签到总状态"}
+{"id": "gq03", "query": "内存残差 EPROCESS 未释放", "gold_keys": ["reference_memory_accounting_leak"], "query_style": "trace", "source": "search_traces:2026-10-03", "note": "真实检索留痕"}
+{"id": "gq04", "query": "股市复盘 输出格式偏好", "gold_keys": ["preferences"], "query_style": "trace", "source": "search_traces:2026-10-03", "note": "真实检索留痕；no_html + conversation 在 preferences"}
+{"id": "gq05", "query": "ModelScope 的 VL API 429 限流严不稳", "gold_keys": ["vl_modelscope_api_inference", "vl_provider_fallback_architecture"], "query_style": "trace", "source": "search_traces:2026-10-04", "note": "真实检索留痕；429 语义在两条 fact 分载"}
+{"id": "gq06", "query": "虚拟机装系统该走 vmrun 还是 VNC", "gold_keys": ["reference_vmware_vnc_headless_install", "reference_vmrun_guest_ops"], "query_style": "trace", "source": "search_traces:2026-10-04", "note": "真实检索留痕；通道选择两条都在"}
+{"id": "gq07", "query": "记忆维护器把正常记忆判成 archive 的原因", "gold_keys": ["project_memory_v5_audit_state"], "query_style": "trace", "source": "search_traces:2026-10-04", "note": "真实检索留痕；验证器误判整改记录"}
+{"id": "gq08", "query": "浏览器截图 base64 把上下文撑爆", "gold_keys": ["reference_mcp_image_block_shape_mismatch"], "query_style": "trace", "source": "search_traces:2026-10-04", "note": "真实检索留痕"}
+{"id": "gq09", "query": "GUI 面板颜色应该从哪来", "gold_keys": ["ui_design_system"], "query_style": "trace", "source": "search_traces:2026-10-04", "note": "真实检索留痕；颜色 token 在 UI 设计系统 fact"}
+{"id": "gq10", "query": "股票分析上次做到哪只了", "gold_keys": ["stock_advisor"], "query_style": "trace", "source": "search_traces:2026-10-04", "note": "真实检索留痕"}
+{"id": "gq11", "query": "铜陵有色 减仓 触发", "gold_keys": ["stock_advisor_workflow_feedback"], "query_style": "trace", "source": "search_traces:2026-10-05", "note": "真实检索留痕；触发条件口径在用户反馈 fact"}
+{"id": "gq12", "query": "抽奖 取关 relation.mtime", "gold_keys": ["bilibili_gacha"], "query_style": "trace", "source": "search_traces:2026-10-05", "note": "真实检索留痕"}
+{"id": "gq13", "query": "大作业 全自动 天花板 原型", "gold_keys": ["project_hci_big_assignment_autonomy_ceiling"], "query_style": "trace", "source": "search_traces:2026-10-05", "note": "真实检索留痕"}
+{"id": "gq14", "query": "opencode 免费层 403 FreeTierError", "gold_keys": ["reference_opencode_zen_free_tier"], "query_style": "trace", "source": "search_traces:2026-10-05", "note": "真实检索留痕"}
+{"id": "gq15", "query": "小林coding 存档", "gold_keys": ["web_archive_xiaolin"], "query_style": "trace", "source": "search_traces:2026-10-06", "note": "真实检索留痕"}
+{"id": "gq16", "query": "E2E 测试 窗口坐标 UIA", "gold_keys": ["reference_e2e_test_window_coord_uia_realclient"], "query_style": "trace", "source": "search_traces:2026-10-06", "note": "真实检索留痕"}
+{"id": "gq17", "query": "mcp 端点 移除 裁决", "gold_keys": ["mcp_endpoint_removal_verdict"], "query_style": "trace", "source": "search_traces:2026-10-09", "note": "真实检索留痕"}
+{"id": "gq18", "query": "抽卡 游戏 状态", "gold_keys": ["gacha_games_status"], "query_style": "trace", "source": "search_traces:2026-10-09", "note": "真实检索留痕"}
+{"id": "gq19", "query": "视频 摘要 音乐 教程 转写 质量低", "gold_keys": ["video_digest_music_tutorial_stt_low_quality"], "query_style": "trace", "source": "search_traces:2026-10-09", "note": "真实检索留痕"}
+{"id": "gq20", "query": "ESP32 板包下载太慢 离线安装 gh-proxy", "gold_keys": ["env_esp32_arduino_offline_install"], "query_style": "contract", "source": "worklog:2026-10-14", "note": "按 fact 声明触发词构造"}
+{"id": "gq21", "query": "Computer Use 键盘输入 焦点泄漏", "gold_keys": ["parcae_focus_leak_safety"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq22", "query": "看门狗模式 持续监控 到期降级", "gold_keys": ["watchdog_mode"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq23", "query": "OCR bbox 坐标 偏移 截图", "gold_keys": ["ocr_bbox_affine"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq24", "query": "Hyper-V hypervisorlaunchtype 虚拟机起不来", "gold_keys": ["reference_hyperv_launchtype_gotcha"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq25", "query": "modelscope keys.json 写入 陷阱", "gold_keys": ["modelscope_keys_json_write"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq26", "query": "VL provider 429 额度耗尽 fallback 冷却", "gold_keys": ["vl_provider_fallback_architecture"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq27", "query": "pyright 0 errors workspace 脚本 没检查", "gold_keys": ["reference_pyright_scope_excludes_workspace_tools"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq28", "query": "generate_index _index.md 清空 组件段", "gold_keys": ["reference_generate_index_wipes_index"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq29", "query": "调试浏览器 9222 并行会话 标签页 归属", "gold_keys": ["reference_shared_debug_browser_tab_claim"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq30", "query": "跨机交接包 loop_actions.py 漏带", "gold_keys": ["reference_cross_machine_transfer_package"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq31", "query": "微信 Linux 客户端 审计 边界", "gold_keys": ["project_wechat_linux_audit_boundary"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq32", "query": "playwright async dialog expect_dialog", "gold_keys": ["reference_playwright_async_dialog_handler"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq33", "query": "SQLite WAL database is locked 并发", "gold_keys": ["reference_sqlite_wal_pragma_exclusive_lock_concurrent_init"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq34", "query": "AskUserBridge ApprovalBridge 多线程 测试", "gold_keys": ["reference_qt_cross_thread_bridge_test_rig"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq35", "query": "后端不可达 离线写记忆 -32603", "gold_keys": ["reference_memory_write_offline"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq36", "query": "微信相册 appmsgalbum 抓取", "gold_keys": ["reference_wechat_album_api"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq37", "query": "密钥管理 lib/secret 门面层", "gold_keys": ["reference_lib_secret_design_pattern"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq38", "query": "release 敏感扫描 line_skips", "gold_keys": ["release_sensitive_scan_strategy"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq39", "query": "微信数据库 unable to open database ACL", "gold_keys": ["reference_wechat_mirror_db_acl_fix"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}
+{"id": "gq40", "query": "发版 同步远端 CHANGELOG 冲突 rebase", "gold_keys": ["reference_release_sync_changelog_rebase"], "query_style": "contract", "source": "worklog:2026-10-21", "note": "按 fact 声明触发词构造"}

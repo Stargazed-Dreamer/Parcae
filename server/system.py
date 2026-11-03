@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 
 from lib.schema import BaseSchema
 
-logger = logging.getLogger("localagent.system")
+logger = logging.getLogger("parcae.system")
 router = APIRouter(prefix="/system", tags=["System"])
 
 

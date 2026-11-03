@@ -21,6 +21,7 @@ task_type: dev.computer_use
 3. **涉及删除/支付/关机等危险操作必须用户确认**
 4. **优先使用指定窗口模式，避免误操作其他程序**
 5. **每次操作后必须截图验证结果**
+6. **看到 `status="not_elevated"` 立即停** — 后端未以管理员身份运行（`/screen/status.admin_privileges=false`）时，键鼠注入必被 Windows UIPI 丢弃，后端会**在弹窗前直接拒绝**（2026-10-22）。此时：报用户「后端未提权，请以管理员身份重启」，**不要**重试、**不要**换别的键鼠端点、**不要**去 `screen_request_control` 请求授权（未提权时那条路是死路，只会在窗口里白问一次）。仅需截图/OCR/窗口/UIA 语义动作时本就无需提权，照常用。
 
 ## 窗口操作铁律（重要）
 
@@ -103,6 +104,11 @@ screen_request_control(
 - watchdog 模式：额外显示时长输入(1-999h，默认 10)和"允许关机"复选框(默认勾选)
 - 任务需要关机时带 `needs_shutdown=true`：已有 watchdog 但缺关机位属于权限升级，会弹第二次窗（不必先 release）；什么都不缺时重复请求只返回 `skipped`，不改任何授权
 
+**未提权时不弹这个窗**（2026-10-22）：`admin_privileges=false` 时 `screen_request_control` 直接返回
+`success=false, status="not_elevated"`，因为键鼠注入必被 UIPI 丢弃、授权也救不了。只做 UIA 语义动作 /
+窗口操作的任务可带 `needs_input_injection=false` 正常申请授权。详见
+`docs/computer-use-reference.md`「未提权时的端点契约」。
+
 **续期规则**：
 - BLOCK 级危险关键词、调用方显式 `require_confirm=true` 和既有安全阻断逐次生效；watchdog 下 `danger_level=confirm` **自动跳过弹窗**（ADR-0026），所以 AFK 时不要指望这道窗替你拦住手滑。
 - 30 秒未响应默认取消；NORMAL 模式最后一次成功投递控制操作后 10min 进告警，30min 自动降级到 NO_PERMISSION。
@@ -115,7 +121,7 @@ screen_request_control(
 1. 桌面快照      → screen_snapshot(with_ocr=true)  # 一次获取窗口列表+OCR文本
 2. 请求任务授权  → screen_request_control(task_description="...", source="agent")
 3. 激活目标窗口  → focus_window(hwnd=xxx)  # 优先用 hwnd，避免标题歧义
-4. 定位目标元素  → localagent_advanced_tool(tool="screen_ocr", params={mode:"window", hwnd:xxx, engine:"ocr"})
+4. 定位目标元素  → parcae_advanced_tool(tool="screen_ocr", params={mode:"window", hwnd:xxx, engine:"ocr"})
                    # screen_ocr 不在直连 MCP 白名单，必须经 advanced_tool 网关调用
                    # 从目标文字 bbox 中心计算窗口内坐标，再加 window_rect.left/top 得到屏幕坐标
                    # 网页优先 browser_action(action=click, target={css/text/...})，纯图标才用 vision_locate
@@ -133,7 +139,7 @@ screen_request_control(
 
 **关键改进**：
 - 第3步起优先用 `hwnd` 而非 `window_title`（避免同名窗口冲突）
-- 第4步 `screen_ocr` 必须经 `localagent_advanced_tool` 网关调用（不在直连 MCP 白名单）；返回的 `window_rect` 直接用于坐标转换，无需再调 list_windows
+- 第4步 `screen_ocr` 必须经 `parcae_advanced_tool` 网关调用（不在直连 MCP 白名单）；返回的 `window_rect` 直接用于坐标转换，无需再调 list_windows
 - 第4步文字定位默认使用 OCR bbox；浏览器默认使用 DOM locator；`vision_locate` 降为纯图标兜底
 - 第5步 preview_action 标记 L 形角标（点击前确认坐标，避免盲点误操作）
 - 第6步仅在高风险、失败重试或状态难判断时传 `verify_prompt`，避免普通点击消耗 VL 配额

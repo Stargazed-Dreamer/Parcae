@@ -35,7 +35,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-logger = logging.getLogger("localagent.activity_signal")
+logger = logging.getLogger("parcae.activity_signal")
 
 _DEFAULT_IDLE_THRESHOLD_MINUTES = 5
 _DEFAULT_RAW_DIR = "data/activity/raw"

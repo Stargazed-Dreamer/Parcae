@@ -410,14 +410,17 @@ async def fetch_gacha_records(page) -> list:
     if "headhunting" not in page.url:
         await page.goto(AK_GACHA_URL, wait_until="domcontentloaded", timeout=15000)
         await asyncio.sleep(3)
-
-    # 刷新页面获取初始数据
-    print("  刷新页面...")
-    try:
-        await page.reload(wait_until="domcontentloaded", timeout=15000)
-    except Exception:
-        pass
-    await asyncio.sleep(3)
+        print("  已进入寻访记录页")
+    else:
+        # 2026-10-23 导航规范：只有"已经在页面上"时才刷新一次拉最新记录。
+        # 原来是无条件 reload —— 走 goto 分支时会紧接着对同一 URL 再发一次导航，
+        # 等于同一域连发两次（风控最敏感的动作），且刚加载完的页面本就拿到了数据。
+        print("  刷新页面获取最新数据...")
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        await asyncio.sleep(3)
 
     # 获取分类
     categories = await _get_categories(page)

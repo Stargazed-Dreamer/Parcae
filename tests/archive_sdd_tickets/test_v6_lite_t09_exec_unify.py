@@ -13,9 +13,9 @@ import asyncio
 import json
 import time
 
-from client.core.agent.mock_llm import MockLLM
-from client.core.agent.runner import SessionRunner
-from client.core.agent.types import (
+from lib.agent_runtime.mock_llm import MockLLM
+from lib.agent_runtime.runner import SessionRunner
+from lib.agent_runtime.types import (
     LLMResponse,
     Message,
     RunnerConfig,

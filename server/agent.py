@@ -11,7 +11,7 @@ from lib.schema import BaseSchema
 from .llm_pool import call_llm, call_llm_simple, is_initialized
 from .llm_pool.key_store import TIER_NAMES, resolve_key
 
-logger = logging.getLogger("localagent.agent")
+logger = logging.getLogger("parcae.agent")
 router = APIRouter(prefix="/agent", tags=["Agent"])
 
 

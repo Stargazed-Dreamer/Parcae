@@ -152,7 +152,7 @@ class TestEventStoreUpdateSessionTitle:
     def tmp_store(self, tmp_path):
         """临时 EventStore（每个测试独立 DB 文件）。"""
 
-        from client.core.agent.event_store import EventStore
+        from lib.agent_runtime.event_store import EventStore
 
         db_path = str(tmp_path / "test_agent_t06.db")
         store = EventStore(db_path=db_path)
@@ -237,7 +237,7 @@ class TestSessionFacadeStartModelOverrideAndTitle:
     @pytest.fixture
     def tmp_store(self, tmp_path):
         """临时 EventStore。"""
-        from client.core.agent.event_store import EventStore
+        from lib.agent_runtime.event_store import EventStore
 
         db_path = str(tmp_path / "test_facade_t06.db")
         store = EventStore(db_path=db_path)
@@ -249,7 +249,7 @@ class TestSessionFacadeStartModelOverrideAndTitle:
         """SessionFacade.start 应接受 model_override 关键字参数（不报错）。"""
         import inspect
 
-        from client.core.agent.facade import SessionFacade
+        from lib.agent_runtime.facade import SessionFacade
 
         sig = inspect.signature(SessionFacade.start)
         param_names = list(sig.parameters.keys())
@@ -261,13 +261,13 @@ class TestSessionFacadeStartModelOverrideAndTitle:
         """start(model_override=X) 应让最终 runner.config.model == X。"""
         import asyncio
 
-        from client.core.agent.facade import SessionFacade
-        from client.core.agent.types import RunnerConfig, RunnerDeps
+        from lib.agent_runtime.facade import SessionFacade
+        from lib.agent_runtime.types import RunnerConfig, RunnerDeps
 
         # Mock LLM gateway：use_stream=False 时 runner 走 call()（一轮结束）
         class _MockGateway:
             async def call(self, request):
-                from client.core.agent.types import LLMResponse
+                from lib.agent_runtime.types import LLMResponse
                 return LLMResponse(content="ok", stop_reason="end_turn")
 
         class _MockToolRegistry:
@@ -304,12 +304,12 @@ class TestSessionFacadeStartModelOverrideAndTitle:
         """start() 不传 model_override 时 runner.config.model 应保持原值。"""
         import asyncio
 
-        from client.core.agent.facade import SessionFacade
-        from client.core.agent.types import RunnerConfig, RunnerDeps
+        from lib.agent_runtime.facade import SessionFacade
+        from lib.agent_runtime.types import RunnerConfig, RunnerDeps
 
         class _MockGateway:
             async def call(self, request):
-                from client.core.agent.types import LLMResponse
+                from lib.agent_runtime.types import LLMResponse
                 return LLMResponse(content="ok", stop_reason="end_turn")
 
         class _MockToolRegistry:
@@ -342,12 +342,12 @@ class TestSessionFacadeStartModelOverrideAndTitle:
         """start() 新建会话首句入库后 sessions.title 应为前 20 字（spec D7）。"""
         import asyncio
 
-        from client.core.agent.facade import SessionFacade
-        from client.core.agent.types import RunnerConfig, RunnerDeps
+        from lib.agent_runtime.facade import SessionFacade
+        from lib.agent_runtime.types import RunnerConfig, RunnerDeps
 
         class _MockGateway:
             async def call(self, request):
-                from client.core.agent.types import LLMResponse
+                from lib.agent_runtime.types import LLMResponse
                 return LLMResponse(content="ok", stop_reason="end_turn")
 
         class _MockToolRegistry:
@@ -381,12 +381,12 @@ class TestSessionFacadeStartModelOverrideAndTitle:
         """start() 已存在会话（续轮）不应覆盖已有 title（spec D7 只新建会话触发）。"""
         import asyncio
 
-        from client.core.agent.facade import SessionFacade
-        from client.core.agent.types import RunnerConfig, RunnerDeps
+        from lib.agent_runtime.facade import SessionFacade
+        from lib.agent_runtime.types import RunnerConfig, RunnerDeps
 
         class _MockGateway:
             async def call(self, request):
-                from client.core.agent.types import LLMResponse
+                from lib.agent_runtime.types import LLMResponse
                 return LLMResponse(content="ok", stop_reason="end_turn")
 
         class _MockToolRegistry:
@@ -425,12 +425,12 @@ class TestSessionFacadeStartModelOverrideAndTitle:
         """start() 首句超过 20 字时 title 应截断到 20 字（spec D7）。"""
         import asyncio
 
-        from client.core.agent.facade import SessionFacade
-        from client.core.agent.types import RunnerConfig, RunnerDeps
+        from lib.agent_runtime.facade import SessionFacade
+        from lib.agent_runtime.types import RunnerConfig, RunnerDeps
 
         class _MockGateway:
             async def call(self, request):
-                from client.core.agent.types import LLMResponse
+                from lib.agent_runtime.types import LLMResponse
                 return LLMResponse(content="ok", stop_reason="end_turn")
 
         class _MockToolRegistry:

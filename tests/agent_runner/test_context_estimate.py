@@ -25,10 +25,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import EventStore  # noqa: E402
-from client.core.agent.compactor import Compactor, UsageAnchor  # noqa: E402
-from client.core.agent.types import Message  # noqa: E402
 from client.panels.chat import ChatPanel  # noqa: E402
+from lib.agent_runtime import EventStore  # noqa: E402
+from lib.agent_runtime.compactor import Compactor, UsageAnchor  # noqa: E402
+from lib.agent_runtime.types import Message  # noqa: E402
 
 
 def _run(coro):
@@ -80,7 +80,7 @@ class TestEstimateContextTokens:
 
     def test_same_tick_message_is_counted_through_the_store(self, tmp_path, monkeypatch):
         """同一个时间戳里"先写 usage 再写消息"也必须被算进增量（走真库，不是手搓 float）。"""
-        from client.core.agent import event_store as es_module
+        from lib.agent_runtime import event_store as es_module
 
         store = _new_store(tmp_path)
         sid = "sess-tick"
@@ -146,7 +146,7 @@ class TestShouldCompactWithAnchor:
     def test_unknown_limit_never_compacts_and_says_so(self, caplog):
         """上限未知 ⇒ 明说"上限未知"，而不是拿编出来的默认值判压缩。"""
         c = Compactor(max_context_tokens=0)
-        with caplog.at_level("INFO", logger="localagent.agent.compactor"):
+        with caplog.at_level("INFO", logger="parcae.agent.compactor"):
             assert c.should_compact([_msg("a" * 4000)]) is False
         lines = [r.getMessage() for r in caplog.records]
         assert any("上限未知" in line for line in lines), lines
@@ -264,7 +264,7 @@ class TestUsageAnchorQuery:
         同一次调用里连着写会拿到同一个浮点值，`>` 判不出来——那种"相等"是本机
         时钟粒度，不是这里要测的语义。
         """
-        from client.core.agent import event_store as es_module
+        from lib.agent_runtime import event_store as es_module
 
         store = _new_store(tmp_path)
         sid = "sess-3"
@@ -308,7 +308,7 @@ class TestUsageAnchorQuery:
 
 class TestRunnerReadsTheAnchor:
     def test_estimate_line_uses_the_stored_anchor(self, tmp_path, caplog):
-        from client.core.agent import MockLLM, RunnerConfig, RunnerDeps, SessionRunner
+        from lib.agent_runtime import MockLLM, RunnerConfig, RunnerDeps, SessionRunner
 
         store = _new_store(tmp_path)
         sid = "sess-run"
@@ -329,7 +329,7 @@ class TestRunnerReadsTheAnchor:
                     ),
                     config=RunnerConfig(session_id=sid, use_stream=False),
                 )
-                with caplog.at_level("INFO", logger="localagent.agent.runner"):
+                with caplog.at_level("INFO", logger="parcae.agent.runner"):
                     return await runner.run()
 
             _run(scenario())
@@ -345,7 +345,7 @@ class TestRunnerReadsTheAnchor:
 
     def test_no_compactor_injected_still_runs(self, tmp_path, caplog):
         """观测点不许把主循环带崩：没注入 compactor 时静默跳过。"""
-        from client.core.agent import MockLLM, RunnerConfig, RunnerDeps, SessionRunner
+        from lib.agent_runtime import MockLLM, RunnerConfig, RunnerDeps, SessionRunner
 
         store = _new_store(tmp_path)
         sid = "sess-nocomp"
@@ -366,7 +366,7 @@ class TestRunnerReadsTheAnchor:
 
     def test_anchor_query_failure_degrades_to_warning(self, tmp_path, caplog, monkeypatch):
         """usage 表读失败（锁住/坏库）只降级成一条 warning，主循环照跑。"""
-        from client.core.agent import MockLLM, RunnerConfig, RunnerDeps, SessionRunner
+        from lib.agent_runtime import MockLLM, RunnerConfig, RunnerDeps, SessionRunner
 
         store = _new_store(tmp_path)
         sid = "sess-badanchor"
@@ -387,7 +387,7 @@ class TestRunnerReadsTheAnchor:
                 ),
                 config=RunnerConfig(session_id=sid, use_stream=False),
             )
-            with caplog.at_level("INFO", logger="localagent.agent.runner"):
+            with caplog.at_level("INFO", logger="parcae.agent.runner"):
                 return await runner.run()
 
         outcome = _run(scenario())

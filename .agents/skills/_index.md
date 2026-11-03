@@ -31,7 +31,7 @@
 
 ### chat_digest (chat_digest) [adhoc]
 
-- **描述**：通用微信群聊「定向同步+时间窗口导出+总结」：任意群按名解析，产出 MD/JSON 切片供总结，依赖 wechatDecode 项目
+- **描述**：通用微信「定向同步+时间窗口导出+总结」：群聊按群名解析（digest_room.py）、单人聊天按联系人解析（export_private.py），产出 MD/JSON 切片供总结，依赖 wechatDecode 项目
 - **task_type**：`adhoc.chat_digest`
 - **Skill 文件**：`workspace/chat_digest/SKILL.md`
 
@@ -125,6 +125,12 @@
 - **task_type**：`adhoc.task_room`
 - **Skill 文件**：`workspace/task_room/SKILL.md`
 
+### tool_dojo (tool_dojo) [system]
+
+- **描述**：工具体检 - 三层探针（L0契约/L1冒烟/L2任务）定期评价 MCP 工具对指定任务好不好用
+- **task_type**：`system.tool_dojo`
+- **Skill 文件**：`workspace/tool_dojo/SKILL.md`
+
 ### ue_learning_copilot (ue_learning_copilot) [adhoc]
 
 - **描述**：UE 学习副驾 - 常驻读 UE 日志成事件流，热键提问时以可核实出处回答 UE 5.8 用法
@@ -145,7 +151,7 @@
 
 ### web_archive (web_archive) [adhoc]
 
-- **描述**：小黑盒/微信/飞书云文档/腾讯文档批量存档为MD（含评论+图片）；森空岛文章纯图片下载；doc.weflow.top 全站归档产物（WARC+离线镜像+MD，脚本已回收、方法学见 SKILL.md）
+- **描述**：小黑盒/微信/飞书云文档/腾讯文档/小红书批量存档为MD（含评论+图片）；森空岛文章纯图片下载；doc.weflow.top 全站归档产物（WARC+离线镜像+MD，脚本已回收、方法学见 SKILL.md）
 - **task_type**：`adhoc.web_archive`
 - **Skill 文件**：`workspace/web_archive/SKILL.md`
 
@@ -225,7 +231,7 @@
 |------|------|
 | **触发词** | 操作电脑、屏幕操作、点击、截图、帮我操作、翻页、自动操作 |
 | **Skill 文件** | `.agents/skills/computer_use/SKILL.md` |
-| **工具脚本** | `server/screen/`、`server/vl/vision.py`、`server/gui_process.py` |
+| **工具脚本** | `server/screen/`、`server/vl/vision.py`、`server/overlay_client.py` |
 | **依赖** | `/screen/*`、`/vision/*` |
 | **MCP** | `http://127.0.0.1:8766/mcp` |
 
@@ -358,7 +364,7 @@
 | **Skill 文件** | `.agents/skills/memory_generation.md` |
 | **触发方式** | 用户说"生成记忆" → agent 调 `agent_guide(task_type='recurring.memory_generation')` → 返回 5 步工作流 → 执行 |
 | **输出** | 结构化记忆写入 facts 表（含 type/name/description/content/why/how_to_apply） |
-| **依赖** | `memory_list` / `memory_get` / `memory_set` / `localagent_advanced_tool(memory_maintain)` |
+| **依赖** | `memory_list` / `memory_get` / `memory_set` / `parcae_advanced_tool(memory_maintain)` |
 
 **记忆类型**：preference（用户偏好）/ project（项目状态）/ reference（参考资料）
 
@@ -465,7 +471,7 @@
 | **触发词** | 归档 WIP、清理已完成 WIP、把完成的 WIP 转记忆、WIP 太多、WIP 膨胀 |
 | **Skill 文件** | `.agents/skills/wip_archive.md` |
 | **task_type** | `system.wip_archive` |
-| **依赖** | `wip_list`（直连，默认轻量）/ `wip_get_many`（直连，批量取全文）/ `localagent_advanced_tool(wip_delete)` / `memory_set` |
+| **依赖** | `wip_list`（直连，默认轻量）/ `wip_get_many`（直连，批量取全文）/ `parcae_advanced_tool(wip_delete)` / `memory_set` |
 
 **用途**：批量筛选 `completed` WIP → 提炼经验 → 写入结构化记忆 → 物理删除 WIP 记录。解决 WIP 表膨胀阻碍网页审查面板渲染和 `wip_list` 查询可读性。
 
@@ -605,7 +611,7 @@
 |------|------|
 | **触发词** | 联网、上网查、搜一下、读网页、读链接、抓网页、web访问、联网工具、web_access、搜索、search、fetch、爬取、抓取页面 |
 | **Skill 文件** | `.agents/skills/web_access/SKILL.md` |
-| **task_type** | （元 skill，不对应单独 task_type；任何联网任务的入口决策层） |
+| **task_type** | （元 skill：frontmatter 标 `meta_skill: true`，设计上不对应 task_type、不进 GUIDE_REGISTRY；见 `docs/agent-guide.md`「元 skill」节） |
 | **用途** | 联网任务前先按决策表选工具（WebSearch/WebFetch/CDP/curl/Jina/本地书签检索），避免选错工具浪费时间或拿到空内容 |
 
 **6 条决策路径**：
@@ -977,6 +983,142 @@
 
 ---
 
+### 64. dev_toolkit 部署 (dev-toolkit-deploy) [dev] [tool]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 部署 dev_toolkit、把 toolkit 弄过来、这个项目 skill 太少、装 dev toolkit、toolkit 部署 |
+| **Skill 文件** | `.agents/skills/dev/dev-toolkit-deploy/SKILL.md` |
+| **task_type** | `dev.dev_toolkit_deploy` |
+| **role** | `tool`（工具型 skill） |
+| **用途** | 把 `workspace/dev_toolkit`（34 个 skill 蓝图）**增量合并**到某个项目，而不是全量覆盖 |
+
+关键不是拷贝而是增量合并——目标项目多半已有自己的 `.agents/` 资产（业务 skill、AGENTS.md、memory），全量覆盖会毁掉真机实测结论。6 步：摸清现有资产 → 备份将被替换的文件 → 按项目类型裁剪 → 拷入（排除裁剪项）→ 合并 `_index.md`（最关键）→ 校验。
+
+---
+
+### 65. Parcae 与远端合并 (parcae-remote-sync) [dev] [support]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 和远端合并、同步一下远端、pull 一下、远端分叉、origin/master 分叉、和远端同步 |
+| **Skill 文件** | `.agents/skills/dev/parcae-remote-sync/SKILL.md` |
+| **task_type** | `dev.parcae_remote_sync` |
+| **role** | `support`（辅助排障/流程） |
+| **用途** | 主仓库与 `origin/master` 分叉时安全合并：分「落后+脏工作区」（备份/stash/快进/pop）与「领先+干净」（merge/消解 CHANGELOG 冲突）两场景 |
+
+两种情况都要先判「远端那笔是否已发版」来决定冲突消解规则，并全程保持 CHANGELOG 的 CRLF。与 `dev.resolving_merge_conflicts` 的分工：后者是通用 git 冲突逐 hunk 解法，本 skill 是本仓库特有的分叉同步流程（含 CHANGELOG 合并规则）。
+
+---
+
+### 66. 日志驱动故障分诊 (log-driven-defect-triage) [dev] [support]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 贴日志、看这个报错、traceback、跑完提示成功但数据不对、报错了为什么说一切正常、这个错以前没有、我操作了但没生效、卡我一会、太慢了、退出码 0 但失败 |
+| **Skill 文件** | `.agents/skills/dev/log-driven-defect-triage/SKILL.md` |
+| **task_type** | `dev.log_driven_defect_triage` |
+| **role** | `support`（辅助排障） |
+| **用途** | 把日志还原成可复现证据、定位根因；也覆盖「没有日志只说 XX 不成功」与「只有性能症状（卡/慢/重复）」两种情形 |
+
+第 0 步先量日志本身别急着读；核心动作是从日志还原 payload → 拿真机原文过真函数做修复前/后对照 → 版本归因 → 质疑「一切正常」到底测的是哪个轴。另覆盖级联错误（报错指的不是真凶）与退出码被管道吃掉（假 EXIT=0）两类假象。
+
+---
+
+### 67. 推远端前就绪体检 (repo-push-readiness) [dev] [support]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 要推远端、多机合作、要开源、首次 push、加 remote、换台机器继续、仓库体检、凭据泄露 |
+| **Skill 文件** | `.agents/skills/dev/repo-push-readiness/SKILL.md` |
+| **task_type** | `dev.repo_push_readiness` |
+| **role** | `support`（辅助审查） |
+| **用途** | 推远端（尤其多机协作）前的就绪体检：凭据扫描、大文件、gitignore 正确性、换行符与二进制声明、协作资产是否入库、断链检查 |
+
+核心不是写 `.gitignore`，而是「先扫真相、再改规则、最后验证」——凭据进了历史就得洗，规则写错只是噪音。第 5.5 步断链检查最容易漏、代价最大。
+
+---
+
+### 68. SDD spec 开工前核验 (sdd-spec-verification) [dev] [support]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 可以开工了吗、这份计划齐不齐、看看还差什么、spec 核验、开工前检查、sdd 核验 |
+| **Skill 文件** | `.agents/skills/dev/sdd-spec-verification/SKILL.md` |
+| **task_type** | `dev.sdd_spec_verification` |
+| **role** | `support`（辅助审查） |
+| **用途** | 动手实现前把 spec 与代码实际逐条对照，产出「阻塞项 / 中等问题 / 已核实无误」清单，修完再开工 |
+
+核验六步（调研事实对代码 → Bounds/文件归属 → mockup 与 spec 决策一致性 → 引用路径存在性 → 验收命令**真跑** → 基线冻结），每步都要拿代码证据。
+
+---
+
+### 69. Windows 只读内核取证 (windows-kernel-readonly-forensics) [dev] [tool]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 内核不回收、僵尸进程对象、内存泄漏到重启才好、哪个驱动在漏引用、引用计数为什么是 1、帮我枚举内核回调、obtrace、LiveKd |
+| **Skill 文件** | `.agents/skills/dev/windows-kernel-readonly-forensics/SKILL.md` |
+| **task_type** | `dev.windows_kernel_readonly_forensics` |
+| **role** | `tool`（工具型 skill） |
+| **用途** | 只读内核取证：LiveKd 读活内存（引用计数/EPROCESS/通知回调表/对象回调链）+ GFlags runtime `!obtrace` 打引用调用栈 + 内核地址点名到模块 |
+
+排查「进程退出后内核对象不回收 / 内存只涨不降 / 僵尸 EPROCESS 堆积 / 那 1 个残留引用是谁给的」。核心是一整套**不写 Start、不重启、不碰设备**的采集流程；含 `!obtrace` 账本 `+32768` 编码陷阱、`!process 0 0 <name>` 卡死陷阱，以及不依赖 KD 的 CID 表判据。结论真源见 `workspace/windows_forensics/CONCLUSION.md`。
+
+---
+
+### 80. 会话交接 (handoff) [dev] [method]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 写交接、写交接文档、交接稿、接手文档、换会话、我换对话、换个对话、上下文要满了、留给下一个会话、hand off、handoff、交接出去、交接给下一个 |
+| **Skill 文件** | `.agents/skills/dev/handoff/SKILL.md` |
+| **task_type** | `dev.handoff` |
+| **role** | `method`（方法论；供长任务收尾按需引用，**尚未**与 `task_closure` 硬接线） |
+| **用途** | 会话要结束但活没干完 / 上下文将满时，把当前状态压成一份可接手的稿子；新会话读它续跑 |
+
+借鉴 mattpocock/skills productivity/handoff。原版存 `%TEMP%` 且只有写入侧；本版落 `temp/handoff/HANDOFF_<日期>_<主题>.md`（`temp/*` 不入库，且已进 `temp_cleanup.md` 保护清单），**不注册 wip_tasks**（避免删文件后留悬挂记录），并补了接手侧与生命周期（新稿取代旧稿 / 任务完成即删）。与 `wip_tracker` 分工：它管「这活没完」，本 skill 管「这次卡在哪儿」。触发词刻意不含裸词「交接文档」——它会把「整理交接文档」抢过来，整理类需求走 `neat-freak`。
+
+---
+
+### 81. 翻历史会话还原对话 (wb-history-recall) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 我不是说过吗、我之前说过、原话、翻一下 workbuddy 数据库、历史会话、之前的对话、另一个账号那个对话、当时谁定的、这话是我说的还是你说的、wb 数据库 |
+| **Skill 文件** | `.agents/skills/daily/wb-history-recall/SKILL.md`（+ `references/case-20261028-prompt-versions.md`：双方对照的完整案例） |
+| **task_type** | `adhoc.wb_history_recall` |
+| **工具** | `tools/wb_history.py`（`list` / `dump` / `copy`；`list --sort activity` 看活跃，`dump --tail N` 看尾部、`-c N` 带上下文、`--files` 出改动文件清单） |
+| **用途** | 从本机 WorkBuddy 会话库还原历史对话，找回用户原话与当时的裁定链 |
+
+**核心铁律**：**不要只读用户说了什么**。默认同时抽用户原话与 agent 回复（`--user-only` 仅用于逐字取证，判语境必须回看 agent 侧）。只读用户一侧会①把 agent 的提议当用户要求 ②把一句反问当最终裁定 ③看不懂「这一版 / 这个」指什么。
+
+**两个读法要点**：① `[n]` = 全量条目序号，不因 `-k`/`-c`/`--tail`/`--user-only` 重排；过滤器升级会整体位移，引用要连 session id + 时间一起写。② `<cb_summary>` 是压缩摘要块，**内部还回放着历史 `<user_query>`**（本机 521 条里 520 条整条只是摘要）⇒ 必须整条剥掉再找本轮输入；`<task-notification>`（891 条）、`<teammate-message>`（37 条）、续写提示（89 条）同属「不是人话」，按前缀挡。
+
+**产出**：`temp/wb_hist/<session>_chat.md` + 终端首句目录（`U`/`A` 标角色）。文件可能十几 MB，先看目录再定点读。
+
+**原落点迁移**：原 `.agents/memory/TOPIC_wb_history.md` 已撤销（方法论应进 skill 而非记忆层），案例并入 `references/`。
+
+---
+
+### 83. 限流换号接手会话 (wb-takeover) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 限流、换号、读这个 skill 按流程走、当前账号、被限流截断的会话、要接手的会话、刚才那几场断哪了、接着做、继续任务、扫一下被我打断的活、看着结束了其实还没完、还想接着弄、等回话 |
+| **Skill 文件** | `.agents/skills/daily/wb-takeover/SKILL.md` |
+| **task_type** | `adhoc.wb_takeover` |
+| **工具** | `tools/wb_takeover.py`（`scan` 三段式列候选 / `export` 出接手包 / `accounts` 看号） |
+| **用途** | 换号后把「断在半路的会话」捞出来交接给新 agent：扫 → 报序号 → 导包 → 给派发提示词。**不限于 429**：正常收尾但末句在等你回话的（`◇ 等回话`）同样列出来。**已归档的一律不列**（归档＝用户明确不再理会） |
+
+**三步走**：①用户换号后发固定提示词（读本 skill + 当前手机号）②你 `scan` 后按序号汇总（每场一句「断在」），用户回数字 ③`export --pick` 逐场出包（`HANDOFF.md` 事实头 + `chat_full.md` 全量对话 + `source.jsonl` 源拷贝 + `PROMPT.md`），再把提示词逐条贴给用户。
+
+**核心铁律**：①**收尾形态只能从 jsonl 尾条判断**，`sessions.status` 是 UI 状态（19 场非正常收尾只有 4 场 `error`）；但 `archived` 是唯一该信的状态字段——它判的是「还归不归用户管」，与「怎么断的」是两个问题 ②**429 横幅必须 `re.match` 从头锚定**，用「子串包含」会把在正文里引用过那句话的会话误判成限流 ③手机号查不到 uuid（库里没有），别为它停下；映射只落不入库的 `data/wb_accounts.json` ④**不必细读会话写 handoff**：放源文件，让接手方自己读（用户明确偏好）。
+
+**产出**：`temp/wb_takeover/<最后活动日期>/<会话8位>/`，全 ASCII 短路径；`last_scan.json` 存编号表供 `--pick` 复用。
+
+---
+
 ## daily/ 桶（日常事务）
 
 ### 43. 教学 (teach) [daily]
@@ -1180,7 +1322,7 @@
 | **触发词** | GKD签到、GKD规则、自动签到、快照解析、节点匹配、规则失效、实机回归、GKD snapshot |
 | **Skill 文件** | `.agents/skills/gkd_signin_automation/SKILL.md` |
 | **task_type** | `adhoc.gkd_signin_automation` |
-| **工具脚本** | `scripts/collect.py`、`inspect_snapshot.py`、`validate_rule.py` |
+| **工具脚本** | `.agents/skills/gkd_signin_automation/scripts/collect.py`、`inspect_snapshot.py`、`validate_rule.py` |
 | **用途** | Android 签到流程可行性分级、ADB快照采集、直接节点解析、规则静态回放、订阅导入与实机日志回归 |
 
 ---
@@ -1284,7 +1426,7 @@
 | 属性 | 值 |
 |------|------|
 | **触发词** | 写bat、bat脚本、批处理、.bat、.cmd、启动脚本、bat乱码、bat跑不了、批处理报错、不是内部或外部命令、找不到批处理标签、batch script、cmd脚本 |
-| **Skill 文件** | `.agents/skills/bat_writing/SKILL.md`（+ `references/guide.md` 实测细节 / `scripts/fix_bat_encoding.py` 自检+修复） |
+| **Skill 文件** | `.agents/skills/bat_writing/SKILL.md`（+ `references/guide.md` 实测细节 / `.agents/skills/bat_writing/scripts/fix_bat_encoding.py` 自检+修复） |
 | **task_type** | `adhoc.bat_writing` |
 | **用途** | 编写和修复能在中文 Windows 上跑起来的 .bat/.cmd；核心铁律 GBK(CP936)+CRLF+无BOM，写完必须 `--check` 自检全 OK 才算完成 |
 
@@ -1311,6 +1453,156 @@
 
 ---
 
+### 70. 跨机交付四件套 (cross-machine-delivery-bundle) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 把缺的东西打包给我、帮我打包传进去、跨机交接、虚拟机缺的补一下、跨机交付、打包传给另一台机 |
+| **Skill 文件** | `.agents/skills/daily/cross-machine-delivery-bundle/SKILL.md` |
+| **task_type** | `daily.cross_machine_delivery_bundle` |
+| **用途** | 把工作区文件从 A 机（真机）打包交付到 B 机（VM/另一台机），产出「压缩包 + 完整性清单 + 交付说明 + 落地脚本」四件套 |
+
+第 0 步先判自己在哪台机（盘符判据），不做这步后面全白干；再把报告里出现的每个路径当**断言**逐条验，最后按「项目 `temp/` 内 staging + sha256 清单 + `7z -tzip`」打包。
+
+---
+
+### 71. ESP32 板包离线安装 (esp32-arduino-offline-install) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | ESP32 装不上、arduino-cli 很慢、ESP32 板包、Arduino IDE 下载慢、esp32 离线安装 |
+| **Skill 文件** | `.agents/skills/daily/esp32-arduino-offline-install/SKILL.md` |
+| **task_type** | `daily.esp32_arduino_offline_install` |
+| **用途** | Arduino IDE / arduino-cli 装 ESP32 板包极慢时，用 gh-proxy 镜像预下载到 staging 再离线安装（Windows 实测） |
+
+5 步：Range 测速选镜像 → 拿 `package_esp32_index.json` → 解析出 `toolsDependencies` 清单 → `curl` 批量下到 `%LOCALAPPDATA%\Arduino15\staging\packages\` → 用 IDE 自带 `arduino-cli` 离线安装。坑：IDE 内置 CLI 不走系统代理（加速器无效）；命令行编译报 `cc1plus ... @C:\Windows\TEMP` 错时先把 TEMP/TMP 改到用户目录。
+
+---
+
+### 72. 群聊就业情报导入 Future (future-group-intel-import) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 把 XX 群的招聘就业内容导入 Future、就业情报导入、秋招情报摘录、私聊定向导出加到 Future、群聊秋招情报 |
+| **Skill 文件** | `.agents/skills/daily/future-group-intel-import/SKILL.md` |
+| **task_type** | `daily.future_group_intel_import` |
+| **用途** | 把微信群「招聘/就业/秋招」话题、以及与学长/从业者的私聊对谈，按 `<projects_parent>/Future` 的规范导入该项目（raw 摘录/导出 + 02 档案收拢 + git 提交） |
+
+⚠ 本 skill 指向的是 **Future 项目**（不在本仓库）。落点与命名以 Future 项目内权威副本（`_群聊秋招情报摘录-流程说明.md` + `CONVENTIONS.md`）为准；群内容导出走本仓库的 `adhoc.chat_digest` 管线。口径要「按批恢复」——上一批若是收窄批，本批未必继承。
+
+---
+
+### 73. Godot MCP 工具链接入 (godot-mcp-toolchain-deploy) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 部署 Godot MCP、接入 godot-ai-toolkit、让 AI 能操作 Godot 场景、gdflow init 报错、Godot MCP |
+| **Skill 文件** | `.agents/skills/daily/godot-mcp-toolchain-deploy/SKILL.md` |
+| **task_type** | `daily.godot_mcp_toolchain_deploy` |
+| **用途** | 把 Godot AI 工具链（`gdflow.py` + `gdmcp` CLI + Godot-MCP-Native 补丁版 + `godot-multi-manager`）接入 Godot 4.x 项目，让 Agent 通过 MCP 操纵编辑器 |
+
+5 步：拷工具链 → **先起 manager 再 init（顺序不能反）** → init → 验收 → 注册到 IDE 的 MCP 配置（`~/.workbuddy/mcp.json`，注册后需在客户端信任/重连）。
+
+---
+
+### 74. 记忆卫生（分层压缩） (memory-hygiene-two-layer) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 把记忆压缩一下、记忆太长了、记忆被截断、这条不该在全局记忆里、整理记忆、memory truncated、记忆分层 |
+| **Skill 文件** | `.agents/skills/daily/memory-hygiene-two-layer/SKILL.md` |
+| **task_type** | `daily.memory_hygiene_two_layer` |
+| **用途** | 压缩被注入的长期记忆并维持三层结构（L2 注入投影 / L1 `.agents/memory/` 真源 / L0 日志） |
+
+含「注入上限按**字符**计（全局 4000 / 项目 8000）」的实测判据、**升 L2 准入四问**、**强制置换**纪律，以及 8 步动作顺序（备份 → 移 → 反向查重 → 下沉 TOPIC → 量化验收 → 锚点验不丢信息 → 改文件头 → 写日志）。⛔ 真源是 `.agents/memory/`，`.workbuddy/memory/MEMORY.md` 只是注入投影。
+
+---
+
+### 75. 音乐库元数据取证与修复 (music-library-metadata-forensics) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 歌曲信息错误、歌词绑错、外文歌乱码、歌词绑到别人的歌上、专辑串了、播放器曲库和归档对不上、存量回扫、音乐库元数据 |
+| **Skill 文件** | `.agents/skills/daily/music-library-metadata-forensics/SKILL.md` |
+| **task_type** | `daily.music_library_metadata_forensics` |
+| **用途** | 本地音乐库（归档库 ↔ 播放器）元数据出错时的完整流程：只读取证 → 定位是数据脏还是上游代码改坏 → 双向验证 → 勾选清单 → 按勾选落库 → 同步下游 → 存量回扫 |
+
+第 0 步先确认「在读哪个库」（常见陷阱：运行中的实例不是源码目录）；用音频文件标签当 ground truth 反查数据库；把「修复函数本身把好数据改坏」这一反向 bug 区分开；同步下游走「只增不删」通道；存量回扫只按**正向证据**动手。
+
+---
+
+### 76. 乐谱 OMR 与音频验证 (pdf-score-omr-and-audio-verify) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 这是不是那个视频的谱、帮我转成 MIDI、拿这份谱给转谱结果打分、乐谱 OMR、Audiveris、MusicXML、Synthesia 读键盘 |
+| **Skill 文件** | `.agents/skills/daily/pdf-score-omr-and-audio-verify/SKILL.md` |
+| **task_type** | `daily.pdf_score_omr_and_audio_verify` |
+| **用途** | 乐谱 PDF/图片 → 机器可读 MusicXML/MIDI；验证「这份谱是不是那条演奏视频的谱」；并用它当答案给转谱通道（视觉/音频）定量打分 |
+
+含 Audiveris 在 Windows 的免安装解包与批量跑法、`oemer` 为什么不能用、GitHub release 走 gh-proxy、music21 的 offset 陷阱、librosa DTW 返回形状陷阱。最贵的坑：**DTW 的时序特征必须带时值**，否则时间轴线性漂移（会把好通道判成瞎猜）。若「演奏视频」其实是 Synthesia 式 MIDI 渲染器，直接读键盘 88 键键态。
+
+---
+
+### 77. 本机 VMware 桥接网络 (vmware-bridged-networking-this-host) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 虚拟机怎么桥接、VM 上不了网、虚拟机要独立 IP、避开按公网 IP 的风控、vmnetcfg、vmware_bridge、VMware 桥接 |
+| **Skill 文件** | `.agents/skills/daily/vmware-bridged-networking-this-host/SKILL.md` |
+| **task_type** | `daily.vmware_bridged_networking_this_host` |
+| **用途** | 本机（Windows 真机）VMware Workstation 桥接：认唯一可桥接的物理网卡、收敛 VMnet0 的自动桥接、澄清「桥接不改变公网出口 IP」 |
+
+⛔ 不可桥接清单里最坑的是 **Radmin VPN**（自带默认网关 `26.0.0.1`，是自动桥接的最大误选源）。判据：绑定不存 `netmap.conf`；注册表 `…\VMnetLib\VMnetConfig\vmnet0` 只有 DisplayName ⇒ 处于自动桥接。**「桥接不改变公网出口 IP」是最常见的误解**。VM 运维总体方案另见 `docs/vm-ops.md`（本文件第 15–20 条引用本 skill 的实测数据）。
+
+---
+
+### 78. 安全删除与回收空间 (windows-recycle-and-space-reclaim) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 把这个目录删掉、清理 temp、太占存储了、帮我回收空间、磁盘满了、删掉这个大文件、怎么删到回收站、那个文件还在吗 |
+| **Skill 文件** | `.agents/skills/daily/windows-recycle-and-space-reclaim/SKILL.md`（+ 同目录 `.agents/skills/daily/windows-recycle-and-space-reclaim/scripts/recycle_audit.py` / `.agents/skills/daily/windows-recycle-and-space-reclaim/scripts/recycle_purge.py`） |
+| **task_type** | `daily.windows_recycle_and_space_reclaim` |
+| **用途** | 本机 Windows 安全删除并真正回收空间：走项目既有的 ctypes 回收站工具（`tools/disk/recycle.py`），解决「进了回收站却不释放空间」的核心陷阱 |
+
+⛔ 本机**所有** `rm`/`Remove-Item`/`shutil` 删除都被 shim 转成「送回收站」。核心陷阱：同盘回收站**不释放空间**（以可用空间数字为准）。含回收站条目审计（`$I` 元数据解析）、按身份核对后永久清理、以及**反向**能力——从回收站把整目录捞回来。永久删由用户自己做，动手前先 dry run 列清单。
+
+---
+
+### 79. 媒体文件夹整理与重命名 (media-file-organizer) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | 帮我整理这个文件夹、把视频摊开、按日期角色重命名、批量改名、批量解压归档、文件夹太乱了、媒体库整理、差分视频整理、把无关文件挪开、file organizer |
+| **Skill 文件** | `.agents/skills/daily/media-file-organizer/SKILL.md`（+ 同目录脚本 `.agents/skills/daily/media-file-organizer/scripts/scan_media.py` / `.agents/skills/daily/media-file-organizer/scripts/verify_media_folder.py` / `.agents/skills/daily/media-file-organizer/scripts/ingest_media_batch.py`，参考 `.agents/skills/daily/media-file-organizer/references/naming-and-entity-verification.md` / `.agents/skills/daily/media-file-organizer/references/worked-example-20261023.md` / `.agents/skills/daily/media-file-organizer/references/bilibili-works-ingest.md`） |
+| **task_type** | `daily.media_file_organizer` |
+| **用途** | 混装媒体目录 → 平铺 + 统一命名（`M-D 角色 原画/差分`）：只读盘点出映射表，按同格式/同月分批执行，每批预检 + 回读；加密 zip 用 7-Zip，杂物走回收站；收尾核官方名；固定库增量更新走 `ingest_media_batch.py`（plan→复核→run） |
+
+⛔ 核心纪律来自一次真实事故：用户上一个「一键脚本」误删了全部文件。因此本 skill **禁止**任何"一条命令处理整个目录"的写法，必须映射表先行、分批、逐批回读数字；**禁止**物理删除；**禁止**覆盖同名目标；角色名先保留原写法，官方名核对放最后且只改有证据的（跨 IP 同名如「提丰 / 提弗洛斯」是不同角色）。
+
+⛔ **两个固定库互相独立，别混放**：`<data_drive>:/<bilibili_videos>作品` 是 `角色X.Y.mp4` + 月份子目录（来源平铺 7z），`<data_drive>:/<media_staging>\new` 是 `M-D 角色 版本.mp4` + 平铺（来源日期子目录 zip）。判库看命名形态，不看角色名（两边都会有同角色）。
+
+---
+
+### 82. 翻 Qoder 历史会话还原对话 (qoder-history-recall) [daily]
+
+| 属性 | 值 |
+|------|------|
+| **触发词** | Qoder 里那个对话、我在 qoder 说过、翻一下 qoder 数据库、qoder 会话记录、另一个 IDE 里那场、qoder 那边怎么定的、qoder 数据库 |
+| **Skill 文件** | `.agents/skills/daily/qoder-history-recall/SKILL.md` |
+| **task_type** | `adhoc.qoder_history_recall` |
+| **工具** | `tools/qoder_history.py`（`list` / `dump` / `copy`；`dump --tail N` 看尾部、`-c N` 带上下文、`--files` 出改动文件清单） |
+| **用途** | 从本机 Qoder（QoderCN）会话库 `~/.qoder-cn/projects/*/*.jsonl` 还原历史对话，找回用户原话与当时的裁定链 |
+
+**核心铁律**：与 `wb-history-recall` 同一条——**不要只读用户说了什么**，默认双方都抽（`--user-only` 仅逐字取证用）。
+
+**Qoder 特有事实**：无 sessions 索引表（标题=首条人类消息前 45 字，得现推）；`type=user` 里**只有 1% 是人类**，其余是工具回显/内部重试，判据 `origin.kind=="human"`；一条 agent 回复按 content block 拆多行、共用 `message.id`，必须聚合否则碎成几百条空回复；时间戳 user/assistant 是 ISO(UTC)、其余是毫秒 epoch；压缩点在 `type=system` + `subtype=compact_boundary`（本机 362 条），压线之前的轮次当时只被 agent 看到摘要；改动面只看 `file-history-snapshot` 的 `trackedFileBackups`（31/31 非空）。`[n]` = 全量条目序号，不重排。产物 `temp/qoder_hist/<session>_chat.md` + 首句目录（`U`/`A`）。
+
+**跨 harness**：同一决定可能在 Qoder 与 WorkBuddy 两边都聊过 ⇒ 以时间靠后者为准，并在结论里标明「哪边说、什么时候、谁推翻谁」，⛔ 不许把两边原话混成一段。
+
+---
+
 ## 后端 API 接口
 
 > 完整 API 速查已移至 [docs/api-reference.md](../../docs/api-reference.md)（按功能分桶、精简描述、浏览器 API 分 Session/核心/辅助三层）。
@@ -1329,7 +1621,7 @@
 | OCR | `ocr_file` `ocr_path` | `.agents/skills/ocr.md` |
 | 视觉 | `vision_locate` `understand_image` | `computer_use/SKILL.md` |
 | 待办 | `todos_due` `wip_list` `wip_get` `wip_get_many` | `task_reminder.md` |
-| 高级网关 | `localagent_advanced_tool`（网关工具数见 docs/mcp-reference.md） | `docs/mcp-reference.md` |
+| 高级网关 | `parcae_advanced_tool`（网关工具数见 docs/mcp-reference.md） | `docs/mcp-reference.md` |
 | MCP | `/mcp`（直连工具，含任务授权 request/release；其余走网关） | `docs/mcp-reference.md` |
 
 ## 配置

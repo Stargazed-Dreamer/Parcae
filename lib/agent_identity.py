@@ -1,7 +1,7 @@
 """调用方身份：区分"agent 发起"与"人（GUI）发起"。
 
 存在的理由是一次实测发现的错判：客户端发的头是 `X-Agent-Caller: v6-lite-agent`
-（`client/core/agent/http_client_tool_executor.py:40`），而服务端两处判据写死成
+（`lib/agent_runtime/http_client_tool_executor.py:40`），而服务端两处判据写死成
 `== "true"`（`server/core/middleware.py:418`、`server/exec.py:1293`）。
 于是**agent 流量被当成 GUI 用户流量**：审批中间件不看它，terminal 的 owner_token
 检查也免掉。这不是越权问题，是系统对"这是谁"判断错了——属于

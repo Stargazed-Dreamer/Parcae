@@ -32,6 +32,29 @@ def _sync_screen_patches(monkeypatch, modules):
             monkeypatch.setattr(f"server.screen.{_mod}.{_sym}", _val, raising=False)
 
 
+@pytest.fixture
+def elevated(monkeypatch):
+    """模拟"后端已提权"，并让键鼠动作不真发。
+
+    2026-10-22 起注入类端点在**第一行**判提权（未提权直接 status=not_elevated、不弹窗），
+    所以凡要测"提权之后逻辑"（危险词 / 焦点安全 / 坐标绑定 / 后置校验）的用例都必须显式
+    声明已提权——这也是真实运行前提（start.bat 提权启动）。
+    同时把 `_execute_action` 换成假实现：这些用例只关心门禁与状态机，不该真的把点击/按键
+    打到测试机当前桌面。
+    """
+    from server.screen import routes
+
+    def _fake_execute_action(action, **kwargs):
+        return {"success": True, "message": "mocked: 不真发键鼠"}
+
+    monkeypatch.setattr(routes, "_ADMIN_STATUS", True)
+    monkeypatch.setattr(routes, "_execute_action", _fake_execute_action)
+    _sync_screen_patches(monkeypatch, [
+        "action_endpoints", "batch_endpoints",
+        "desktop_transaction_endpoints", "scroll_wait_analyze_endpoints",
+    ])
+
+
 # ========== 截图功能测试 ==========
 
 class TestScreenCapture:
@@ -123,7 +146,7 @@ class TestWindowList:
 class TestSafety:
     """安全机制测试"""
 
-    def test_danger_keywords_block(self, client):
+    def test_danger_keywords_block(self, client, elevated):
         """包含关机关键词的操作应被阻止 (status=blocked)"""
         resp = client.post("/screen/action", json={
             "action": "click",
@@ -137,7 +160,7 @@ class TestSafety:
         assert data["status"] == "blocked"
         assert data["success"] is False
 
-    def test_danger_keywords_block_in_text(self, client):
+    def test_danger_keywords_block_in_text(self, client, elevated):
         """text字段包含关机关键词也应被阻止"""
         resp = client.post("/screen/action", json={
             "action": "type",
@@ -149,7 +172,7 @@ class TestSafety:
         assert data["status"] == "blocked"
         assert data["success"] is False
 
-    def test_danger_keywords_block_case_insensitive_compact_english(self, client):
+    def test_danger_keywords_block_case_insensitive_compact_english(self, client, elevated):
         """英文危险词应忽略大小写及空格变体。"""
         resp = client.post("/screen/action", json={
             "action": "type",
@@ -161,7 +184,7 @@ class TestSafety:
         assert data["status"] == "blocked"
         assert data["success"] is False
 
-    def test_danger_keywords_confirm_forces_confirm(self, client):
+    def test_danger_keywords_confirm_forces_confirm(self, client, elevated):
         """包含删除关键词的操作应强制确认"""
         resp = client.post("/screen/action", json={
             "action": "click",
@@ -224,7 +247,7 @@ class TestSafety:
         # 管理员时被窗口范围检查拦截，非管理员时被权限检查拦截
         assert data["success"] is False
 
-    def test_invalid_hwnd_fails_closed(self, client):
+    def test_invalid_hwnd_fails_closed(self, client, elevated):
         """提供失效 hwnd 时不能继续执行坐标操作。"""
         resp = client.post("/screen/action", json={
             "action": "click",
@@ -286,7 +309,7 @@ class TestMouseKeyboard:
         })
         assert resp.status_code == 200
 
-    def test_invalid_action_returns_error(self, client):
+    def test_invalid_action_returns_error(self, client, elevated):
         """无效 action 返回 200 + success=False + status=blocked（server/screen/action_endpoints.py:239-245）
 
         _validate_action_params 对未知 action 返回 (False, "未知 action...")，
@@ -594,7 +617,7 @@ class TestFocusSafetyRoutes:
     时零按键发送，响应携带焦点证据与分层状态。
     """
 
-    def test_type_action_no_target_no_allow_returns_focus_not_verified(self, client, monkeypatch):
+    def test_type_action_no_target_no_allow_returns_focus_not_verified(self, client, elevated, monkeypatch):
         """type 动作未指定 target 且 allow_unfocused_input=False → FOCUS_NOT_VERIFIED（零按键）"""
         from server.screen import routes
         from server.screen.focus import FOCUS_NOT_VERIFIED
@@ -632,7 +655,7 @@ class TestFocusSafetyRoutes:
         assert data["foreground_before"] is not None
         assert "FOCUS_NOT_VERIFIED" in data["message"]
 
-    def test_type_action_focus_leak_prevented_overrides_allow(self, client, monkeypatch):
+    def test_type_action_focus_leak_prevented_overrides_allow(self, client, elevated, monkeypatch):
         """FOCUS_LEAK_PREVENTED 优先级高于 allow_unfocused_input=true。
 
         评估文档 P0：即使 agent 显式传 allow_unfocused_input=true，
@@ -669,7 +692,7 @@ class TestFocusSafetyRoutes:
         assert "FOCUS_LEAK_PREVENTED" in data["message"]
         assert "受保护进程" in data["message"] or "ChatGPT.exe" in data["message"]
 
-    def test_type_action_unfocused_allowed_executed_unverified(self, client, monkeypatch):
+    def test_type_action_unfocused_allowed_executed_unverified(self, client, elevated, monkeypatch):
         """allow_unfocused_input=True 放行后无 expected → executed_unverified（非 executed）"""
         from server.screen import routes
 
@@ -813,7 +836,7 @@ class TestStaleCoordinates:
             assert isinstance(data["window_rect"], list)
             assert len(data["window_rect"]) == 4
 
-    def test_click_with_nonexistent_snapshot_returns_stale(self, client, monkeypatch):
+    def test_click_with_nonexistent_snapshot_returns_stale(self, client, elevated, monkeypatch):
         """snapshot_id 不存在 → STALE_COORDINATES blocked"""
         resp = client.post("/screen/action", json={
             "action": "click",
@@ -856,7 +879,7 @@ class TestStaleCoordinates:
         # 有效 snapshot_id 不应触发 STALE_COORDINATES（动作可能因其他原因失败，但不是 stale）
         assert "STALE_COORDINATES" not in data.get("message", "")
 
-    def test_stale_snapshot_after_window_move(self, client, monkeypatch):
+    def test_stale_snapshot_after_window_move(self, client, elevated, monkeypatch):
         """窗口几何变化后 snapshot_id 失效 → STALE_COORDINATES
 
         模拟：capture 记录窗口几何，然后窗口移动，click 用旧 snapshot_id 应被拦截。
@@ -895,7 +918,7 @@ class TestStaleCoordinates:
         assert "STALE_COORDINATES" in data["message"]
         assert data["transport_status"] == "not_sent"
 
-    def test_expired_snapshot_returns_stale(self, client, monkeypatch):
+    def test_expired_snapshot_returns_stale(self, client, elevated, monkeypatch):
         """snapshot 超过 TTL（5 分钟）→ STALE_COORDINATES"""
         import time as _time
 
@@ -959,7 +982,7 @@ class TestLayeredStatus:
             assert data["postcondition_status"] == "executed_unverified"
             assert data["status"] == "executed_unverified"
 
-    def test_postcondition_verified_when_expected_ocr_contains_match(self, client, monkeypatch):
+    def test_postcondition_verified_when_expected_ocr_contains_match(self, client, elevated, monkeypatch):
         """expected=ocr_contains 且 OCR 找到文本 → postcondition_status=verified, status=executed"""
         from server.screen import routes
 
@@ -1003,7 +1026,7 @@ class TestLayeredStatus:
         assert data["postcondition_status"] == "verified"
         assert data["status"] == "executed"
 
-    def test_postcondition_failed_when_expected_ocr_contains_not_match(self, client, monkeypatch):
+    def test_postcondition_failed_when_expected_ocr_contains_not_match(self, client, elevated, monkeypatch):
         """expected=ocr_contains 但 OCR 未找到文本 → postcondition_status=failed, status=postcondition_failed
 
         第二轮评估 P0-3：动作已发送但后验失败时 status=postcondition_failed（不再包装为 blocked），
@@ -1048,7 +1071,7 @@ class TestLayeredStatus:
         # 第二轮评估 P0-3：动作已发送，status=postcondition_failed（不再包装为 blocked）
         assert data["status"] == "postcondition_failed"
 
-    def test_postcondition_error_when_expected_type_invalid(self, client, monkeypatch):
+    def test_postcondition_error_when_expected_type_invalid(self, client, elevated, monkeypatch):
         """expected.type 不合法 → postcondition_status=error"""
         from server.screen import routes
 
@@ -1082,7 +1105,7 @@ class TestLayeredStatus:
         data = resp.json()
         assert data["postcondition_status"] == "error"
 
-    def test_delivery_status_delivered_when_target_match(self, client, monkeypatch):
+    def test_delivery_status_delivered_when_target_match(self, client, elevated, monkeypatch):
         """操作后前台仍在目标族 → delivery_status=delivered"""
         from server.screen import routes
 
@@ -1117,7 +1140,7 @@ class TestLayeredStatus:
         assert data["delivery_status"] == "delivered"
         assert data["target_match_after"] is True
 
-    def test_delivery_status_leaked_when_focus_drifted(self, client, monkeypatch):
+    def test_delivery_status_leaked_when_focus_drifted(self, client, elevated, monkeypatch):
         """操作后前台漂移到非目标族 → delivery_status=leaked"""
         from server.screen import routes
 
@@ -1486,7 +1509,7 @@ class TestUIAModule:
 
         class FakeValuePattern:
             def SetValue(self, value): pass
-            Value = "LocalAgent 中文"
+            Value = "Parcae 中文"
 
         class FakeCtrl:
             # 契约对齐 uiautomation 2.0.29：无 GetXxxPattern 便捷方法，只有 GetPattern(PatternId)
@@ -1500,14 +1523,14 @@ class TestUIAModule:
             element_id="12345:abcdef12:0",
             snapshot_id=snapshot_id,
             action="set_value",
-            value="LocalAgent 中文",
-            expected={"type": "uia_value_equals", "text": "LocalAgent 中文"},
+            value="Parcae 中文",
+            expected={"type": "uia_value_equals", "text": "Parcae 中文"},
         )
         # P1-2：动作成功 + 内建后验通过
         assert result["success"] is True
         assert result["status"] == "executed"
         assert result["postcondition_status"] == "verified"
-        assert result["postcondition_actual_value"] == "LocalAgent 中文"
+        assert result["postcondition_actual_value"] == "Parcae 中文"
         assert result["transport_status"] == "sent"
         clear_snapshots()
 
@@ -1901,7 +1924,7 @@ class TestUIAActionRoutes:
                 "element_name": "输入框",
                 "transport_status": "sent",
                 "postcondition_status": "verified",
-                "postcondition_actual_value": "LocalAgent 中文",
+                "postcondition_actual_value": "Parcae 中文",
                 "fallback_reason": None,
                 "elapsed_ms": 45,
                 "message": "UIA set_value 已执行且后验通过",
@@ -1914,8 +1937,8 @@ class TestUIAActionRoutes:
             "element_id": "12345:abcdef12:0",
             "snapshot_id": "any_snapshot",
             "action": "set_value",
-            "value": "LocalAgent 中文",
-            "expected": {"type": "uia_value_equals", "text": "LocalAgent 中文"},
+            "value": "Parcae 中文",
+            "expected": {"type": "uia_value_equals", "text": "Parcae 中文"},
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -1923,7 +1946,7 @@ class TestUIAActionRoutes:
         assert data["success"] is True
         assert data["status"] == "executed"
         assert data["postcondition_status"] == "verified"
-        assert data["postcondition_actual_value"] == "LocalAgent 中文"
+        assert data["postcondition_actual_value"] == "Parcae 中文"
 
     def test_uia_action_uia_value_equals_failed_passthrough(self, client, monkeypatch):
         """第三轮评估 P1-2：expected=uia_value_equals + 内建后验 failed → 透传 postcondition_failed"""
@@ -2982,7 +3005,7 @@ class TestUnicodeInput:
 
         monkeypatch.setattr("ctypes.windll.user32.SendInput", fake_sendinput)
         # 直接构造含孤立代理的字符串（通常不应出现，但防御性测试）
-        with caplog.at_level(logging.WARNING, logger="localagent.screen"):
+        with caplog.at_level(logging.WARNING, logger="parcae.screen"):
             input._send_unicode_text("\uD800\x41")  # 高代理 + 'A'
         # 孤立代理应被跳过，只有 'A' 被发送
         assert 0x0041 in scan_codes_sent

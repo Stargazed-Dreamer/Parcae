@@ -8,7 +8,7 @@ computer use 涉及键鼠控制和关机权限，授权状态本质是"用户在
 
 持久化这个状态会引入"幽灵授权"风险：用户睡前授权 watchdog 后端意外重启，agent 醒来后仍持有 watchdog + `shutdown_permitted`，此时用户已不在场，任何 agent 误调都无人在场监督。
 
-后端重启在 LocalAgent 是高频事件：开发期间频繁 reload、`uv run python -m server.main` 日常启停、崩溃自动恢复、command_guard 升级触发重启。如果每次重启都需要"用户在场重新授权"，本身就是日常体验的一部分；如果持久化则把"开发期便利"和"授权态延续"绑死，得不偿失。
+后端重启在 Parcae 是高频事件：开发期间频繁 reload、`uv run python -m server.main` 日常启停、崩溃自动恢复、command_guard 升级触发重启。如果每次重启都需要"用户在场重新授权"，本身就是日常体验的一部分；如果持久化则把"开发期便利"和"授权态延续"绑死，得不偿失。
 
 ## Decision
 

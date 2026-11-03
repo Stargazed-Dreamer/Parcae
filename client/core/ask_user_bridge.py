@@ -24,14 +24,24 @@ from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 
-logger = logging.getLogger("localagent.ask_user_bridge")
+from lib.agent_runtime.ask_user_outcomes import (
+    OUTCOME_ANSWERED,
+    OUTCOME_CANCELLED,
+    OUTCOME_NO_HOST,
+    OUTCOME_SKIPPED,
+    OUTCOME_TIMEOUT,
+)
 
-# outcome 档位（AskUserTool 按此映射 ToolResult，不许含糊）
-OUTCOME_ANSWERED = "answered"     # 用户点了提交并给出选择
-OUTCOME_SKIPPED = "skipped"       # 用户点「跳过，你自己定」——明确把决定权交回 agent
-OUTCOME_TIMEOUT = "timeout"       # 配置的等待时间内没人回答（不是拒绝）
-OUTCOME_CANCELLED = "cancelled"   # 会话被中断 / 切走了
-OUTCOME_NO_HOST = "no_host"       # 没有可渲染卡片的地方（GUI 未就绪）→ 维持 fail-closed
+logger = logging.getLogger("parcae.ask_user_bridge")
+
+__all__ = [
+    "AskUserBridge",
+    "OUTCOME_ANSWERED",
+    "OUTCOME_CANCELLED",
+    "OUTCOME_NO_HOST",
+    "OUTCOME_SKIPPED",
+    "OUTCOME_TIMEOUT",
+]
 
 
 class AskUserBridge(QObject):

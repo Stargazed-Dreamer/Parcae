@@ -34,8 +34,9 @@ accepted (2026-10-02)
    （[server/browser/session/manager.py](file:///<project_root>/server/browser/session/manager.py)、
    [state.py](file:///<project_root>/server/browser/session/state.py)）。
    - `TabSession.owner` 记创建者；idle 租约有主 900s（操作即续租）/ 无主 300s；**LRU 只淘汰 anonymous**。
-   - 非 owner 关他人 session、`url_pattern` 命中他人有主活跃 tab ⇒ 409 `TAB_OWNED`；确要接管须显式
-     `force=true`，并记 warning 日志（**不通知被抢方**——这是有意的，见 Consequences）。
+   - 非 owner 关他人 session、`url_pattern` 命中他人有主活跃 tab ⇒ 409 `TAB_OWNED`；放行须显式
+     `force=true`（**语义是「加入共享」而不是「夺走」，见 Amendment 9**），并记 warning 日志
+     （**不通知对方**——这是有意的，见 Consequences）。
    - 单个 caller 持有上限 10（`PER_CALLER_LIMIT`，gui 豁免）；全局上限 `session_max_count` 20→32，
      超限先淘汰 idle 最久的 anonymous，仍满则 `SESSION_LIMIT_REACHED`（此时 gui 同样被拒，
      但错误信息列出当前归属分布）。数值按"最多 4 agent 并发"由用户拍板。
@@ -75,7 +76,8 @@ accepted (2026-10-02)
   新配置键 `[browser].session_anon_idle_timeout_secs`（默认 300）与 `session_max_count` 默认值改 32；
   已同步 [config.example.toml](file:///<project_root>/config.example.toml)、
   Settings 面板说明与 `展示文档/architecture_analysis/07_browser_api.md`（该处原先写死"上限 20"）。
-- **抢绑不通知被抢方**，跨 agent 协调仍靠人；`force` 是"我知道我在抢"的显式声明，不是协商机制。
+- **复用他人有主 tab 不通知对方**，跨 agent 协调仍靠人；`force` 是"我知道我在加入共享"的显式声明
+  （2026-11-02 正名，见 Amendment 9——它是 join，不是抢），不是协商机制。
 - 上限会拒，包括 gui（全局满且无 anonymous 可淘汰时）——选"拒 + 说明分布"而不是"挤掉别人"，
   代价是极端并发下人要手动关一个。
 - 数值（10 / 32 / 900 / 300）不是推导出来的，是用户按当时并发观测拍的；并发结构变了要回来重审。
@@ -90,3 +92,68 @@ accepted (2026-10-02)
 - [server/screen/session/manager.py](file:///<project_root>/server/screen/session/manager.py)（授权 owner 展示）
 - ADR-0037（决策 17：覆盖只由新批准写入——本 ADR 第 3 条的前提）
 - ADR-0038（同期的 patchright 迁移，console 按需捕获与本批同属浏览器会话这条线）
+
+## Amendment（2026-11-01）：把「归属」推进到执行层，并给不受约束的第三方划边界
+
+本 ADR 原决策只覆盖**会话的建与关**。多 agent 实测（`temp/browser_multiagent_probe_20261101/`）证明
+这只够防"静默误伤"，防不住"静默干错活"：两个 session 经 `url_pattern`/`force=true` 会绑到**同一个
+物理 tab**（实测 `tab_id` 完全相同），关一个把另一个连坐带走（关 A 后 B 用自己的 session 也报失效）；
+而冷路径（不传 session）`_find_page` 末句是 `return context.pages[0]`，会**静默操作别人的 tab**。
+本 Amendment 追加四条，**不改原决策的数值与身份判据**（10/32/900/300 与 `get_caller_id` 全部照旧）。
+
+5. **页级引用表：关 session 不再连坐关页**（新增
+   [page_refs.py](file:///<project_root>/server/browser/page_refs.py)，接进 `close_session`）。
+   按弱引用登记"哪些 session 挂在同一个 page 上"，关闭前先算「除我之外还有谁」——有人就**只解绑不关页**，
+   墓碑记 `page_kept_by`，响应回 `page_kept`/`page_kept_by`。**没有做强制独占**：`force=true` 仍得到
+   共享页（原决策的"接管即共享"语义没变——**措辞见 Amendment 9，应读作「加入共享」**），但共享从此是**可见的**（`page_ref_count`/`page_shared_with`）。
+
+6. **冷路径不再默认抓第一个 tab**（新增
+   [target_resolver.py](file:///<project_root>/server/browser/target_resolver.py)，7 处入口前置）。
+   0 个 tab ⇒ `TAB_NOT_FOUND`；恰好 1 个且无主 ⇒ 沿用旧兜底（无歧义）；≥2 个、或唯一那个正被会话持有
+   ⇒ 新错误码 `TAB_REQUIRED` + 候选清单（tab_id/标题/URL/持有者）。理由：单 agent 时代的"操作浏览器"
+   语义在多 agent 下等于"闭眼挑一个"，而它**不报错**，只在 `url_after` 里事后才看得出来。
+
+7. **页级互斥 + 版本戳**（新增 [page_guard.py](file:///<project_root>/server/browser/page_guard.py)）。
+   锁按**物理 page** 加而不是按 session——两个 session 本来就是两把不同的锁，按 session 锁恰好防不住
+   "同一页面被两个会话同时改"。超时返回 `PAGE_BUSY` 并点名占用者；`node_id` 路径若页级版本号已变且
+   写者不是自己 ⇒ `STALE_NODE` 并写明被谁改过。⚠ 原设计里的 MutationObserver 防线
+   （`last_snapshot_dom_version`/`_dom_version_probe`）**从定义起没有任何代码引用**，从未接上；本次改用
+   页级版本戳，两个死字段先保留未删。
+
+8. **脚本直连 CDP 的页标为「外来者」：不治理、只标注、且不计入判定**
+   （新增 [tab_origins.py](file:///<project_root>/server/browser/tab_origins.py)）。
+   `workspace/`、`tools/` 下约 35 个脚本 `connect_over_cdp("http://127.0.0.1:9222")` 直接操作浏览器，
+   这是 `AGENTS.md` 的既定规范而非漏改；它们不建 session、不登记归属、不经 `nav_guard`，后端看不见，
+   但 tab 会出现在 CDP 列表里。**用户裁决**（2026-11-01）：「让脚本更像一个不受约束的外来者，也不影响
+   其他受规范约束的使用者……只需要在查询的时候明确哪几个 tab 是未知来源」。故：
+   来源三分 `session`/`preexisting`/`unknown`，**零拦截、零登记要求、零限流**；判定只看
+   `origin != "unknown"`，所以「1 个可信页 + 3 个脚本页」直接放行。只剩外来页时仍拒绝（不自动操作
+   别人的采集现场）。`decide()` 返回选定 tab_id 交回调用方，避免后端放行后子进程又按物理 tab 数拦一次。
+
+**被拒方案**（本条新增）：
+
+- **脚本统一改走后端 session**。被拒：采集类脚本要跑几十分钟到几小时，会被 30s 同域节流与 32 会话上限
+  反向优化；且这会把"外部程序用浏览器"这件正当的事变成需要登记的特权。
+- **给脚本发身份（环境变量 / `X-Agent-Caller`）**。被拒且已有前车之鉴：`_utf8_process_env()` 早就在注入
+  `PARCAE_API`，**35 个脚本里 0 个在用**——"注入身份等脚本自觉读取"不成立。
+- **沿用 netstat 反查外部 PID 作为归属来源**。可作观测补充，但拿不到"哪个 tab 是谁的"，且端口连接的
+  生命周期与 tab 不对应，反而制造新的误判面。
+
+**付出**：`first_seen_at` 是"后端第一次看到它"而非 tab 真实创建时间（CDP 不提供），且后端不常驻轮询
+⇒ 两次查询之间开了又关的脚本 tab **完全记录不到**；后端重启后所有已存在 tab 一律回落 `preexisting`。
+冷路径的 `TAB_REQUIRED` 是**行为收紧**：以前不问就干的调用方现在会被明确拒一次。
+
+
+9. **`force=true` 正名：它是「加入共享」，不是「夺走」（2026-11-02，用户裁决 A）**。
+   原决策 2 的措辞（「抢绑」「接管」「不通知被抢方」）与实际行为不符：`force=true` 只做两件事——
+   在 `_sessions` 里新增一条 `TabSession`、在 `page_refs` 加一条引用；旧 holder 的对象/owner/page
+   引用/`last_used_at` **一个字段都没动**，没有 detach、没有改归属、没有踢人。实测
+   （`temp/g2_probe_20261102/probe_g2.py` 13 项）也证明 A 未被踢、`snapshot` 仍可用、A 关闭时
+   `page_kept=true`。所以问题只在**名字与文案骗人**：双方都可能以为自己独占。
+   **本轮只改表达，不改行为**：参数名 `force` 保留（向后兼容），文档/docstring/错误文案统一写成
+   「加入共享（读作 join）」，并在 `browser_session_create` 响应里补一句 `note`（`page_ref_count > 1`
+   时明说「你在与谁共享、双方改动互相可见、关自己的不会关页」）。
+   **被拒方案 B（真接管）**：`force` 时移除旧 session、对方下次调用得到 `taken_over`。被拒理由：
+   对方会被动中断，且与 G3 引用表「多人同页是可控共享」的既有结论冲突；收益只是名字更直白。
+   **仍未解决的**：加入方**立刻**知道自己共享（`note`），被加入方**不会**被推送通知——他下次
+   `GET /browser/sessions` 或撞到 `STALE_NODE` 才知道。这是有意的成本取舍（不做反向通知通道）。

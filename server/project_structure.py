@@ -17,7 +17,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-logger = logging.getLogger("localagent.project_structure")
+logger = logging.getLogger("parcae.project_structure")
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 BASELINE_FILE = _PROJECT_ROOT / "data" / "project_structure.json"

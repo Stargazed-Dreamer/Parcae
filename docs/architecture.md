@@ -21,11 +21,11 @@
 | **ocr** | [server/ocr.py](../server/ocr.py) | PaddleOCR 3.7（PP-OCRv6），bbox 三档分辨率回归误差 1-3px |
 | **vl** | [server/vl/](../server/vl/) | 远程 VL（ModelScope Qwen3-VL），布局/状态描述和文档解析 |
 | **exec** | [server/exec.py](../server/exec.py) | Python 代码执行（统一 terminal + 3 分钟唤醒 + 内联等待） |
-| **browser** | [server/browser/](../server/browser/) | Chromium CDP 9222 控制（持久 session + DOM locator + 弹窗处理） |
+| **browser** | [server/browser/](../server/browser/) | Chromium CDP 9222 控制（持久 session + DOM locator + 弹窗处理；进程托管见 `server/browser/supervisor/`） |
 | **screen** | [server/screen/](../server/screen/) | 截图 / 窗口 / 键鼠 / UIA / SessionManager（三档权限模式） |
 | **todos** | [server/todos/](../server/todos/) | 待办系统（recurring / phased_recurring / triggered 三类型） |
 | **activity_tracker** | [server/activity_tracker/](../server/activity_tracker/) | Loop 自动触发系统（活动追踪 + 下载监控 + 记忆维护 + 镜像监控） |
-| **advanced** | [server/advanced.py](../server/advanced.py) | MCP 网关第二层：`localagent_advanced_tool` 统一入口 |
+| **advanced** | [server/advanced.py](../server/advanced.py) | MCP 网关第二层：`parcae_advanced_tool` 统一入口 |
 | **templates** | [server/templates.py](../server/templates.py) | MCP 网关第三层：预定义工作流模板 |
 | **core/mcp_gateway** | [server/core/mcp_gateway.py](../server/core/mcp_gateway.py) | MCP 三层审批 + 工具暴露控制 + 响应大小保护 |
 | **command_guard** | [server/command_guard.py](../server/command_guard.py) | 破坏性命令拦截（dcg 二进制预检查 + LLM 预审 + 人审三层递进） |
@@ -42,7 +42,7 @@
    - 返回 `first_action`（具体到第一条要执行的动作）
    - 自动注入相关记忆（上次记账偏好、用户账单分类习惯、踩过的坑）
    - 返回工具优先级（`mcp_tools_priority`）和环境提示
-4. **LLM 按 `first_action` 调用 OCR 工具**（如 `localagent_advanced_tool(tool="ocr_file", params={...})`）：
+4. **LLM 按 `first_action` 调用 OCR 工具**（如 `parcae_advanced_tool(tool="ocr_file", params={...})`）：
    - MCP 网关 `_patched_execute_api_tool` 检查 `safety_map`（OCR 是 pass）
    - 路由到 `server/ocr.py` 执行 PaddleOCR
    - 返回 `{text, details[].box}`（响应大小保护：截断到 50000 字符）
@@ -153,7 +153,7 @@
 - 比如 `memory_status` / `exec_status` / `wip_list` / `todos_due`
 - 定义在 [server/mcp_whitelist.py](../server/mcp_whitelist.py)，按 core / state / exec / perception / browser / llm 分桶；数量随迭代变动，以该文件为准
 
-#### 第二层：`localagent_advanced_tool` 网关
+#### 第二层：`parcae_advanced_tool` 网关
 
 - 通过一个统一入口 tool 调用，参数里指定 `tool="xxx"` + `params={...}`，背后路由到其余全部可暴露端点
 - 后端做统一 audit / approval，LLM 看到的工具目录只有一个
@@ -162,13 +162,13 @@
 
 ```python
 # LLM 看到的工具签名
-localagent_advanced_tool(tool="screen_ocr", params={"mode": "window", "hwnd": 123})
+parcae_advanced_tool(tool="screen_ocr", params={"mode": "window", "hwnd": 123})
 
 # 后端实际调用
 POST /screen/ocr  # 带完整审批流程
 ```
 
-#### 第三层：`localagent_template_tool` 预定义工作流
+#### 第三层：`parcae_template_tool` 预定义工作流
 
 - 多工具编排模板，一步调用一个完整流程
 - 适合"打开浏览器 → 导航 → 截图 → OCR → 关闭"这种固定序列
@@ -216,7 +216,7 @@ POST /screen/ocr  # 带完整审批流程
 按主题分组的深度文档：
 
 **对话引擎**：
-- [docs/chat-engine.md](chat-engine.md) — v6-lite 对话引擎核心组件（SessionRunner / EventStore / Compactor 等，**清单以该文档的组件表为准**）+ EventStore schema（版本以 `client/core/agent/event_store.py` 的 `_SCHEMA_VERSION` 为准）+ chat-panel-v2 关键设计 + QThread 桥接
+- [docs/chat-engine.md](chat-engine.md) — v6-lite 对话引擎核心组件（SessionRunner / EventStore / Compactor 等，**清单以该文档的组件表为准**）+ EventStore schema（版本以 `lib/agent_runtime/event_store.py` 的 `_SCHEMA_VERSION` 为准）+ chat-panel-v2 关键设计 + QThread 桥接
 - [docs/agent-guide.md](agent-guide.md) — 任务路由系统（GUIDE_REGISTRY 结构 / 6 scope / consumption_contexts 消费闭环 / first_action 注入 / workspace 动态扩展）
 - [docs/agent-guide-keywords.md](agent-guide-keywords.md) — agent_guide 关键词编写规范（match_task_candidates 五路加权打分）
 

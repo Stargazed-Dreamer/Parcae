@@ -1,6 +1,6 @@
 """窗口生命周期管理：app_list/app_launch/app_wait/window_resolve + 窗口操作 + token 失效检测。
 
-评估文档（docs/evaluations/2026-07-20-computer-use-vs-localagent.md）P1-B 改进：
+评估文档（docs/evaluations/2026-07-20-computer-use-vs-parcae.md）P1-B 改进：
 1. 增加 app_list/app_launch/app_wait/window_resolve 端点
 2. window resolve 支持 title/process/pid/automation_id，多匹配返回候选而非随便选择
 3. token 在窗口重建后应明确失效（不默默指向同标题新窗口）
@@ -21,7 +21,7 @@ from server.screen.focus import resolve_canonical_window
 from server.screen.uia import get_pattern
 from server.screen.windows import _enum_windows, _force_focus_window
 
-logger = logging.getLogger("localagent.screen")
+logger = logging.getLogger("parcae.screen")
 
 
 # ========== 状态码常量 ==========

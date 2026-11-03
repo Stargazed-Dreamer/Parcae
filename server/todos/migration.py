@@ -11,7 +11,7 @@ import glob
 import shutil
 import sqlite3
 
-logger = logging.getLogger("localagent.todos.migration")
+logger = logging.getLogger("parcae.todos.migration")
 
 # wip_tasks 表的标准字段（不进入 extra_data）
 _WIP_STANDARD_FIELDS = {
@@ -23,7 +23,7 @@ _WIP_STANDARD_FIELDS = {
 
 
 def migrate_from_memory(memory_manager) -> dict:
-    """从 memory keys (task_reminders, wip_index) + .agents/wip/*.json 迁移到 todos/wip_tasks 表。
+    """从 memory keys (task_reminders, wip_index) + .agents/wip/*.json 迁移到 tasks 表。
 
     幂等：检查 schema_info 中 'todos_migrated' 标志。
 
@@ -65,15 +65,16 @@ def migrate_from_memory(memory_manager) -> dict:
                     logger.warning(f"task_reminders 跳过无 id/skill/title 的任务: {task}")
                     continue
                 existing = store_conn.execute(
-                    "SELECT id FROM todos WHERE id = ?", (todo_id,)
+                    "SELECT id FROM tasks WHERE id = ? AND kind IN "
+                    "('recurring', 'phased_recurring', 'triggered')", (todo_id,)
                 ).fetchone()
                 if existing:
                     continue
                 store_conn.execute(
-                    """INSERT INTO todos (id, title, skill, type, status, frequency,
+                    """INSERT INTO tasks (id, kind, title, status, skill, frequency,
                            last_done_at, next_due_at, condition, condition_status, notes,
                            related_memory_keys, created_at, updated_at)
-                       VALUES (?, ?, ?, 'recurring', 'pending', ?, ?, NULL, ?, ?, ?,
+                       VALUES (?, 'recurring', ?, 'active', ?, ?, ?, NULL, ?, ?, ?,
                            '["task_reminders"]', """ + now_sql + """, """ + now_sql + """)""",
                     (
                         todo_id,
@@ -102,16 +103,17 @@ def migrate_from_memory(memory_manager) -> dict:
                     logger.warning(f"wip_index 跳过无 id/title 的任务: {task}")
                     continue
                 existing = store_conn.execute(
-                    "SELECT id FROM wip_tasks WHERE id = ?", (task_id,)
+                    "SELECT id FROM tasks WHERE id = ? AND kind IN ('one_shot', 'long_running')",
+                    (task_id,)
                 ).fetchone()
                 if existing:
                     continue
                 store_conn.execute(
-                    """INSERT INTO wip_tasks (id, title, status, priority, goal, progress,
+                    """INSERT INTO tasks (id, kind, title, status, priority, goal, progress,
                            tags, next_steps, related_skills, related_files,
                            current_state, blocked_reason, related_memory_keys,
                            created_at, updated_at)
-                       VALUES (?, ?, ?, 'medium', '', 0, '[]', '[]', '[]', '[]', '{}',
+                       VALUES (?, 'long_running', ?, ?, 'medium', '', 0, '[]', '[]', '[]', '[]', '{}',
                            NULL, '["wip_index"]', """ + now_sql + """, """ + now_sql + """)""",
                     (
                         task_id,
@@ -141,7 +143,8 @@ def migrate_from_memory(memory_manager) -> dict:
                         logger.warning(f"wip 文件跳过（无 id/title 且文件名空）: {fpath}")
                         continue
                     existing = store_conn.execute(
-                        "SELECT id FROM wip_tasks WHERE id = ?", (task_id,)
+                        "SELECT id FROM tasks WHERE id = ? AND kind IN ('one_shot', 'long_running')",
+                        (task_id,)
                     ).fetchone()
                     if existing:
                         # 已存在（可能从 wip_index 迁移了），用更完整的字段更新
@@ -149,12 +152,12 @@ def migrate_from_memory(memory_manager) -> dict:
                         continue
                     related_keys = data.get("related_memory_keys") or ["wip_index"]
                     store_conn.execute(
-                        """INSERT INTO wip_tasks (id, title, status, priority, goal, progress,
+                        """INSERT INTO tasks (id, kind, title, status, priority, goal, progress,
                                tags, next_steps, related_skills, related_files,
                                current_state, blocked_reason, related_memory_keys, extra_data,
-                               created_at, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               """ + now_sql + """, """ + now_sql + """)""",
+                               due_at, done_when, created_at, updated_at)
+                           VALUES (?, 'long_running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               ?, ?, """ + now_sql + """, """ + now_sql + """)""",
                         (
                             task_id,
                             data.get("title", task_id),
@@ -174,6 +177,8 @@ def migrate_from_memory(memory_manager) -> dict:
                                  if k not in _WIP_STANDARD_FIELDS},
                                 ensure_ascii=False,
                             ),
+                            data.get("due_at"),
+                            data.get("done_when"),
                         ),
                     )
                     wip_count += 1
@@ -199,12 +204,12 @@ def _update_wip_from_file(store_conn, task_id: str, data: dict, now_sql: str) ->
     # related_memory_keys：优先用 .json 中显式声明的，否则保留 wip_index 迁移时写死的 ["wip_index"]
     related_keys = data.get("related_memory_keys") or ["wip_index"]
     store_conn.execute(
-        """UPDATE wip_tasks SET
+        """UPDATE tasks SET
                title = ?, status = ?, priority = ?, goal = ?, progress = ?,
                tags = ?, next_steps = ?, related_skills = ?, related_files = ?,
                current_state = ?, blocked_reason = ?, related_memory_keys = ?, extra_data = ?,
                updated_at = """ + now_sql + """
-           WHERE id = ?""",
+           WHERE id = ? AND kind IN ('one_shot', 'long_running')""",
         (
             data.get("title", task_id),
             _map_wip_status(data.get("status", "paused")),
@@ -266,11 +271,7 @@ def backfill_extra_data(memory_manager) -> dict:
     if cur.fetchone():
         return {"backfilled": 0, "files_moved": 0, "skipped": True}
 
-    # 确保 extra_data 列存在（幂等）
-    try:
-        store_conn.execute("ALTER TABLE wip_tasks ADD COLUMN extra_data TEXT DEFAULT '{}'")
-    except sqlite3.OperationalError:
-        pass
+    # extra_data 列已在 tasks 表中，无需 ALTER
 
     wip_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
@@ -299,7 +300,7 @@ def backfill_extra_data(memory_manager) -> dict:
                      if k not in _WIP_STANDARD_FIELDS}
             if extra:
                 store_conn.execute(
-                    "UPDATE wip_tasks SET extra_data = ? WHERE id = ?",
+                    "UPDATE tasks SET extra_data = ? WHERE id = ? AND kind IN ('one_shot', 'long_running')",
                     (json.dumps(extra, ensure_ascii=False), task_id),
                 )
                 backfill_count += 1

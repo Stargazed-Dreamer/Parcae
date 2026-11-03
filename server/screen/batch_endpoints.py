@@ -57,12 +57,14 @@ from server.screen.routes import (
     _FOCUS_RETRY_DELAY,
     _KEYBOARD_ACTIONS,
     _OVERLAY_HIDE_DELAY,
+    NOT_ELEVATED_STATUS,
     _confirm_control_operation,
     _enforce_session_permission,
     _ensure_takeover_approved,
     _touch_task_authorization_after_delivery,
     _verify_snapshot_freshness,
     logger,
+    not_elevated_message,
     router,
 )
 
@@ -135,12 +137,19 @@ def batch_actions(req: BatchActionsRequest):
     Tip — 操作前建议先调 screen_match_app(process_name=...) 查询该软件经验
     （UIA 友好度/快捷键/菜单路径/已知坑），避免重复踩坑。
     """
+    # 提权闸门（2026-10-22）：先于 403 授权引导与 takeover 弹窗——未提权时键鼠注入必被
+    # UIPI 丢弃，先弹窗问用户再让 agent 发现点击无效是错的。
+    if not _ADMIN_STATUS:
+        return {
+            "success": False,
+            "status": NOT_ELEVATED_STATUS,
+            "message": not_elevated_message("批量键鼠操作（batch_actions）"),
+        }
+
     # T15：副作用端点 403 拦截（无权限时 raise HTTPException(403)）
     session_status = _enforce_session_permission()
     current_mode = session_status.get("mode", "normal")
 
-    if not _ADMIN_STATUS:
-        return {"success": False, "message": "键鼠操控需要管理员权限"}
     if not emergency.can_operate():
         return {"success": False, "status": "emergency_stopped", "message": "紧急停止已触发"}
     if not req.actions:
@@ -763,7 +772,7 @@ def preview_action(req: PreviewActionRequest):
             import os
             import tempfile
             # 保存到 server 临时目录（与 capture_screen 的 path 模式一致）
-            tmp_dir = os.path.join(tempfile.gettempdir(), "localagent_captures")
+            tmp_dir = os.path.join(tempfile.gettempdir(), "parcae_captures")
             os.makedirs(tmp_dir, exist_ok=True)
             img_filename = f"preview_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}.jpg"
             img_path = os.path.join(tmp_dir, img_filename)

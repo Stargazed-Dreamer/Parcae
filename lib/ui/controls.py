@@ -1,4 +1,4 @@
-"""Small shared control factories for the LocalAgent UI system."""
+"""Small shared control factories for the Parcae UI system."""
 
 from __future__ import annotations
 

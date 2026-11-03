@@ -6,71 +6,109 @@
 
 <!-- 由 tools/release/engine/history.py 维护,请勿手工编辑 -->
 
-## 0.53.0
-- 首次发布,无区间统计
+## 0.56.0
 - 主要更改:
-  - chat_digest 的 v4 同步换成 mtime 增量快路径
-  - `ask_user` 从"清单里有但从没接线"变成会话时间线里的一张交互卡片
-  - 压缩判据改成「上一次调用的真实 prompt_tokens + 之后新增消息的字符增量」，上下文上限来自 keys.json 的 model 级 `context_window`，没填就报"上限未知"且不判压缩
-  - 死链闸门 C6 上闸：在用文档面引用的仓库内路径必须解析得到，存量走机器扫出的基线名单
-  - 祖先链那一格是本轮实测纠的自己的错
-  - 名单不是橡皮图章
-  - 摘改矩阵抓到一个真缺口
-  - ⚠️ **洗存量这一档没做完，而且比想象的贵**：49 条按「同名文件能否查得」分档 = 18 条有唯一同名目标 / 9 条多目标 / 22 条磁盘上根本没有。
-  - 作废一条混口径记录：账本原写「148 条中 75 条不可解析」——分子取自 commit `674893a` 的 docs 口径（当时死链 32），分母 75
-  - VL Ticket 04：两级状态视图 + `POST /vision/reset`，聚合判据补上"整条 key 的模型当日全判死"
-  - `POST /headless/sessions`：直连创建一个 headless 会话，不必再绕 LoopManager
-  - Ticket 02(a) 正式裁决：5xx 连败计数与冷却保持 key 级连坐，代价改成看得见的
-  - 异环采集器把"要人复核的稀有度"从一句话升级成一份可查证据（裁片 + 索引落盘）
-  - VL 降级链的「同 token 串行」守卫单测 D8（Ticket 02 的"不得放松"项）
-  - `(key_id, model)` 级「今日永久失效」标记：死模型不再每轮重新烧一遍
-  - migrate_changelog 归档完自动复跑一次发布口径扫描，HIGH 复活当场拦下
-  - gate 账本三方一致性闸门 `tests/release_ci/test_gate_ledger_consistency.py`
-  - 内核对象不回收：新增两支只读探针，并按 `report/根因测试路线_20261005.md` 完成阶段 0—2 交付
-  - gh_mirror「添加跟踪」的默认流程改成 Actions 服务器端导入 + 前置检查，本地零下载
-  - gh_mirror 的 6 个新导入仓补齐 `release-backup.yml`，44 个 enabled 仓实现全覆盖
-  - gh_mirror 新增跟踪仓 `NapNeko/NapCatQQ`，并把 release-backup 铺满全部 38 仓
-  - release 备份新增范围限制 `--since-days` / `--limit`，可按仓配置、手动可覆盖
-  - release 稀疏清理的完整考量归档为可重启的计划
-  - 远程 VL 的"死模型"处置：400/404/422 判永久失败、同 key 换下一个模型、响应体进日志
-  - gh_mirror 远端 workflow 漂移体检（只读）
-  - 记忆召回判卷标注器，把"该读到哪几条"交给人判
-  - chat_digest 常驻「引用↔编号」校验器 `workspace/chat_digest/verify_quotes.py`
-  - 构建期 gate `no-key-startup` 改名 `compile-check`，并去掉"只取前 200 个 `.py`"的静默上限
-  - video_digest 的 STT 后端正式从 whisper 切到 r2t2_stt，新增默认驱动桥 `r2t2_bridge.py`
-  - 整批一次装载
-  - SRT 地板按片长取档，两档都是本机实测
-  - ⚠️ **机制没有定案，别再写成因果**：昨天把"崩"归因到"越物理上限 → `cudaFree` 归零 → 每步在零空闲设备上申请 → 慢 10–40 倍"。
-  - SRT 会丢内容，缺口不等于静音
-  - 片长默认取上游常量 `ALIGNER_INTERNAL_CHUNK_SEC`（180s），一片正好对应 aligner 内部一块；片尾短于 5s 并进前一片——
-  - 时间戳这一档禁止任何形式的自动决定
-  - 幂等 no-op 不再被显存守卫误拒
-  - SKILL 里两条今天已失效的论断删除：「`STT_PY` 仍指向 whisper」、「每片一个新进程 + `load()` 后 dummy 预分配可解挂死」。
-  - 验证全部实跑：`uv run pyright` 显式对 6 个文件 **0 错**（`workspace/` 不在仓库级 include 内）；30s 样本 T
-  - gh_mirror「这个仓是否已下发」改成运行时判定，手抄的 `PILOT_DONE` 废除
-  - 记忆维护告警改为存储级周带去重，并堵住测试往真库写告警
-  - 记忆库最后 4 条 NULL 类型收口：三条定性 + 一条精简保留 + 一条拆包
-  - 记忆索引标题的最后一档兜底不再上屏 JSON，改为顶层字段名清单
-  - 四条过期记忆全洗：正文只留判据与指路，带日期的快照退回真源
-  - 补洗 3 条"轻形态信封"fact，并把"宁可少洗"的尾账关死
-  - `fact_type` 为空的存量收口：前缀即类型的补标，说不清的留成清单
-  - GPU 采样改成常驻 NVML 会话，新增进程内资源采样中枢 `server/resource_probe/`（消灭"每 5 秒起一个进程"）
-  - 存量记忆标签按 v5 判据全量重判（洗存量那一档，2026-10-04）
-  - 记忆索引标题不再把元数据信封整坨 JSON 打上屏（`server/memory/manager.py`）
-  - 补记（2026-10-05，重启后实测）
-  - loop catchup 扫完无条件留一行计数，「没活可干」与「这段代码没跑到」不再同形
-  - 占位小时会被回头补跑了，失败收件箱也不再写「错误: unknown」
-  - chat_digest：完整群 ID 在通讯录快照里查不到时放行，不再 `exit(1)`
-  - 两条"报出来的问题"实测后各修一半：GPU 降级三键补进模板、wx4py 的 notes 与现实对齐
-  - 「GitHub 连不上」的口径纠偏：被挡的是端口不是整台主机；本机现场改成一步实测而非文档快照
-  - `watchlist.json` 把非持仓标的标成「持仓」：000630 降级为监控
-  - `max_db_size_mb` 僵尸配置摘除
-  - 两个新镜像仓首同步失败的真因：workflow 侧从不 `git lfs fetch`（UnityPy）+ GitHub 单次 push 2 GiB 上限（Ark-Models）
-  - ① mirror-UnityPy
-  - ② mirror-Ark-Models
-  - `release-backup.yml` 的"每三周"闸门从来没有生效
-  - 无 NVIDIA 卡机器的模型准入死锁（`awaiting_first_sample` 永久 503）随采样改造一并解除
-  - `daily_summarize` 补显式 `timeout=300`（`server/activity_tracker/loop_actions.py`）
-  - `workspace/recorder/tests/test_recorder_gui.py` 的 pyright 存量 5 条清零
-  - homework 路由 keywords 补流程动词，实测把三句落空的原话拉回强匹配
-  - 脱敏规则「活性」闸门 `tests/release_ci/test_rule_liveness.py`
+  - 清掉发版全量拦下的 17 处 lint 违规（改 `server/{main,video}.py`、`server/butler/{router,store,bundles}.py`）
+  - 两处测试的假设过期，由「红」改回「准」（同一批发版全量暴露）
+  - 课程提炼链路：产物能落到课程库同盘了，ASR 不再等 packet，建包修掉并发抢目录与同名副本重复（改 `server/video.py`、`workspace/course_digest/{packets,course_index,index_courses}.py`、`workspace/stt_cloud_batch/batch_stt.py`、`RUN_BATCH.md`、`RUN_BOOK.md`；新增 `workspace/course_digest/asr_sources.py`、`PILOT_LOG.md`；改 `tests/server_endpoints/test_video_frame.py`）
+  - 配置示例不再把人往坑里带：`[model_manager]` 的 `idle_unload_sec` 补两条会踩的说明，示例值 10 → 300（改 `config.example.toml`）
+  - 翻历史会话的两个脚本修掉三处「读出来就是错的」缺陷：压缩摘要被当成本轮原话、噪音行被当用户要求、`-k` 过滤后引用编号失效（改 `tools/wb_history.py`、`.agents/skills/daily/{wb-history-recall,qoder-history-recall}/SKILL.md` 与其 case、`.agents/skills/_index.md`、`server/agent_guide_data.py`、`tools/README.md`；2026-10-30 用户「ABC都做一下吧，但是B的不用太细…你按接手场景判需要的程度」）
+  - chat_digest 四批灰度收口：摘录线 B 确优、日总结线「B 不劣」成立，并抓出 FP-Merge 静默截断这个「把工具 bug 记成方法结论」的坑（改 `workspace/chat_digest/SKILL.md`，`one_pass_beta.json` 补第 1–4 次运行记录；2026-10-29~30 灰度）
+  - 媒体整理 skill 拆出「固定库增量入库」模式：新批次滚进已有库不再把全量整理重跑一遍（新增 `.agents/skills/daily/media-file-organizer/references/bilibili-works-ingest.md`、`scripts/ingest_media_batch.py`；改同名 `SKILL.md` 与 `_index.md` 该条目）
+  - 历史会话读取补上「接手要用但取证不用」的三类信息：`--tail` 尾部窗口、`-c` 命中上下文、`--files` 改动文件清单；`list` 增加状态与最后活动时间（改 `tools/{wb_history,qoder_history}.py` 及两个 SKILL、`_index.md`、`GUIDE_REGISTRY`；2026-10-30 用户「B的不用太细…按接手场景判需要的程度」）
+  - 异环十连时间整体修真：库内 1097 条时间从"伪造偏移值"还原为真值，判重改内容多重集（改 `workspace/yihuan_gacha/{yihuan_clean.py,yihuan_gacha.py,SKILL.md}`、数据 `yihuan_gacha_database.json` 1097→1097 零丢失、`tests/gacha/test_yihuan_incremental.py` 重写为 20 例；2026-10-30 用户「备份好然后整体修」）
+  - 异环采集改真增量 + raw 永不删（改 `workspace/yihuan_gacha/{yihuan_gacha.py,yihuan_clean.py,SKILL.md}`；新增 `tests/gacha/test_yihuan_incremental.py`；2026-10-30 用户「raw 永不删是对的，但增量好像没触发还是没这功能，每次都全量」）
+  - 异环弧盘研募池补采完成，归档 220 → 260（改 `workspace/yihuan_gacha/yihuan_clean.py` 的 `NAME_FIXES`；数据 `yihuan_gacha_database.json` 1057 → 1097；2026-10-30 用户「接手继续做异环抽卡记录导出」）
+  - 退出摘要又踩了三个「把最没用的部分当结论」的坑 —— 19:23 那次崩溃把它们全暴露了（改 `tools/runtime/run_backend.py`；2026-10-30 用户「又触发了一次，你看看」）
+  - 修复退出监控的三个真 bug —— 18:10 那次原生崩溃把它们全暴露了（改 `tools/runtime/run_backend.py`、`docs/operations-manual.md`；2026-10-30 用户「又停了。好像是开着游戏同时做 ocr 就有概率停」）
+  - 异环抽卡采集：流水线翻页 + 面板 ROI + 坐标偏移修正 + HSV 稀有度，10-30 一轮采到 1057 条（改 `workspace/yihuan_gacha/{yihuan_gacha.py,SKILL.md}`，数据 `yihuan_gacha_database.json` 956→1057；2026-10-30 Qoder 会话被额度打断后接手跑完）
+  - Qoder 历史会话也能翻了：新增 `tools/qoder_history.py` + skill `qoder-history-recall`（新增 `tools/qoder_history.py`、`.agents/skills/daily/qoder-history-recall/SKILL.md`；改 `.agents/skills/_index.md`、`server/agent_guide_data.py`、`tools/README.md`；2026-10-30 用户「先看已有的 wb 数据库读取 skill，然后看一下 Qoder 怎么读，写一个类似的 skill」）
+  - 用真崩溃验证「等下次崩再定位」这条链路真的能留下栈（改 `tools/runtime/run_backend.py`、`docs/operations-manual.md`；2026-10-30 用户选「C：先不改 OCR，等下次崩溃用 faulthandler 定位」）
+  - 重复启动改为「先优雅关闭再启动」，不再直接 taskkill（改 `tools/runtime/run_backend.py`、`start.bat`、`docs/operations-manual.md`、`docs/deployment.md`；2026-10-30 用户「最好把重复启动先优雅关闭再启动这种功能加上，而不是直接杀进程」）
+  - 后端退出监控：`start.bat` 改走 `tools/runtime/run_backend.py` 外壳（新增 `tools/runtime/run_backend.py`；改 `start.bat`、`docs/operations-manual.md`、`docs/deployment.md`、`tools/README.md`；2026-10-30 用户「start.bat 能不能加一点退出监控相关功能，现在窗口开着的，但是没有什么有价值的信息」）
+  - 机制审阅台：`05_管家架构/29_机制全链路审阅_20261030.html`（可批注 + 导出；2026-10-30 用户「把所有机制汇总到一个 HTML，用几个例子体现全流程全链路，每一步用流程图表示并留注释输入框，留下载 JSON/Markdown 按钮」）
+  - 20:15 修正（用户「字体用易读性强的，现在数字高低不齐很难读」「不要反复保存，我打个拼音一直在闪保存提示，点保存就够了」）
+  - 同步修正 `28_数据与记忆_面板视图与召回整改_20261030.md` 三处口径（2026-10-30 用户「数据库还没做迁移…这些字段是新设计的，以前没有，也没做好导入，这很正常，现在我们也不做导入」）
+  - 中枢模块汇总：`05_管家架构/30_中枢模块_职责与执行链路_20261030.md`（2026-10-30 用户「把原话、补充的 7 条、落地形态汇总到一个文档…还要写清楚预计的一次中枢完整执行链路，以及每一个细节怎么体现在链路里」）
+  - 数据与记忆视图单独立卷：`05_管家架构/28_数据与记忆_面板视图与召回整改_20261030.md`（2026-10-30 用户「数据库面板不止要展示实际数据库，还要包括以文件形式存储的日志等，记忆管理也应该在这个界面」+「仍有召回不佳、垃圾成山」）
+  - 终末地寻访统计按 `kind` 分抽卡/非抽卡，并加 `--summary-only`（改 `workspace/endfield_gacha/{endfield_gacha.py,SKILL.md}`、新增 `workspace/endfield_gacha/check_kind_rule.py`、数据 `workspace/endfield_gacha/{char_records.json,summary.json}`，2026-10-30 用户回坑首采时发现并裁决）
+  - 面板设计收敛为一份：`05_管家架构/27_面板现行设计_v3.6_20261030.md`（2026-10-30 用户「不要各种原话、推论、设计到处都是各种版本乱堆，统一放/只显露最新设计」）
+  - 面板 v3 缺的三个写接口补齐：存为新版 / 交接提示词保存 / 归档（schema v15；改 `server/memory/schema.py`、`server/butler/{store,router,models}.py`、`server/todos/{store,router,models}.py`；2026-10-30 用户「我重启了，你做」，对应 `05_管家架构/26_…md` 台账 D8/D11/D12）
+  - 面板信息架构 v3：左轨五项平级 / 四栏事务面板 / 中枢大改 / 仪表盘（新增 `workspace/local_butler/05_管家架构/24_面板信息架构v3_五视图与仪表盘_20261029.md` 与 `25_面板v3预览_20261029.html`；改 `05_管家架构/README.md`；2026-10-29 深夜用户口述架构调整）
+  - 中枢 / 事务双态界面预览（新增 `workspace/local_butler/05_管家架构/23_中枢界面预览_20261029.html`，734 行单文件、零依赖；改 `05_管家架构/README.md`；2026-10-29 用户「可以出一版界面看看效果了」）
+  - 中枢管家设计定稿：Hermes/OpenClaw 调研 + 巡检线三层模型 + 接 DSH 的 8 条兼容预留（新增 `workspace/local_butler/05_管家架构/22_中枢管家_巡检线与发现项_20261029.md`；改 `21_…DSH寄居评估_20261029.md`、`05_管家架构/README.md`；2026-10-29 用户校正框架后重做）
+  - 详情区第二轮修订：去冗余说明、删除按钮上移弹窗化、`路` 改叫`会话`、恢复事务统计条（纯前端；改 `workspace/local_butler/panel-v2/src/components/{DetailPanel,DispatchStrip,NewRunModal,TaskCard,TaskList}.vue` 与 `src/{format.ts,styles.css}`；2026-10-29 用户逐条点名）
+  - 详情区重排 P0a：拆成「卡 A · 这个事务」+「卡 B · 这一路」（纯前端；改 `workspace/local_butler/panel-v2/src/components/{DetailPanel,TaskCard,TaskList}.vue` 与 `src/{format.ts,styles.css}`；2026-10-29 用户点单，按他给的 2/3/4/5a/5b 与「把下面已经有的那个进度条删掉」）
+  - 翻历史会话升级为 skill，并改为「双方都读」（新增 `.agents/skills/daily/wb-history-recall/SKILL.md` + `references/case-20261028-prompt-versions.md`；改 `tools/wb_history.py`、`server/agent_guide_data.py`、`.agents/skills/_index.md`、`tools/README.md`、`workspace/local_butler/05_管家架构/17_DL1-DL5实施记录_20261027.md`；删 `.agents/memory/TOPIC_wb_history.md`；2026-10-29 用户指正「不要只读用户说了什么，那个 skill 有一点倾向性」+「它应该变成一个 skill 而不是 topic」）
+  - 群聊总结新增「★ 合并批次」：一句口令跑完「日总结 + 就业摘录」两件（方案 B，⚠️ 灰度中；新增 `workspace/chat_digest/prompts/factpool_prompt.md`、`dev/one_pass_beta.py`、`one_pass_beta.json`；改 `workspace/chat_digest/{SKILL.md,loop_actions.py,verify_quotes.py}`、`.agents/skills/daily/future-group-intel-import/SKILL.md`、`server/agent_guide_data.py`；2026-10-29 用户拍板）
+  - 执行域状态归位 + 一个事务多路并行（schema v14；改 `server/memory/schema.py`、`server/butler/{store,service,router,models,prompts}.py`、`server/user_message.py`、`server/core/middleware.py`、`workspace/local_butler/panel-v2/src/{App.vue,api.ts,types.ts,format.ts,styles.css}` 与 `.../components/{DetailPanel,TaskCard,TaskList,NewRunModal}.vue`；新增 `tests/butler/test_run_concurrency.py`；2026-10-29 用户拍板四件事后实施，设计见 `workspace/local_butler/05_管家架构/DD-run级状态与并发.md` §7/§10）
+  - 派单提示词恢复多版本 + 可回滚，交接改为「单份 + 必带会话码」（schema v13；改 `server/memory/schema.py`、`server/butler/{prompts,store,router}.py`、`workspace/local_butler/panel-v2/src/{api.ts,types.ts,components/DetailPanel.vue,styles.css}`、`tests/butler/{test_prompts.py,test_prompt_versions.py}`；新增 `tools/wb_history.py`；2026-10-29 用户裁定，推翻 v12 的单版本口径）
+  - （已被上一条 v13 推翻：提示词恢复多版本）**派单提示词改「只留当前一份」+ 交接独立成卡 + 面板两个独立开关（schema v12；改 `server/
+  - ~~**派单提示词版本管理 + 回滚（schema v11）**~~ **已撤销（2026-10-28 第三批裁定：只保留当前一个版本）**，`butler_p
+  - 报告自报执行身份 harness / model（改 `server/butler/{models,service,router}.py`、`server/butler/prompts.py`；2026-10-28）
+  - 活跃文档失效路径修正（改 `AGENTS.md`、`docs/{architecture,project-intro,agent-guide-keywords,mcp-reference}.md`；2026-10-28）
+  - P5 T7 修订：P-B 按用户逐段批注重写 + 回报拆步 + agent 面参数裁剪（改 `server/butler/{prompts,bundles,service,router,models}.py`、`server/agent_guide_embedder.py`、`tests/butler/{test_prompts,test_reports,test_bundles_v2,test_dl4_flow}.py`；2026-10-28）
+  - Tauri 桌面壳（新增 `workspace/local_butler/panel-v2/src-tauri/`；2026-10-28）
+  - 事务面板 Vue3+TS 实现（新增 `workspace/local_butler/panel-v2/`；2026-10-28 用户选 B 纸面质感并追加列表视图）
+  - P5 T1 落地：schema v10（新增 `butler_reports` 每轮报告表；`butler_runs` 加 `blocked_on_user_json`/`next_run_hint_json`/`report_count`/`last_report_at`；`butler_deliveries` 加 `used`/`useful`/`feedback_note`；`domain:<id>` 进入合法 scope；改 `server/memory/{schema,wrapup}.py`、新增 `tests/memory/test_memory_schema_v10.py`、更新 `tests/butler/test_dl4_flow.py` 版本断言；spec 真源 `temp/sdd/butler-v2/spec.md` §5）
+  - P5 T9 落地：面板后端端点（改 `server/butler/{service,store,router}.py`、补 `tests/butler/test_reports.py` 与 `test_dl4_flow.py`；spec §10）
+  - P5 T8 落地：MCP 直连面收敛 + 并行契约（改 `server/mcp_whitelist.py`、`server/butler/bundles.py` 读库串行化、`workspace/course_digest/LEAF_PROMPT*.md`、`workspace/tool_dojo/*` 示例、`tests/server_endpoints/test_video_frame.py`；新增 `tests/butler/test_mcp_surface.py`；spec §9）
+  - P5 T7 落地：提示词渲染器（新增 `server/butler/prompts.py`、`tests/butler/test_prompts.py`；改 `server/butler/router.py` 的 `/butler/runs` prompt_text；spec §8）
+  - P5 T6 落地：记忆组装 8 页（改 `server/butler/bundles.py`、`server/butler/{store,models,router}.py`、`server/memory/schema.py` 加 `butler_runs.domain_id`；新增 `tests/butler/test_bundles_v2.py`；spec §7）
+  - P5 T4+T5 落地：note/inbox + context 多 cursor（schema v10 新增 `butler_notes`；改 `server/butler/{service,store,models,router}.py`、补 `tests/butler/test_reports.py` 与 `test_dl4_flow.py`；spec §6.3/§6.4）
+  - P5 T3 落地：用户关闭 run（`POST /butler/runs/{run_id}/close`；改 `server/butler/{service,store,router}.py`、补 `tests/butler/test_reports.py` 与 `test_dl4_flow.py`；spec §6.2）
+  - P5 T2 落地：每轮报告（长会话，不关 run）（改 `server/butler/{service,store,models,router}.py`、新增 `tests/butler/test_reports.py`；spec 真源 `temp/sdd/butler-v2/spec.md` §6）
+  - 事务面板 DL5 落地：单页同源面板 + 三处支撑端点（新增 `workspace/local_butler/panel/index.html`；`GET /butler/runs`、`GET /memory/candidates?run_id=`、`POST /memory/candidates/{id}/review`；新增 `server/memory/write.py`、`tests/butler/test_dl5_support.py`；改 `server/{butler/{store,service,router},memory/{store,wrapup,router}}.py`、`docs/api-reference.md`；设计真源 `workspace/local_butler/05_管家架构/17_DL1-DL5实施记录_20261027.md` §6）
+  - 外部循环接入 DL4 落地：会话码 `open → context.next → wrapup.submit` + `memory.write`（schema v9 新增 `butler_runs` / `butler_handoffs` / `butler_deliveries` / `butler_events`；新增 `server/butler/{store,bundles,service,models,router}.py`、`tests/butler/test_dl4_flow.py`；改 `server/memory/schema.py`、`server/main.py`、`server/mcp_whitelist.py`；设计真源 `workspace/local_butler/05_管家架构/17_DL1-DL5实施记录_20261027.md` §5）
+  - 记忆上下文红线 DL1 落地：新增 `GET /memory/norms`（5,000 字符预算；安全类 `must_read` 优先、global 先于 project；超预算安全类截断保留、效率类跳过并回显 `truncated/omitted`；`kind='norm'` 排除自动老化/重验）
+  - 事务分类 DL2 落地：todos / wip_tasks 各加「结构轴四类 + 目的轴三档」两列 + `task_occurrences`，并把「映射不上就列出来」写进代码（新增 `server/todos/classify.py`、`tools/task_class_backfill.py`、`tests/todos/test_task_class.py`；改 `server/todos/{store,models,router,__init__}.py`、`server/main.py`、`docs/api-reference.md`；设计真源 `workspace/local_butler/05_管家架构/17_DL1-DL5实施记录_20261027.md` §3）
+  - 记忆写入漏斗 DL3 落地：schema v8（facts 11 列 + 原话表 + 候选账）+ 收尾落库内核 + 两个 HTTP 端点（新增 `server/memory/wrapup.py`、`tools/memory_wrapup_smoke.py`、`tests/memory/test_memory_wrapup.py`；改 `server/memory/{schema,store,router,__init__}.py`、`docs/api-reference.md`；设计真源 `workspace/local_butler/05_管家架构/17_DL1-DL5实施记录_20261027.md` §2；2026-10-27 用户「ok」确认接口面三问按默认档走之后执行）
+  - local_butler 事务盘点补齐断点②③：能力覆盖（64 条入口逐条归属 30 簇）+ 档位翻译成运行时四要素（新增 `workspace/local_butler/07_事务盘点/90_脚本/af/{af_p4_capability.py,af_p4_autonomy.py}`、`30_汇总/06_能力覆盖与缺口.{md,json}`、`30_汇总/07_档位与运行时.{md,json}`、`17_缺口与暂缓_20261026.md`；改 `README.md`、`00_调查设计.md` §1.3/§6.5/§9，2026-10-26 用户「把刚刚你发现的断点后面两个也做了，不过先记录到文档」）
+  - local_butler 事务盘点补齐时间维度，并把 Phase 4 的目标从「30 簇分工」纠正为「单 agent 先接哪几件」（新增 `workspace/local_butler/07_事务盘点/90_脚本/af/af_p4_time.py`、`30_汇总/05_时间结构.{md,json}`；改 `README.md`、`00_调查设计.md` §6.5/§9，2026-10-26 用户要求「对齐设计核心思路」后执行）
+  - image_search_bench 反馈改为 agent 自决策 + 留痕，并把 B0001 的 11 组诉求当场落地成 f 版（新增 `workspace/image_search_bench/scripts/{decide_feedback.py,patch_v3_schema_f_20261026.py}`、`tagging/feedback_decisions.jsonl`、`judg/feedback_ledger.html`、`tag_pack_v3_20261026f/`；改 `tagging/{tag_schema_v3_draft.json,prompt_v3_pass0.md,prompt_v3_pass1.md,prompt_v3_pass2_blocks.md}`、`scripts/{v3_batch.py,build_tag_pack.py}`、`tagging-batch-rules.md`、`data_tags/v3/{BATCH_BRIEF.md,MAIN_AGENT_PROMPT.md}`、`PROJECT_MAP.md`，2026-10-26 用户授权）
+  - local_butler 事务盘点 Phase 3 修订轮：三条口述裁定 + 一条全局分工约束，并发现「阶梯表达不了禁止」（新增 `workspace/local_butler/07_事务盘点/90_脚本/af/af_p3_amend.py`、`40_用户标注/00_标注_20261026.json`；改 `af_p3_apply_annot.py`、`40_用户标注/01_优先级与自主档.md`、`README.md`、`00_调查设计.md`，2026-10-26 用户在对话里补三条裁定后执行）
+  - local_butler 事务盘点 Phase 3：用户标注回收并落权威档位表（新增 `workspace/local_butler/07_事务盘点/90_脚本/af/af_p3_apply_annot.py`、`40_用户标注/01_优先级与自主档.md`；改 `af_p2_cluster.py`、`README.md`、`00_调查设计.md`，2026-10-26 用户导出 `cluster_annotation.json` 后执行 §6.4）
+  - image_search_bench 改进轮三件：放宽字段上限 + 子 agent 反馈渠道 + 多 agent 抢包状态机（新增 `workspace/image_search_bench/scripts/{collect_feedback.py,patch_v3_caps_20261026.py}`、`tagging/feedback.json`、`judg/feedback.html`、`data_tags/v3/_claims/state.json`；改 `workspace/image_search_bench/scripts/{v3_batch.py,validate_v3_output.py}`、`tagging/tag_schema_v3_draft.json`、`tagging/prompt_v3_pass1.md`、`tagging/prompt_v3_pass2_blocks.md`、`tagging-batch-rules.md`、`tagging-task-pack.md`、`data_tags/v3/BATCH_BRIEF.md`、`evidence/v3_openvocab_20261026.md`、`PROJECT_MAP.md`；重建包 `tag_pack_v3_20261026e/`，2026-10-26 用户三条追加）
+  - image_search_bench 批量打标：规则先定 + 准备做完（全子 agent 路线，未开跑）（新增 `workspace/image_search_bench/tagging-batch-rules.md`、`scripts/v3_batch.py`、`data_tags/v3/{plan.jsonl,state.jsonl,BATCH_BRIEF.md,B0001…B0258/}`、`tagging/excluded_132.jsonl`、`tagging/pool6317_sample.jsonl`、`tagging/privacy_screen_pool6317.json`、`data_ocr/ocr_shotcam_all.jsonl`；改 `PROJECT_MAP.md`，2026-10-26 用户裁定）
+  - local_butler 事务盘点 Phase 2：1646 条事实聚成 30 个事务簇 + 就地标注页（新增 `workspace/local_butler/07_事务盘点/90_脚本/af/af_p2_cluster.py`、`af_p2_annotate.py`、`30_汇总/01_事务簇清单.{md,json}`、`02_矩阵与委托档.md`、`03_标注页.html`；改 `af_paths.py`、`README.md`、`00_调查设计.md`，2026-10-26 用户「开始」后执行 §6.3）
+  - image_search_bench 新增「字段地图」生成器：把 v3 打标 schema 渲染成可搜可筛的层级 + 依赖页（新增 `workspace/image_search_bench/scripts/gen_schema_map.py`、`workspace/image_search_bench/tagging/vocab_zh.json`、产物 `workspace/image_search_bench/judg/schema_map.html`；改 `workspace/image_search_bench/PROJECT_MAP.md`，2026-10-26 用户要求）
+  - course_digest 支持 ASR-first / 输出落 HDD，并修掉并发抢包号（新增 `workspace/course_digest/asr_sources.py`；改 `packets.py`、`index_courses.py`、`progress.py`、`RUN_BOOK.md`，2026-10-29）
+  - course_digest 取帧改走内存直读：新增 MCP 工具 `video_frame`（新增 `server/video.py`、`tests/server_endpoints/test_video_frame.py`；改 `server/main.py`、`server/mcp_whitelist.py`、`docs/api-reference.md`、`docs/mcp-reference.md`、`workspace/course_digest/{LEAF_PROMPT.md,LEAF_PROMPT_TECH.md,RUBRIC.md,RUN_ALL.md,RUN_BOOK.md,README.md}`，2026-10-26）
+  - 新增 skill `dev/handoff`：换会话时的交接稿（新增 `.agents/skills/dev/handoff/SKILL.md`；改 `.agents/skills/_index.md`（80 号条目）、`server/agent_guide_data.py`（`GUIDE_REGISTRY` 新增 `dev.handoff` + `_DEV_ROLES` 归 method）、`.agents/skills/dev/README.md`、`.agents/skills/temp_cleanup.md`、`docs/ACKNOWLEDGMENTS.md`（上游移植表 14→15），2026-10-25）
+  - 新增「后端被硬杀」事后复盘工具 `tools/runtime/backend_postmortem.py`（新增 `tools/runtime/backend_postmortem.py`，2026-10-26 18:23 事故后）
+  - homework 全量重扫 7 门 70 行 + 「新作业默认建档」写进 SOP + netsec 实验四第 2 项实跑取证（新增 `workspace/homework/records/未交全量_20261026.md`、`_snapshots/assign_20261026.json`、`temp/req_large_db_20261026.json`、`subjects/netsec/arp_lab_scripts/kali_{env,br_setup,diag_fwd,etter_run2,shot_run5}.sh`；改 `workspace/homework/AGENTS.md`、`records/{todos.md,journal.md}`、`待审清单.md`、`records/待审清单.md`、`subjects/netsec/conventions.md`，2026-10-25~26）
+  - summary 双阈值 + 提示词示例修正（改 `server/butler/{service,prompts}.py`、`tests/butler/test_prompt_versions.py`；2026-10-28 用户裁定）
+  - chat_digest 方案 B 第 4 次灰度（10-26 补测）：撤约束后 B 路真短板复现 + 两条红线（改 `workspace/chat_digest/SKILL.md`「已知代价」+ `one_pass_beta.json` 4/5；2026-10-30）
+  - chat_digest 方案 B 第 6 次（第 5 次复测 / 归因分离实验，改 `workspace/chat_digest/SKILL.md`「已知代价」、`one_pass_beta.json` 6 次但仍
+  - chat_digest 方案 B 第 5 次灰度（10-31 新批次 30h / 23 批，首次真正的当日 A/B）+ 交付 23 批（改 `workspace/chat_digest/SKILL.md`「已知代价」与「灰度规则」、`one_pass_beta.json` 5/5 但
+  - chat_digest 方案 B 第 3 次灰度（10-27 历史数据补测）：两条线结论收敛（改 `workspace/chat_digest/SKILL.md`「已知代价」+ `one_pass_beta.json` 3/5；2026-10-30）
+  - chat_digest 方案 B 第 2 次灰度（10-28 历史数据补测）：作废「日总结线 B 劣于 A」（改 `workspace/chat_digest/SKILL.md`「已知代价」+ `one_pass_beta.json` 2/5；2026-10-30）
+  - chat_digest 方案 B 首次灰度（A/B 对比）实测结论入档（改 `workspace/chat_digest/SKILL.md`「已知代价」；2026-10-30）
+  - 课程提炼：ASR 先行 + 输出落 HDD + 同名消歧 + 4K 解码提速（改 `workspace/course_digest/{packets,asr_sources}.py`、`workspace/stt_cloud_batch/batch_stt.py`、`server/video.py`、`tests/server_endpoints/test_video_frame.py`；2026-10-29）
+  - 首轮提示词二次瘦身 + 交接改独立提示词 + 删 `session.inbox` + 面板档位自选（改 `server/butler/{prompts,router,service,models,store,bundles}.py`、`server/user_message.py`、`workspace/local_butler/panel-v2/src/{api.ts,App.vue,components/DetailPanel.vue,styles.css}`、`tests/butler/{test_prompts,test_prompt_versions,test_reports,test_dl4_flow}.py`；2026-10-28 用户第二批批注）
+  - 首轮提示词重排 + 下一轮按「续跑/接手」分流（改 `server/butler/{prompts,router,service}.py`、`server/memory/wrapup.py`；2026-10-28 用户逐条批注）
+  - P-B 改成「每小步只需这几个字段」表 + evidence 接线 + 拒收文案只报事实（改 `server/butler/{prompts,bundles,models,service,router}.py`、`server/memory/wrapup.py`、`tests/butler/{test_reports,test_bundles_v2}`；2026-10-28 用户口径）
+  - P-B 页面清单与取页调用同源（改 `server/butler/prompts.py`、`test_prompts.py`；2026-10-28）
+  - T14 任务表合并：`todos` + `wip_tasks` → `tasks`（改 `server/todos/{store,router,models}.py`、`server/agent_guide_data.py`；新增 `tests/todos/{test_task_merge_shadow,test_task_action}.py`；设计 `temp/sdd/butler-v2/T14-task-merge.md`，2026-10-27 用户拍「该并就并」）
+  - 派单提示词改为「用户原文第一段」+ 标题/判据可空 + 模型自报（改 `server/butler/{prompts,router,models,server,store}.py`、`tests/butler/{test_prompts,test_dl4_flow}.py`；2026-10-27 用户要求「所谓要求就是平时写的提示词，标题和判据从来不强制写」「原文写在复制的提示词第一段」「模型和 harness 都提供最好」）
+  - 会话码简化 + 提示词可重发 + 单连接并发读修复（改 `server/butler/{store,router,models}.py`、`server/memory/{schema,store}.py`、`tests/butler/{test_dl4_flow,test_prompts}.py`；2026-10-27 用户裁决「码别搞太复杂，四位数字字母混合足够」「该存啊，万一会话横跨多日」）
+  - MCP 直连面按调用计数回调 8 个高频工具（改 `server/mcp_whitelist.py`、`tests/butler/test_mcp_surface.py`、`tests/server_endpoints/test_mcp.py`、`workspace/course_digest/LEAF_PROMPT*.md`、`workspace/local_butler/05_管家架构/DD-工具面收敛.md`；2026-10-27 用户裁决「回调 8 个高频」）
+  - 交接稿落盘口径收口：现行一律 `temp/handoff/`，`.agents/memory/HANDOFF_*.md` 只留历史稿（改 `.agents/memory/README.md`、`.agents/skills/dev/handoff/SKILL.md`；移除 `.agents/memory/HANDOFF_2026-10-26_netsec_arp.md`，内容原样转存 `temp/handoff/` 并校正内部自述，2026-10-27 用户裁决「目前暂时走 temp，管家改造一阶段建好后按我们的处理」）
+  - MCP 工具面二轮收敛：网关摘除 15 个零调用工具（改 `server/mcp_whitelist.py`、`docs/mcp-reference.md`、`docs/api-reference.md`、`workspace/mindforge/loop_actions.py`；审计与逐条判据见 `temp/tool_usage_audit_20261027/端点收敛清单.md`，2026-10-27 用户逐条裁定）
+  - local_butler 事务盘点：撤回「禁区」设计，授权改白名单；并做完 30 簇「同一路记忆」粗筛（新增 `workspace/local_butler/07_事务盘点/90_脚本/af/af_p4_memory_audit.py`、`30_汇总/04_工具链复用审计.md`；改 `af_p3_amend.py`、`af_p3_apply_annot.py`、`40_用户标注/{00_标注_20261026.json,01_优先级与自主档.md}`、`README.md`、`00_调查设计.md`，2026-10-26 用户两条裁定后执行）
+  - image_search_bench 修「迟到产物合不进主线」：新增 `absorb` + `missed` 状态 + 补上 repack 的假判据（改 `workspace/image_search_bench/scripts/v3_batch.py`、`data_tags/v3/MAIN_AGENT_PROMPT.md`、`tagging-batch-rules.md`；2026-10-26 B0001 事故后）
+  - image_search_bench v3 补「输出形态」标记 + 修回收侧噪声判据（改 `workspace/image_search_bench/tagging/{tag_schema_v3_draft.json,prompt_v3_pass2.md,prompt_v3_pass2_blocks.md}`、`scripts/{validate_v3_output.py,validate_v3_draft.py,collect_novel_terms.py}`、`tagging-v3-design.md`、`tagging-task-pack.md`、`PROJECT_MAP.md`；新增 `scripts/patch_v3_output_shape_20261026.py`、任务包 `tag_pack_v3_20261026d/`、12 张结果 `tag_pack_v3_20261026c/pilot_T01_T12.jsonl`，2026-10-26）
+  - image_search_bench v3 打标改成「开放式取值」：枚举只是候选，允许 VLM 自造 + 词表回收（改 `workspace/image_search_bench/tagging/{tag_schema_v3_draft.json,prompt_v3_pass0.md,prompt_v3_pass1.md,prompt_v3_pass2.md,prompt_v3_pass2_blocks.md,vocab_zh.json}`、`scripts/{validate_v3_output.py,validate_v3_draft.py,gen_schema_map.py,build_tag_pack.py}`、`tagging-v3-design.md`、`tagging-task-pack.md`、`PROJECT_MAP.md`；新增 `scripts/{refactor_v3_openvocab_20261026.py,patch_v3_pilot_seeds_20261026.py,collect_novel_terms.py}`、`evidence/v3_openvocab_20261026.md`、`tagging/novel_terms.json`、`judg/novel_terms.html`、任务包 `tag_pack_v3_20261026c/`，2026-10-26 用户裁定）
+  - local_butler 事务盘点 H6 全量收口：106 天 / 1646 条事实，并修掉两处校验器口径 bug（改 `workspace/local_butler/07_事务盘点/90_脚本/af/af_h6_validate.py`、`af_h6_merge.py`、`16_给H6主agent的提示词.md`、`README.md`，2026-10-26 用户「做完了应该」后做收口核验）
+  - local_butler 事务盘点 H6：`subject` 上限复核后
+  - image_search_bench 字段地图加「语言三档开关」：字段名全中文，可切 中文 / English / 中英并存（新增 `workspace/image_search_bench/tagging/glossary_zh.json`、`workspace/image_search_bench/evidence/schema_map_i18n_20261026.md`；改 `workspace/image_search_bench/scripts/gen_schema_map.py`，2026-10-26 用户要求）
+  - image_search_bench：B2 角色支线改方向（改 `workspace/image_search_bench/route-roadmap.md`、`workspace/image_search_bench/PROJECT_MAP.md`，2026-10-26 用户裁定）
+  - image_search_bench：人判把 B3 姿势通道否掉 + N7–N9 三条签核回收（新增 `workspace/image_search_bench/scripts/pose_human_eval.py`、`evidence/{to_you_marks_20261025.json,pose_human_eval_20261026.md,pose_human_eval_20261026.json}`；改 `route-roadmap.md`、`query-set.md`、`PROJECT_MAP.md`，2026-10-26）
+  - v3 打标 schema 拆掉「让 VLM 猜官方/同人」：`style`→`picture_class`（多选介质）+ `media_form`→`art_style`（画法）（改 `workspace/image_search_bench/tagging/{tag_schema_v3_draft.json,prompt_v3_pass0.md,prompt_v3_pass2_blocks.md}`、`scripts/{validate_v3_output.py,compare_v3_v21.py}`、`tagging-v3-design.md`、`tagging-task-pack.md`，新增 `scripts/refactor_v3_picture_class.py`，2026-10-26 用户裁定）
+  - 发版分批器去掉「等满 900s 再强放行」：内存不够且没有在飞批时直接放行 + 告警（改 `tools/run_tests_batched.py`、`docs/dev-workflow.md`，2026-10-24 用户裁决）
+  - 交接卡飘到页面底部：`.handoff-card { grid-column: 3 }` 只占了列、没跟任务操作同格（改 `workspace/local_butler/panel-v2/src/{components/DetailPanel.vue,styles.css}`，2026-10-29 用户截图为证「交接的位置不对」）
+  - 新增 `05_管家架构/DD-run级状态与并发.md`（分析稿，未实施）
+  - 事务盘点标注页在预览面板里全黑：`localStorage` 裸调让脚本死在第一行（改 `workspace/local_butler/07_事务盘点/90_脚本/af/af_p2_annotate.py`，重生成 `30_汇总/03_标注页.html`，2026-10-26 用户「html好像有问题？我啥也看不到」）
+  - 归档搬走了内容、没搬走脱敏豁免：`CHANGELOG.md` 的 `D:\Documents` 行级跳过成了死规则（改 `release/profiles/public-full.toml`，2026-10-24）
+  - 崩溃批终于说清死在哪：分批器/运行器补上 Windows 异常码翻译 + 日志末尾 + 最后停在的测试（改 `tools/test_runner.py`、`tools/run_tests_batched.py`，新增 `tests/test_batched_crash_diagnostics.py`，2026-10-24）
+  - (暂无)

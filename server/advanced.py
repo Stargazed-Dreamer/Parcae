@@ -1,14 +1,14 @@
 """高级工具网关 - 双层 MCP 架构的第二层
 
-将低频/专业工具收拢到单个网关工具 localagent_advanced_tool，
-通过 tool 参数路由到具体端点。配合 localagent_list_tools 发现可用工具。
+将低频/专业工具收拢到单个网关工具 parcae_advanced_tool，
+通过 tool 参数路由到具体端点。配合 parcae_list_tools 发现可用工具。
 
 设计参考 Unity MCP 的 advanced_tool 网关模式：
   直接暴露 ~55 个高频工具（第一层）
       ↓
-  localagent_advanced_tool（1个网关）  ← 通过 tool 参数路由到 30+ 子工具
+  parcae_advanced_tool（1个网关）  ← 通过 tool 参数路由到 30+ 子工具
       ↓
-  localagent_list_tools  ← 运行时发现可用子工具及参数
+  parcae_list_tools  ← 运行时发现可用子工具及参数
 
 这样既突破 MCP 工具数量上限，又让所有 REST 端点都能通过 MCP 访问。
 
@@ -29,7 +29,7 @@ from pydantic import Field
 from lib.schema import BaseSchema
 from server.config import get_server_config
 
-logger = logging.getLogger("localagent.advanced")
+logger = logging.getLogger("parcae.advanced")
 
 
 # ========== ADR-0023 DANGEROUS_TOOLS 权限检查 ==========
@@ -319,27 +319,27 @@ class AdvancedToolResponse(BaseSchema):
 
 # ========== 路由 ==========
 
-@router.get("/tools", operation_id="localagent_list_tools")
+@router.get("/tools", operation_id="parcae_list_tools")
 async def list_advanced_tools(
     category: str | None = Query(None, description="按分类过滤: ocr/vision/mindforge/exec/apikey/memory/browser/screen/agent/docviewer/system/other"),
     search: str | None = Query(None, description="关键词搜索: 在 name 和 summary 中模糊匹配（不区分大小写）。如 search=screen 返回所有名称或摘要含 screen 的工具"),
     verbose: bool = Query(False, description="true=返回完整参数 schema；默认只返回 name+category+summary（推荐 agent 默认用精简模式）"),
     names_only: bool = Query(False, description="true=极简模式，只返回 {total, names:[...]} 工具名列表。适合 agent 快速扫描可用工具名，再按需查 verbose=true。与 verbose 互斥"),
 ):
-    """List all advanced tools accessible via localagent_advanced_tool.
+    """List all advanced tools accessible via parcae_advanced_tool.
 
     运行时发现可用子工具及参数。支持三种粒度：
 
     1. **names_only=true**（极简）：只返回工具名列表，~1KB。agent 快速扫描可用工具名
-       → `localagent_list_tools(params={"names_only": true})`
+       → `parcae_list_tools(params={"names_only": true})`
     2. **默认精简**（推荐）：name+category+summary，按分类分组。~5-8KB
-       → `localagent_list_tools(params={})`
+       → `parcae_list_tools(params={})`
     3. **search="关键词"**：按 name/summary 模糊匹配过滤，避免返回全量 120 个工具
-       → `localagent_list_tools(params={"search": "screen"})`
+       → `parcae_list_tools(params={"search": "screen"})`
     4. **verbose=true**：含完整参数 schema。需查参数时用
 
     category 与 search 可组合（先按分类过滤再搜关键词）。
-    这些是低频/专业工具，通过 localagent_advanced_tool(tool=<name>, params={...}) 调用。
+    这些是低频/专业工具，通过 parcae_advanced_tool(tool=<name>, params={...}) 调用。
     """
     # names_only 极简模式：只返回工具名列表
     if names_only:
@@ -415,7 +415,7 @@ def _load_tool_specs() -> dict:
     return _tool_specs_cache
 
 
-@router.get("/docs/tool", operation_id="localagent_tool_docs")
+@router.get("/docs/tool", operation_id="parcae_tool_docs")
 async def get_tool_docs(
     tool_name: str | None = Query(None, description="工具名（operation_id）。传入则返回该工具的完整 7 段语义说明；省略则返回所有有语义说明的工具清单"),
     source: str | None = Query(None, description="按来源过滤: builtin(客户端内置)/core_mcp(MCP直连工具)/rest(REST端点)"),
@@ -520,9 +520,9 @@ _PROJECT_DOCS: list[dict] = [
 ]
 
 
-@router.get("/docs/project", operation_id="localagent_get_docs")
+@router.get("/docs/project", operation_id="parcae_get_docs")
 async def get_project_docs(
-    doc_name: str | None = Query(None, description="文档名（见 localagent_get_docs 列表）。传入则返回该文档内容；省略则返回可用文档清单"),
+    doc_name: str | None = Query(None, description="文档名（见 parcae_get_docs 列表）。传入则返回该文档内容；省略则返回可用文档清单"),
     category: str | None = Query(None, description="按分类过滤: core(如何使用工具)/system(系统机制参考)"),
 ):
     """Get project documentation for MCP-only agents.
@@ -591,19 +591,19 @@ async def get_project_docs(
     return {"total": len(docs), "docs": docs}
 
 
-@router.post("/run", response_model=AdvancedToolResponse, operation_id="localagent_advanced_tool")
+@router.post("/run", response_model=AdvancedToolResponse, operation_id="parcae_advanced_tool")
 async def advanced_tool(req: AdvancedToolRequest):
-    """Execute an advanced/specialized tool by name. Use localagent_list_tools to discover names.
+    """Execute an advanced/specialized tool by name. Use parcae_list_tools to discover names.
 
     This is a GATEWAY tool (Unity MCP style) that routes to 30+ low-frequency REST
     endpoints not directly exposed as MCP tools. Pass tool=<operation_id> and params={...}.
 
     Examples:
-    - localagent_advanced_tool(tool="ocr_set_keep_models", params={"keep": true})
-    - localagent_advanced_tool(tool="mindforge_preload", params={})
-    - localagent_advanced_tool(tool="exec_output", params={"exec_id": "exec_xxx", "action": "range", "start": 0, "end": 100})
+    - parcae_advanced_tool(tool="ocr_set_keep_models", params={"keep": true})
+    - parcae_advanced_tool(tool="mindforge_preload", params={})
+    - parcae_advanced_tool(tool="exec_output", params={"exec_id": "exec_xxx", "action": "range", "start": 0, "end": 100})
 
-    Use localagent_list_tools to see all available tools and their parameters.
+    Use parcae_list_tools to see all available tools and their parameters.
     Returns the target endpoint's JSON response in `result`.
     """
     info = _advanced_registry.get(req.tool)
@@ -611,7 +611,7 @@ async def advanced_tool(req: AdvancedToolRequest):
         available = sorted(_advanced_registry.keys())
         raise HTTPException(
             status_code=404,
-            detail=f"未知工具: {req.tool}。用 localagent_list_tools 查看可用工具。已注册: {available[:20]}{'...' if len(available)>20 else ''}",
+            detail=f"未知工具: {req.tool}。用 parcae_list_tools 查看可用工具。已注册: {available[:20]}{'...' if len(available)>20 else ''}",
         )
 
     # ADR-0023 DANGEROUS_TOOLS 权限检查：网关是内部函数调用不经过 HTTP 中间件，

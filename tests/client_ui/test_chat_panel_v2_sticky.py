@@ -26,6 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.client_ui._local_store import local_store_factory as _local_store_factory  # noqa: E402
 
 # ============================================================================
 # Fixtures
@@ -42,7 +43,7 @@ def _make_chat_panel(monkeypatch, tmp_path):
     from client.panels.chat import ChatPanel
 
     db_path = str(tmp_path / "sticky_test.db")
-    monkeypatch.setattr(chat_module, "DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(chat_module, "_make_read_store", _local_store_factory(db_path))
     return ChatPanel()
 
 
@@ -80,8 +81,8 @@ class TestFindTopVisibleCollapsible:
 
     def test_only_non_collapsible_blocks_returns_none(self, qapp):
         """只有不可折叠块（user/agent text）→ 返回 None。"""
-        from client.core.agent import Message
         from client.panels.chat import _MessageTimeline
+        from lib.agent_runtime import Message
 
         tl = _MessageTimeline()
         try:
@@ -99,8 +100,8 @@ class TestFindTopVisibleCollapsible:
 
     def test_returns_first_collapsible_when_in_viewport(self, qapp):
         """可折叠块在 viewport 内 → 返回该块。"""
-        from client.core.agent import Message
         from client.panels.chat import _MessageTimeline
+        from lib.agent_runtime import Message
 
         tl = _MessageTimeline()
         try:
@@ -127,8 +128,8 @@ class TestFindTopVisibleCollapsible:
 
     def test_skips_collapsible_below_viewport(self, qapp):
         """viewport 在第一块之上 → 跳到下一个可折叠块。"""
-        from client.core.agent import Message
         from client.panels.chat import _MessageTimeline
+        from lib.agent_runtime import Message
 
         tl = _MessageTimeline()
         try:
@@ -156,8 +157,8 @@ class TestFindTopVisibleCollapsible:
 
     def test_all_collapsible_below_viewport_returns_none(self, qapp):
         """所有可折叠块在 viewport 之下 → 返回 None。"""
-        from client.core.agent import Message
         from client.panels.chat import _MessageTimeline
+        from lib.agent_runtime import Message
 
         tl = _MessageTimeline()
         try:
@@ -178,8 +179,8 @@ class TestFindTopVisibleCollapsible:
 
     def test_iter_collapsible_blocks_skips_non_collapsible(self, qapp):
         """iter_collapsible_blocks 跳过不可折叠块。"""
-        from client.core.agent import Message
         from client.panels.chat import _MessageTimeline
+        from lib.agent_runtime import Message
 
         tl = _MessageTimeline()
         try:
@@ -265,7 +266,7 @@ class TestUpdateStickyBar:
 
     def test_visible_collapsible_shows_bar(self, qapp, monkeypatch, tmp_path):
         """有可折叠块在 viewport 内 → sticky 栏显示标题（D42）。"""
-        from client.core.agent import Message
+        from lib.agent_runtime import Message
 
         panel = _make_chat_panel(monkeypatch, tmp_path)
         try:
@@ -294,7 +295,7 @@ class TestUpdateStickyBar:
         """同一块不重复更新（早期返回）。"""
         from unittest.mock import MagicMock
 
-        from client.core.agent import Message
+        from lib.agent_runtime import Message
 
         panel = _make_chat_panel(monkeypatch, tmp_path)
         try:
@@ -318,7 +319,7 @@ class TestUpdateStickyBar:
         """块滚出可见区 → 切换到下一个可见块。"""
         from unittest.mock import MagicMock
 
-        from client.core.agent import Message
+        from lib.agent_runtime import Message
 
         panel = _make_chat_panel(monkeypatch, tmp_path)
         try:
@@ -355,7 +356,7 @@ class TestUpdateStickyBar:
         """从有块到无块 → 隐藏 sticky 栏。"""
         from unittest.mock import MagicMock
 
-        from client.core.agent import Message
+        from lib.agent_runtime import Message
 
         panel = _make_chat_panel(monkeypatch, tmp_path)
         try:
@@ -383,7 +384,7 @@ class TestUpdateStickyBar:
         """sticky 标题箭头反映块的展开状态（▶ 折叠 / ▼ 展开）。"""
         from unittest.mock import MagicMock
 
-        from client.core.agent import Message
+        from lib.agent_runtime import Message
 
         panel = _make_chat_panel(monkeypatch, tmp_path)
         try:
@@ -417,7 +418,7 @@ class TestStickyClickInteraction:
     def test_click_collapses_current_block(self, qapp, monkeypatch, tmp_path):
         """点击 sticky 标题 → 折叠当前块。"""
 
-        from client.core.agent import Message
+        from lib.agent_runtime import Message
 
         panel = _make_chat_panel(monkeypatch, tmp_path)
         try:
@@ -454,7 +455,7 @@ class TestStickyClickInteraction:
         """折叠后立即更新 sticky 文本（箭头 ▼ → ▶）。"""
         from unittest.mock import MagicMock
 
-        from client.core.agent import Message
+        from lib.agent_runtime import Message
 
         panel = _make_chat_panel(monkeypatch, tmp_path)
         try:
@@ -507,7 +508,7 @@ class TestScrollTriggersStickyUpdate:
         """
         from unittest.mock import MagicMock
 
-        from client.core.agent import Message
+        from lib.agent_runtime import Message
 
         panel = _make_chat_panel(monkeypatch, tmp_path)
         try:

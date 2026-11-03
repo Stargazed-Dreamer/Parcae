@@ -42,6 +42,17 @@ _LEVEL_STYLE = {
 }
 
 
+def _validator_label(validator: Any) -> str:
+    """`/memory/status` 的 `validator` 字段 → 一行中文。
+
+    2026-10-31 后端已删除 LLM 验证器，字段固定返回 `removed_2026-10-31`；
+    这里显式把它译成「已删除」而不是「已关闭」，避免看成"有个开关关着、还能打开"。
+    """
+    if isinstance(validator, str) and validator.startswith("removed"):
+        return "已删除（2026-10-31）"
+    return "未知"
+
+
 class OverviewPage(QWidget):
     """概览页
 
@@ -210,21 +221,15 @@ class OverviewPage(QWidget):
         last_run = maint.get("last_run") or "从未运行"
         stale_threshold = maint.get("stale_threshold_days", "--")
         interval_hours = maint.get("interval_hours", "--")
-        validate_enabled = maint.get("validate_enabled", False)
-        status_counts = maint.get("status_counts") or {}
-        archive = status_counts.get("archive", 0)
-        keep = status_counts.get("keep", 0)
-        pending = status_counts.get("pending", 0)
+        archived_total = maint.get("archived_total", 0)
         stale_total = maint.get("stale_total", 0)
 
         lines = [
             f"上次运行：{last_run}",
             f"过时阈值（天）：{stale_threshold}",
             f"运行间隔（小时）：{interval_hours}",
-            f"LLM 验证：{'已启用' if validate_enabled else '已关闭'}",
-            f"归档数：{archive}",
-            f"保留数：{keep}",
-            f"待处理数：{pending}",
+            f"LLM 验证器：{_validator_label(maint.get('validator'))}",
+            f"归档数：{archived_total}",
         ]
         # 过时总数 > 0 红色高亮
         stale_line = f"过时总数：{stale_total}"

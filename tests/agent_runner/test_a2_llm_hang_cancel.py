@@ -28,13 +28,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from client.core.agent import (  # noqa: E402
+from lib.agent_runtime import (  # noqa: E402
     EventStore,
     RunnerConfig,
     RunnerDeps,
     SessionFacade,
 )
-from client.core.agent.types import (  # noqa: E402
+from lib.agent_runtime.types import (  # noqa: E402
     TRANSITION_USER_INTERRUPTED,
     LLMRequest,
     LLMResponse,
@@ -172,7 +172,7 @@ class TestA2LLMHangCancel:
 
     def test_no_interrupt_normal_completion(self, tmp_path):
         """回归测试：无 interrupt 时正常完成（task cancel 机制不影响正常流程）。"""
-        from client.core.agent import MockLLM
+        from lib.agent_runtime import MockLLM
 
         store = _make_store(tmp_path)
         try:

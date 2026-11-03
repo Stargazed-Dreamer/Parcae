@@ -11,7 +11,7 @@ import threading
 import requests
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from client.core.constants import SERVER_URL  # 8-9: 端口单一真源
+from client.core.constants import get_server_url  # 8-9: 端口单一真源（运行时解析，支持端口顺延）
 
 HEARTBEAT_INTERVAL_MS = 10_000  # 10s
 HEARTBEAT_TIMEOUT_S = 3.0
@@ -54,7 +54,7 @@ class HeartbeatWorker(QObject):
         def _do_send() -> None:
             try:
                 resp = requests.post(
-                    f"{SERVER_URL}/approvals/heartbeat",
+                    f"{get_server_url()}/approvals/heartbeat",
                     json={"panel_version": PANEL_VERSION},
                     timeout=HEARTBEAT_TIMEOUT_S,
                 )

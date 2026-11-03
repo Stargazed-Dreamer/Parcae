@@ -15,12 +15,14 @@ from fastapi import APIRouter, HTTPException, Query
 from server.todos.models import (
     TodoCreate, TodoUpdate, TodoDoneRequest,
     WipTaskCreate, WipTaskUpdate, WipBatchGetRequest,
+    TaskClassUpdate, TaskActionRequest,
 )
 from server.todos.store import TodosStore
 
-logger = logging.getLogger("localagent.todos.router")
+logger = logging.getLogger("parcae.todos.router")
 router = APIRouter(prefix="/todos", tags=["todos"])
 wip_router = APIRouter(prefix="/wip", tags=["wip"])
+tasks_router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 _todos_store: Optional[TodosStore] = None
 _todos_store_lock = threading.Lock()
@@ -224,6 +226,115 @@ async def wip_delete(task_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail=f"WIP 任务 '{task_id}' 不存在")
     return {"status": "deleted", "id": task_id}
+
+
+# ─── 事务分类（tasks_router，prefix=/tasks）─────────────────
+#
+# 结构轴四类决定到期表现，目的轴三档决定交到哪一步（见 server/todos/classify.py）。
+# 这些端点只读 + 改分类，不负责"派活"；派活是 DL4 之后的事。
+
+_TASKS_QUEUE_GUIDANCE = (
+    "队列按 15 §5.2 的默认顺序：1 逾期的一次性 → 2 本周到期的一次性 → "
+    "3 到期的周期 → 4 无日期小任务 → 5 长期复盘/进行中 → 6 paused/blocked（展示，不排进现在做）。"
+    "view/days 是派生值，不写库；paused/blocked 永远排最后。"
+)
+_TASKS_CLASSIFICATION_GUIDANCE = (
+    "结构轴：recurring_dated / one_shot_dated / small_undated / long_undated；"
+    "目的轴：daily(日常→完全自动) / one_shot(一次性→基本自动) / growth(成长→辅助)。"
+    "purpose_unset 与 unmapped 是**待你判**的清单：规则判不出就留空，不猜。"
+)
+
+
+@tasks_router.get("/queue", operation_id="tasks_queue", summary="按默认顺序出「现在该做什么」")
+async def tasks_queue():
+    """队列视图。paused/blocked 排最后，已完结不排队。"""
+    store = get_todos_store()
+    items = await asyncio.to_thread(store.task_queue)
+    return {"guidance": _TASKS_QUEUE_GUIDANCE, "total": len(items), "queue": items}
+
+
+@tasks_router.get("/classification", operation_id="tasks_classification",
+                  summary="事务分类报告（两轴计数 + 待判清单）")
+async def tasks_classification():
+    """两轴计数 + 派生视图分布 + 映射不上 / 目的轴留空的清单。"""
+    store = get_todos_store()
+    report = await asyncio.to_thread(store.task_summary)
+    return {"guidance": _TASKS_CLASSIFICATION_GUIDANCE, **report}
+
+
+@tasks_router.put("/{scope}/{task_id}/class", operation_id="tasks_set_class",
+                  summary="人工改事务分类")
+async def tasks_set_class(scope: str, task_id: str, req: TaskClassUpdate):
+    """scope=todos|wip。只改传进来的字段；非法取值直接 400，不静默忽略。"""
+    table = {"todos": "todos", "wip": "wip_tasks"}.get(scope)
+    if table is None:
+        raise HTTPException(status_code=400, detail=f"scope 只能是 todos / wip，收到 {scope!r}")
+    store = get_todos_store()
+    payload = req.model_dump(exclude_none=True)
+    try:
+        task = await asyncio.to_thread(
+            lambda: store.set_task_class(table, task_id, **payload)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not task:
+        raise HTTPException(status_code=404, detail=f"{scope} '{task_id}' 不存在")
+    return task
+
+
+@tasks_router.get("/list", operation_id="tasks_list",
+                  summary="面板用：tasks 单表轻量列表")
+async def tasks_list(include_archived: bool = Query(True)):
+    store = get_todos_store()
+    items = await asyncio.to_thread(store.list_tasks_view, include_archived)
+    return {"items": items, "count": len(items)}
+
+
+@tasks_router.post("/{scope}/{task_id}/action", operation_id="tasks_action",
+                   summary="统一任务动作（pause/resume/archive/unarchive/complete）")
+async def tasks_action(scope: str, task_id: str, req: TaskActionRequest):
+    """T14：todos 与 wip 共用一套状态词，不再分两套 update。"""
+    if scope not in ("todos", "wip"):
+        raise HTTPException(status_code=400, detail=f"scope 只能是 todos / wip，收到 {scope!r}")
+    store = get_todos_store()
+    try:
+        task = await asyncio.to_thread(
+            store.apply_task_action, scope, task_id, req.action, req.reason
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not task:
+        raise HTTPException(status_code=404, detail=f"{scope} '{task_id}' 不存在")
+    return {"ok": True, "action": req.action, "task": task}
+
+
+@tasks_router.post("/occurrences/materialize", operation_id="tasks_materialize",
+                   summary="把到期的循环模板落成 occurrence（幂等）")
+async def tasks_materialize():
+    """幂等：同一 (模板, 到期日) 只落一条；重复调用返回 existing。"""
+    store = get_todos_store()
+    return await asyncio.to_thread(store.materialize_occurrences)
+
+
+@tasks_router.get("/occurrences", operation_id="tasks_occurrences", summary="列出 occurrence")
+async def tasks_occurrences(status: Optional[str] = Query(None, description="pending/done/missed")):
+    store = get_todos_store()
+    rows = await asyncio.to_thread(store.list_occurrences, status)
+    return {"total": len(rows), "occurrences": rows}
+
+
+@tasks_router.post("/occurrences/{occ_id}/complete", operation_id="tasks_complete_occurrence",
+                   summary="完成一次 occurrence（推进模板，更早的 pending 判 missed）")
+async def tasks_complete_occurrence(
+    occ_id: str,
+    evidence: Optional[str] = Query(None, description="完成证据（链接/路径/一句话）"),
+    advance_template: bool = Query(True, description="是否同时推进模板的 next_due_at"),
+):
+    store = get_todos_store()
+    out = await asyncio.to_thread(store.complete_occurrence, occ_id, evidence, advance_template)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"occurrence '{occ_id}' 不存在")
+    return out
 
 
 def get_status() -> dict:

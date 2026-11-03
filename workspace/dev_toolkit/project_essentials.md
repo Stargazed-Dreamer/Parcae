@@ -1,11 +1,11 @@
-# project_essentials - LocalAgent 项目改进精华
+# project_essentials - Parcae 项目改进精华
 
-> LocalAgent 项目在 anthropics/skills 基础上的改进与本土化汇总。
+> Parcae 项目在 anthropics/skills 基础上的改进与本土化汇总。
 > 适用于新项目启动时直接落地，避免重复踩坑。
 
 ## 1. 概述
 
-本文件汇总 LocalAgent 项目（`<project_root>\`）在 anthropics/skills 基础上做的改进与本土化：
+本文件汇总 Parcae 项目（`<project_root>\`）在 anthropics/skills 基础上做的改进与本土化：
 
 1. **anti-AI-slop 实战经验**：合并 brand-guidelines + frontend-design 精华 + 本项目用户偏好
 2. **Reconnaissance-Then-Action 模式**：动态页面调试铁律
@@ -254,7 +254,7 @@ MCP 网关层有 50KB 硬上限 size guard：
 
 来自 `<project_root>\server\mcp_whitelist.py`：
 - DIRECT_TOOLS：~35 个直连工具
-- 网关自动收纳：~50 个工具（通过 `localagent_advanced_tool` 访问）
+- 网关自动收纳：~50 个工具（通过 `parcae_advanced_tool` 访问）
 - GATEWAY_EXCLUDE：~20 个排除工具（仅 REST 可用）
 
 总 REST 端点 ~105 个，但 MCP 工具列表只暴露 ~37 个（35 直连 + 2 网关），避免膨胀。
@@ -438,7 +438,7 @@ TOOL_ANNOTATIONS = {
 ### 8.3 截图+OCR 正确流程
 
 ```
-localagent_advanced_tool(
+parcae_advanced_tool(
     tool="screen_ocr",
     params={"mode":"window", "hwnd":123, "engine":"ocr"}
 )
@@ -591,7 +591,7 @@ MCP 网关层有 50KB 硬上限：
 
 ## 13. 参考资源
 
-- **LocalAgent 项目主入口**：`<project_root>\AGENTS.md`
+- **Parcae 项目主入口**：`<project_root>\AGENTS.md`
 - **功能变更检查清单**：`<project_root>\.trae\rules\project_rules.md`
 - **MCP 白名单 + Tool Annotations**：`<project_root>\server\mcp_whitelist.py`
 - **MCP 网关实现**：`<project_root>\server\core\mcp_gateway.py`

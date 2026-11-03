@@ -44,7 +44,7 @@ class TrayIcon(QObject):
         self._alert_icon = self._load_alert_icon()
 
         self._tray = QSystemTrayIcon(self._normal_icon, parent=self)
-        self._tray.setToolTip("LocalAgent 审批面板")
+        self._tray.setToolTip("Parcae 审批面板")
         self._build_menu()
         self._tray.activated.connect(self._on_activated)
 

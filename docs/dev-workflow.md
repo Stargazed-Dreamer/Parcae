@@ -58,6 +58,23 @@
 - SDD 流程产物不默认写入此目录（走 `temp/sdd/`）
 - 用户手动存放的规划/路线图文档（如 internal-workflow、github-app-bot、v6 等）允许保留在此目录，不视为违规
 - task_closure / structure_diff 检测到 `planning_notes/` 下有新内容时不警告（用户手动管理的区域）
+
+### 预研 / 长期规划类例外（2026-10-18）
+
+上述"禁止在 `workspace/` 创建文档"有一条**明确例外**：
+
+| 类型 | 默认 | 预研项目例外 |
+|---|---|---|
+| 预研调研报告 | `temp/sdd/` | ✅ `workspace/<项目>/0N_<调研>/` |
+| 规划层（六类粒度） | `temp/sdd/` | ✅ `workspace/<项目>/00_规划/` |
+| 决策面板 HTML | `temp/html/` | ✅ `workspace/<项目>/0N_决策/` |
+| 拍板台账 / 任务清单 | `temp/sdd/` | ✅ `workspace/<项目>/0N_决策/` |
+| 用户原话 / 拍板导出件 | 未规定 | ✅ `workspace/<项目>/50_原话归档/`（**强制当场复制**） |
+| **当轮 SDD**（spec/tickets/checklist） | `temp/sdd/` | ❌ **不例外，仍走 temp** |
+
+**分界线**：**长期资产 vs 当轮产物**。预研阶段产出的是长期资产（换 agent 要接得上、跨机器要带得走）；`spec/tickets/checklist` 是一次性施工图。
+
+**规矩真源 = `workspace/README.md`**（三档存放 / 项目标准结构 / 六类粒度 / 命名 / 原话归档 / 项目 README 四块）。
 - 该目录的 `.gitignore` 规则保留（PDF/ZIP 仍排除）
 
 ### 强制禁令（反复踩坑！项目根目录已清理多轮）
@@ -78,7 +95,7 @@
 
 ## 提交前机械防线（强制，2026-08-26 逻辑 bug 审查后建立）
 
-任何对 `server/`、`client/`、`lib/` 的代码变更，完成自测后、向用户报告"完成"之前，**必须跑以下两道机械检查**。这是防"上游改了下游没改"合同漂移复发的制度约束——审查结论见 commit `bf0c073`（f1-f10 共 16 组根因）：本项目历史 P0 bug 全部源于字符串弱耦合断链 + 宽泛 except 静默失效，人工 review 挡不住，必须机械兜底。
+任何对 `server/`、`client/`、`lib/` 的代码变更，完成自测后、向用户报告"完成"之前，**必须跑下列全部四道机械检查**（①端点 smoke ②pyright ③ruff lint ④硬化规则）。这是防"上游改了下游没改"合同漂移复发的制度约束——审查结论见 commit `bf0c073`（f1-f10 共 16 组根因）：本项目历史 P0 bug 全部源于字符串弱耦合断链 + 宽泛 except 静默失效，人工 review 挡不住，必须机械兜底。
 
 ### 1. 端点 smoke test
 
@@ -104,20 +121,32 @@ uv run pyright
 - **不允许新增错误**；顺手修旧错误欢迎但不强制
 - ⚠️ **`include` 只列 server/client/lib**：`workspace/` 与 `tools/` 下的脚本仓库级运行**从不检查**，"全仓 0 errors" 对这些文件是假绿灯。新增/修改这类脚本必须显式传路径：`uv run pyright workspace/<...>/xxx.py`
 - 基线数字以本行为准；实时错误清单直接跑 `uv run pyright` 取，不再维护快照文件
+- ⚠️ **pyright 管类型，不管 lint 规则**：它一条都不查 `[tool.ruff.lint]` 里的 B / SIM / C4 / C901。只跑 pyright 会给出"干净"的假象 —— 见下一节。
+
+### 3. ruff lint 检查（2026-10-31 新增：补 pyright 的盲区）
+
+```
+uv run ruff check server client lib tests
+```
+
+- **为什么单列**：pyright 只做类型检查，`tests/lib_core/test_lint.py` 却把上面四个目录的 ruff 结果当成**硬断言**跑。也就是说脏代码**不会当场报错**，而是攒到跑全量（或碰巧跑到那个测试）时才红。
+- **2026-10-31 事故（修于 `3c21a32`）**：连着两轮发版没跑全量，`17 处`违规从 10-27 / 10-29 一路潜伏到这次发版全量才被拦下 —— 分布是 `butler/router.py` B008 ×8、`video.py` B904 ×3 + B007 ×2 + B905、`bundles.py` B007、`store.py` B905 ×2、`main.py` I001。**根因是分批提交时只跑了 pyright + smoke：pyright 全绿 ⇒ 误以为干净。**
+- ⇒ 结论：**改了 `server/` 就必须补这道**，别指望发版第 1 步替你兜。
+- 豁免口径见 `pyproject.toml [tool.ruff.lint]`：`ignore` 只放行 E501 / SIM102 / SIM105 / SIM110。`Body(...)` 作 FastAPI 默认参数是官方惯用法，项目沿用**逐处 `# noqa: B008`**（对齐 `server/memory/router.py` 的写法），不要顺手塞进全局 ignore 把规则关掉。
 
 ### 执行纪律
 
-- 两道全绿才能声称代码任务完成；红了要么修复、要么向用户解释新增原因并获认可
+- **①端点 smoke ②pyright ③ruff lint ④硬化规则四道全绿**才能声称代码任务完成；红了要么修复、要么向用户解释新增原因并获认可
 - 注册表类改动（GUIDE_REGISTRY / manifest / 白名单 / config）额外跑 `uv run python tools/audit/drift_detector.py` 对账脚本，看有无新断链（报告写到 `temp/audit/drift_report.md`）
 
-### 3. 硬化规则检查（2026-08-31 新增，"说过三遍的规则"→"会变红的构建"）
+### 4. 硬化规则检查（2026-08-31 新增，"说过三遍的规则"→"会变红的构建"）
 
 ```
 uv run python tools/check_hard_rules.py            # 全量（pytest 已挂 quick 层：tests/test_hard_rules.py + tests/test_hard_rules_dead_refs.py）
 uv run python tools/check_hard_rules.py --staged   # staged（pre-commit hook 自动跑，已生效）
 ```
 
-六项：C1 tracked `.py/.md/.toml/.json` 无 UTF-8 BOM ｜ C2 源码无硬编码密钥字面量 ｜ C3 文档路径越界（.html 只许白名单位置、根目录 .md 锁定）｜ C4 import 边界（client↔server 互不许 import，白名单除外）｜ C5 MCP 工具名（文档里写的 `mcp__localagent__X` 必须在第一层直连表 `server/mcp_whitelist.py` 的 `DIRECT_TOOLS` 内——只有 `DIRECT_TOOLS` 里列出的那些会以该形式存在（**条数以该常量为准，不在本文写死**），其余只能走 `localagent_advanced_tool(tool="X")`；同行含 `not found`/`不是`/`禁止` 等反例语境自动豁免）｜ **C6 死链**（在用文档引用的仓库内路径必须解析得到）。
+六项：C1 tracked `.py/.md/.toml/.json` 无 UTF-8 BOM ｜ C2 源码无硬编码密钥字面量 ｜ C3 文档路径越界（.html 只许白名单位置、根目录 .md 锁定）｜ C4 import 边界（client↔server 互不许 import，白名单除外）｜ C5 MCP 工具名（文档里写的 `mcp__localagent__X` 必须在第一层直连表 `server/mcp_whitelist.py` 的 `DIRECT_TOOLS` 内——只有 `DIRECT_TOOLS` 里列出的那些会以该形式存在（**条数以该常量为准，不在本文写死**），其余只能走 `parcae_advanced_tool(tool="X")`；同行含 `not found`/`不是`/`禁止` 等反例语境自动豁免）｜ **C6 死链**（在用文档引用的仓库内路径必须解析得到）。
 
 C6 的口径与豁免（2026-10-07 上闸；三基准实测见 `temp/20261007_dead_ref_scan.py`）：
 - **基准=仓库根**，但沿 md 的**各级祖先目录**能解析的也算数（`workspace/` 下是各自独立的子项目，homework 的文档按 `tools/hw_*.py` 这种"自己根"写法引用是合法风格；只按 md 自己那格判会把这些全读成死链）。
@@ -342,7 +371,12 @@ uv run python tools/run_tests_batched.py  # 验证没破坏功能（分批全量
 
 `exec_python` 临时文件孤儿累积 bug 修复了 `server/exec.py`（加 `cleanup_orphan_temp_files()`），但没重启后端。用户问"exec python 的问题你真修好了吗，我看怎么还有"——后端还是 0.15.0，temp 还在堆积 90+180 个孤儿文件。
 
-**为什么是绕过**：改了代码 ≠ 修复生效。后端不重启，新代码不执行，bug 还在。必须重启 + 验证（`/health` 查版本 + 实际行为）。
+**为什么是绕过**：改的是 `server/exec.py`，但没确认新代码到底有没有在跑。这里的教训**不是**"以后改完就重启"，而是先分清改动属于哪一类（判据见 `docs/operations-manual.md`「后端重启流程」第一节）：
+
+- **注册表 / 启动时装配类**（`server/todos/*`、`mcp_whitelist.py` 等）⇒ 不重启永远是旧值，必须重启后验证；
+- **请求路径类**（本例的 `cleanup_orphan_temp_files()`）⇒ 新代码在下一次自然重启后生效；当次想验证就跑对应测试或直接调用该函数，**别为了"验证一下"去停一个正在服务的后端**。
+
+判断不了、又确实需要生效时，按「已落盘、未生效、需重启」回报，不要声称"修好了"。
 
 ### 测试修复时的强制检查清单
 
@@ -351,7 +385,7 @@ uv run python tools/run_tests_batched.py  # 验证没破坏功能（分批全量
 - [ ] **禁止放宽断言让测试通过**：断言失败时先查"断言对还是实现对"，不要把 `assert x == 5` 改成 `assert x >= 1` 或删断言。UI 重构后断言确实该改的，必须在注释里说明"为什么改" + 验证新断言对应真实行为（读被测代码确认）
 - [ ] **改测试前先读被测代码**：确认测试期望的行为是否还存在。端点删了？文案变了？返回结构改了？先读源码确认，再决定删/改/保留测试
 - [ ] **ruff --unsafe-fixes 必须验证**：`--unsafe-fixes` 可能改变语义。**用完必须跑全测试套件**，不能只看 lint 通过就提交
-- [ ] **代码修复必须验证生效**：改了后端代码必须重启后端确认修复生效（`/health` 查版本 + 实际行为验证），不能只看代码改了就声称"修好了"
+- [ ] **代码修复必须说清"生效了没有"**：注册表类改动要重启后验证（`/health` 版本 + 实际行为）；请求路径类改动不重启也能验证（跑对应测试 / 直接调用改动的函数）。没验证就写「已落盘、未生效」。⛔ 不要为了"验证一下"自行重启正在服务的后端（判据见 `docs/operations-manual.md`「后端重启流程」）
 - [ ] **每个测试修复都问"这是修测试还是绕测试"**：如果答案是"让测试不再报错但不验证真实行为" → 停下来，这是绕过
 
 ### 测试的价值是什么？
@@ -448,7 +482,7 @@ uv run python tools/run_tests_batched.py  # 验证没破坏功能（分批全量
 | **`tests/run_all.py`**（推荐） | 分层跑（quick 排除外部资源 / full 全跑），报告含失败复现命令 | `uv run python tests/run_all.py --quick` |
 | **`tools/run_tests_collect.py`** | 一次性收集全部失败（与 run_all 共用 test_runner 层） | `uv run python tools/run_tests_collect.py` |
 | **`tools/run_tests_batched.py`** | **发版全量**：按目录分批、每批独立进程、慢目录 2 路并行（真动桌面的批走独占段）+ 内存护栏 | `uv run python tools/run_tests_batched.py` |
-| **直接 pytest** | 单文件/单目录调试（看详细 traceback） | `uv run python -m pytest tests/memory -v --tb=short` |
+| **直接 pytest** | 单文件/单目录调试（看详细 traceback） | `uv run python -m pytest tests/memory -v`（`--tb=short` 已在 addopts，不要再拼） |
 
 **收集范围**（2026-08-27 起）：脚本层经 `lib.component_manifest.collect_test_dirs()`
 自动扫描各组件 `manifest.toml` 的 `[tests]` 段，把 `workspace/<skill>/tests/` 一并纳入。
@@ -470,12 +504,19 @@ uv run python tools/run_tests_batched.py  # 验证没破坏功能（分批全量
   Chrome——本机只有一个前台槽。2026-10-03 实测两批同段并行会互相打红（各 1 真红），
   且 `tests/browser` 那批因此被拖出 88 个静默 skip（同一批用例独占段跑是 362 passed / 3 skipped）。
   代价是慢目录段墙钟变长（约 326s → 503s），换的是"闸门结果可信"。
-- **内存门槛按"同时在飞几个重进程"给，不按目录名给**（`_min_gb_for()`）：独占批和普通批用串行
-  门槛，只有真的要两路共存时才用并行门槛。踩过的坑：给独占批套 6.0 GB 并行闸后，可用内存
-  只剩 3.97 GB 时每个独占批都白等满 `WAIT_LIMIT_S=900s` 才放行。
+- **内存门槛只是"并发退让"，不是"等待闸门"**（`_cost_gb_for()` + `_acquire_slot()`，2026-10-24
+  改造）：起跑判据 `(可用 - 在飞承诺) >= MEM_RESERVE_GB(4.0) + cost`（普通批 1.0 /
+  `SLOW_BATCHES` 2.5）。不满足时分两种：**有别的批在飞就等它释放**（等待期间有真实进展）；
+  **没有在飞批就直接放行 + 打告警**（`⚠ 低内存强跑`，`SUMMARY.md` 单列一节）——可用内存低于
+  余量线时再等也不会自己满足，交给跑测试的人自己判断要不要腾内存 / 上 `--serial`。⛔ 旧版
+  `WAIT_LIMIT_S=900` 强放行等于"先拦 15 分钟再放"，可用只剩 3.4 GB 时 32 批能拖成 8 小时
+  （2026-10-16 记为待办，10-24 用户裁决「拦住等一会就是搞笑」后删除）。
 - **并行安全与否按"相对增量"判，不按绝对可用内存判**：2 路重叠期实测多吃约 4.7 GB
   （起跑 20.6 GB → 谷底 15.9 GB）。看到"可用只剩 5 GB"先回头看起跑基线——那大概率是游戏/
-  大模型占着机器，不是并行批次吃掉的；基线本来就低时直接 `--serial`。
+  大模型占着机器，不是并行批次吃掉的。**基线本来就低时机器不会拦你、只会告警**：要么先腾
+  内存，要么 `--serial`，要么盯 `temp/batch_tests/mem_min.log` 的谷底。另外 `psutil.available`
+  的低谷是瞬时的（10-24 实测 approval_screen 跑完从 1.5 GB 回升到 12.7 GB），别拿单点值
+  判"内存不够"。
 - **退出码**：任一批非 0 即整体返回 1（含进程崩溃），不会因"多数批次绿"报绿灯。
 - **产出** `temp/batch_tests/`：`SUMMARY.md` + `mem_min.log`（内存 5s 采样、出现新低即追加，
   跑到一半被杀也留得住数据）。每批 `.log`/`.xml` **只在该批非零时保留**——`_run_batch()`
@@ -506,6 +547,9 @@ archive_sdd_tickets；workspace skill 的测试放 `<skill>/tests/` 并在 `mani
 补 `[tests]` 段（有测试 enabled=true + paths=["tests"]）。
 
 **参数一致性**（pyproject.toml `addopts` 已统一配置，不要在命令行重复加）：
+- **`--ihaveread`（测试入口必带；⚠️ 非 pytest 参数）**：`tests/run_all.py` ／ `tools/run_tests_collect.py` ／ `tools/run_tests_batched.py` 的**全局参数**——不带则拒绝执行（exit 2），
+  报错只提示"去读手册"：**不点名是哪份手册、也不点名缺哪个参数**（`AGENTS.md`「测试」节已写明测试手册是哪一份）。目的是确保执行者读过本节的测试使用方法，而不是凭印象敲命令。
+  ⚠️ **本条位置固定在「测试使用方法」的全局参数处，后续任何改动不得挪动、不得改写**（2026-10-12 用户定）。
 - `-q -ra`：安静进度 + 失败/跳过摘要（替代旧的 `-v` 刷屏 / 纯 `-q` 看不到摘要）
 - `--tb=short`：中等 traceback（单文件调试用）
 - `--maxfail=500`：不在第一次失败停
@@ -513,11 +557,48 @@ archive_sdd_tickets；workspace skill 的测试放 `<skill>/tests/` 并在 `mani
 - `-n auto`：pytest-xdist 并行（**内存警告见下方"进程崩溃处理"**）
 - `--junit-xml`：**只由脚本层加**（run_tests_collect.py / run_all.py），不放 addopts（避免单文件调试污染）
 
+**⛔ `-q` 叠加陷阱（2026-10-12 实测，重复加 `-q` 的后果）**：上面「不要在命令行重复加」不是洁癖——
+`addopts` 里已有一个 `-q`，命令行再加 `-q` ⇒ 实际 `-qq`（verbosity -2），pytest 9.x 会把
+`--collect-only` 的输出从 **nodeid 列表** 切成 **per-file 计数行**：
+
+| 命令（addopts 已含 `-q`） | `--collect-only` 输出形态 |
+|---|---|
+| 不加 `-q` | `tests/.../test_apikey.py::TestApiKeyStatus::test_x` … 含 `::` |
+| 加 `-q`（⇒ `-qq`） | `tests/llm_vision/test_apikey.py: 22` … **一个 `::` 都没有** |
+
+后果：`--collect-only -q \| grep -c "::"` **恒为 0 且 exit 0**，会被误读成「这个文件收集不到测试」。
+这是「判据失效但不报错」的典型 ⇒ **任何自造的核对探针必须先拿一个已知样本验证输出形态**
+（本项目：先跑 `tests/llm_vision/test_apikey.py` 单文件看一眼，再套进批量循环）。
+
+**如何核对「测试有没有漏收」**（2026-10-12 补；仓库此前无此条款，agent 只能自造探针）:
+
+```bash
+# 权威总数：不加 -q，看末行（几秒出结果）
+uv run python -m pytest tests/llm_vision/ --collect-only 2>&1 | tail -1
+# → 691 tests collected in 4.03s
+
+# per-file 计数：接受 -qq 的 file: N 形态，按这个锚点解析
+uv run python -m pytest tests/llm_vision/ --collect-only -q 2>&1 | grep -E ":[0-9]+$"
+
+# 要 nodeid / 想 grep "::"：必须用不带 -q 的形式
+uv run python -m pytest tests/llm_vision/test_apikey.py --collect-only 2>&1 | grep -c "::"
+```
+
+- 逐文件计数之和**必须等于**目录总数；对不上才是真漏收集（收集错误会以 ERROR 打印到 stderr ⇒ **别 `2>/dev/null`**）。
+- 收集只要几秒：**先用收集核对，再决定要不要花几分钟跑全目录**；别为抠一个数字反复跑全量（❌ 见下方「禁止行为」）。
+- **测试通过数进台账必须带证据**：写进 CHANGELOG / ticket 的 `N passed` 必须附「命令 + 机器打印末行」。
+  凭记忆或估算写的数字会变成假基线，之后任何正常的条数变化都会被误判成「基线倒退」
+  （2026-10-11 Ticket03 的「732 passed」即此类误记，实为 667 passed / 1 skipped，已更正）。
+  收集条数随新增测试**单调递增是正常演进，不是回归**。
+
 **脚本层覆盖**（`tools/test_runner.py` 共享逻辑，两个脚本共用）：
 - 流式 tee：实时输出到控制台 + 写 `temp/test_full_log.txt`（替代 `capture_output=True` 黑盒）
 - `--tb=line`：全量收集时覆盖 addopts 的 `--tb=short`（一行一个失败，最简）
 - `--junit-xml=temp/test_results.xml`：结构化真源，解析 XML 而非文本（pytest-xdist 并行时文本顺序乱）
-- 崩溃检测：returncode 非 0-5 标记"进程崩溃"（如 3221225477 = STATUS_ACCESS_VIOLATION），不假装"0 失败"
+- 崩溃检测：returncode 非 0-5 标记"进程崩溃"，并把 Windows 异常码翻成人话
+  （`0xC0000409 __fastfail` / `0xC0000005 ACCESS_VIOLATION` …），不假装"0 失败"
+- **崩溃现场自动摊开**（2026-10-24）：XML 缺失时，报告与控制台直接给"最后停在哪条测试"
+  + 日志末尾——子进程用 `-u -vv` 跑，崩溃时才留得下这些（否则日志可能只剩几个点）
 - 报告含**每个失败的单独复现命令**——修复验证先跑失败子集（或 `pytest --lf` 重跑上次失败），
   全过后再跑整轮 quick，不要每次验证都跑全量
 - **失败清单默认强制输出**（2026-09-03）：跑完总是把完整失败/错误清单（JUnit XML 驱动，
@@ -611,27 +692,40 @@ uv run python tools\run_tests_collect.py
 
 ### 进程崩溃处理（returncode 非 0-5）
 
-`tools/test_runner.py:classify_exit` 自动分类退出码。若报告显示 `crashed_NNN`：
+`tools/test_runner.py:classify_exit` 自动分类退出码，并把 Windows 异常码翻成人话；
+分批器 / 运行器还会把**日志末尾 + 最后停在的测试**直接写进报告和控制台——因为 JUnit XML
+是 pytest 收尾时才写的，硬崩时根本不存在，只报一个裸退出码等于什么都没说。
+（现场能留下来的前提是子进程用 `-u` 跑 + `-vv`：默认块缓冲下进程被硬崩时，缓冲区里
+最后几 KB 输出不落盘——2026-10-24 实测同一条崩溃命令，不加 `-u` 日志只剩 **2 字节**。）
 
-- **3221225477 = STATUS_ACCESS_VIOLATION**：Qt access violation，conftest.py 已知问题
-  （全量测试时随机崩溃，JUnit XML 无 failure/error 记录，崩溃发生在 pytest 汇总/进程退出阶段）
+- **3221226505 = 0xC0000409**：名字叫 STACK_BUFFER_OVERRUN，实际是 `__fastfail` 的通用码——
+  MSVC 的 `abort()`/`terminate()`、Qt 的 `qFatal()` 都走它。**Python 层不会有 traceback**，
+  faulthandler 也来不及打印。2026-10-24 `tests/client_ui` 全量合跑崩的就是这个（事件流
+  QThread 的 parent 先被销毁），按"最后停在"那条测试的 teardown 查。
+- **3221225477 = 0xC0000005 STATUS_ACCESS_VIOLATION**：野指针/越界访问；Qt 侧同名问题
+  conftest.py 已有缓解 hook
 - **MemoryError / WinError 8（内存资源不足）/ execnet 序列化 MemoryError**：
   xdist worker 过多打爆内存。2026-08-27 教训：16 个 worker 并发时每个都要导入 app+PySide6
   （收集+序列化数 MB×16），32GB 内存机器上连续 OOM。**降并发重跑**即可：
   ```powershell
   uv run python tests/run_all.py --quick -n 4   # -n last-wins，覆盖内置的 -n auto
   ```
-- **其他非 0-5 码**：Windows fatal exception，进程被系统杀死
+- **其他非 0-5 码**：会连十六进制一起打出来（`0xC00000XX`），可直接拿去搜
 
 **处理步骤**：
-1. 看 `temp/test_full_log.txt` 末尾，找崩溃前最后一个输出（定位崩溃点）
-2. 看 `temp/test_results.xml` 是否生成——若缺失说明崩溃在 XML 落盘前
-3. 分段跑（按功能域目录）缩小崩溃范围：
+1. 先看报告里的「最后停在：`tests/xxx.py::TestY::test_z`」——这就是把进程带崩的那条，
+   连同它的 teardown / 它触发的线程和 Qt 对象一起查
+2. 看报告里的「日志末尾」（或完整 `temp/batch_tests/<batch>.log`），确认是死在断言、
+   收集阶段、还是 pytest 收尾
+3. 看 XML 是否生成——**缺失 = 崩在落盘前**，本批 passed/failed 计数不可得，
+   别把 `(XML 未生成)` 当成 0 失败
+4. 用报告里给的「单批复现」命令缩小范围：
    ```powershell
-   uv run python -m pytest tests/memory -v --tb=short  # 只跑某一功能域
+   uv run python tools/run_tests_batched.py --only tests/client_ui --ihaveread --serial
    ```
-4. conftest.py 的 `pytest_runtest_teardown` hook（Qt 状态清理）已在缓解，若仍崩溃
-   通常是某个测试未正确清理 QApplication 状态——单独跑该文件能复现则修测试隔离
+   （再要更细就 `-m pytest <文件> -vv --tb=short`，崩溃前最后一行就是那条测试）
+5. conftest.py 的 `pytest_runtest_teardown` hook（Qt 状态清理）已在缓解，若仍崩溃
+   通常是某个测试未正确清理 QApplication / QThread——单独跑该文件能复现则修测试隔离
 
 **禁止**：看到 `crashed_NNN` 假装"0 失败"通过——崩溃时 XML 可能不完整，必须人工确认。
 
@@ -768,14 +862,16 @@ pytest tests/  # 又 3 分钟
    uv run python tools/run_tests_batched.py     # 分批全量（单进程跑法会吃 11-12 GB 内存，见"发版全量为什么用分批器"）
    ```
    - 测试失败 → 修复（按 `docs/dev-workflow.md` "测试修复铁律"），不能跳过发版
+   - ⚠️ **全量里挂着 ruff 硬断言（`tests/lib_core/test_lint.py`）**：把 lint 拖到这一步才发现，等于让违规跨版本潜伏 —— 2026-10-31 发版一次拦下 17 处（最早可追溯到 10-27），见上方「提交前机械防线」第 3 道。**分批提交时就该先跑 `uv run ruff check server client lib tests`**，别指望这一步兜底。
    - 修测试后用了 `ruff --unsafe-fixes` → 必须再跑一次全测试验证
-   - 测试修复涉及后端代码 → 重启后端验证修复生效（`/health` 查版本 + 实际行为）
+   - 测试修复涉及**注册表类**后端代码 → 需重启后验证生效（判据见 `docs/operations-manual.md`「后端重启流程」）；请求路径类改动跑对应测试即可，不必为此重启
 2. **查 [Unreleased] 段**：读 `CHANGELOG.md` 确认 `[Unreleased]` 段有实际变更内容（空段或全是 `(暂无)` 占位 → 告知用户无需 release，结束流程）
 3. **定版本号**：读 `CHANGELOG.md` 找最近 release 段（如 `[0.22.0] - 2026-07-24`），按变更内容递增：
    - 常规（bug fix / 小改进）→ **patch +1**（0.22.0 → 0.22.1）
    - 重大功能（新模块 / 新功能 / 行为变更）→ **minor +1**（0.22.0 → 0.23.0）
    - 不跨 major 除非用户明确指定
-4. **版本号同步**（强制，2026-08-03 教训）：跑 `uv run python tools/bump_version.py <新版本号>`，统一更新 `server/main.py` + `server/core/health.py` + `pyproject.toml` 三处 VERSION 常量。**禁止手动 Edit 单个文件**（曾导致版本号漏改）。先 `--dry-run` 预览再实际执行：
+4. **版本号同步**（强制，2026-08-03 教训）：跑 `uv run python tools/bump_version.py <新版本号>`，统一更新 `server/version.py` + `pyproject.toml` 两处 VERSION。**禁止手动 Edit 单个文件**（曾导致版本号漏改）。先 `--dry-run` 预览再实际执行：
+   - ⛔ **`server/main.py` / `server/core/health.py` 不在目标里**：两者现在都是 `from server.version import VERSION`，文件内没有常量可改。2026-10-24 发现旧版脚本仍按老架构改这两处，实跑一个都匹配不到、只有 pyproject 变了 ⇒ **运行期 `/health` 版本号不动**，还 exit 1 留下半同步态。若哪天又要把常量塞回 main.py，先读 `server/version.py` 顶部「为什么单独拆一个模块」。
    ```
    uv run python tools/bump_version.py 0.32.1 --dry-run  # 预览
    uv run python tools/bump_version.py 0.32.1            # 执行
@@ -784,6 +880,7 @@ pytest tests/  # 又 3 分钟
 6. **RunCommand 跑归档脚本**：`uv run python tools/migrate_changelog.py`（默认 `--keep 1`），把旧 release 段归档到 `docs/changelog-archive.md`（newest first，幂等）。CHANGELOG.md 仅保留 `[Unreleased]` + 最近 1 个 release，避免活跃段过长被 agent 误伤；查询完整历史需同时读 `docs/changelog-archive.md`。如需保留更多最近 release 段用 `--keep N`
 7. **RunCommand 跑项目结构 baseline 同步**：`uv run python tools/sync_project_structure.py`（机械同步 `data/project_structure.json`：磁盘不存在的 baseline 条目移除、磁盘新增的路径补入 baseline）。task_closure 累积的 unknown/missing 漂移在此一次性同步，避免 baseline 与磁盘持续偏离。
    - 可先 `--verify` 看漂移摘要，再正式跑同步
+   - ⚠️ **脚本不读 `.gitignore`**（内部没有 gitignore / exclude 逻辑，参数只有 `--dry-run` / `--verify`）：`--verify` 报的"未知新增"里会混进工具残骸目录（如 `.trae-html-share-packages/`、`.screenshots/`），机械同步会把它们原样写进 baseline。⇒ 想按「只补正当路径」的口径同步，**只能手改 `data/project_structure.json`**（2026-10-31 发版：4 条正当路径入库，3 个残骸目录不入库并另行补进 `.gitignore`）
    - 同步会修改 `data/project_structure.json`，需在下一步 git add 中带上此文件
 8. **git add + git commit**：
    - **按目录/文件 add**（`.agents/` `client/` `server/` `docs/` `tests/` `workspace/` + 顶级文件 + `data/project_structure.json`），**不要用 `git add -A` / `git add .`**，避免误纳入 `config.toml` / `data/llm/keys.json` 等敏感文件
@@ -804,7 +901,7 @@ pytest tests/  # 又 3 分钟
 
 ### 删除与高风险命令必须走可检查路线
 
-- 任何删除、清理、递归删除、格式化、强制覆盖、强制终止进程或会丢失用户数据的操作，必须使用 LocalAgent 的 exec_cmd、exec_terminal_spawn 或 exec_python，不要使用 Codex Desktop 的直接 shell/exec_command 路径。
+- 任何删除、清理、递归删除、格式化、强制覆盖、强制终止进程或会丢失用户数据的操作，必须使用 Parcae 的 exec_cmd、exec_terminal_spawn 或 exec_python，不要使用 Codex Desktop 的直接 shell/exec_command 路径。
 - 这样做不是为了故意限制或为难 Agent。模型确实可能出现幻觉、参数拼接错误或命令执行工具缺陷；dcg 和后端拦截是避免不可逆损失的最后防线，先询问用户通常没有害处。
 - 直接 shell 路径可能不触发 Codex PreToolUse Hook，因此即使 `C:\Users\<用户名>\.codex\hooks.json` 存在，也不能把直接 shell 当作安全路线。
 - 返回 blocked=true 时，禁止改写、拆分、编码、写脚本、切换 shell、换工具或改用其他执行路径绕过。必须先说明完整命令、执行原因、目标、影响和更安全替代方案。
@@ -813,7 +910,7 @@ pytest tests/  # 又 3 分钟
 
 ### 破坏性命令拦截与用户询问规范
 
-- LocalAgent 后端使用 dcg 检查 exec_cmd、exec_terminal_spawn 和 exec_python。返回 blocked=true 时，表示命令被用户的安全规则拦截。
+- Parcae 后端使用 dcg 检查 exec_cmd、exec_terminal_spawn 和 exec_python。返回 blocked=true 时，表示命令被用户的安全规则拦截。
 - 命令拦截不是为了阻碍 Agent 工作，而是为了应对模型幻觉、命令拼接错误和工具执行缺陷，是执行前的最后防线。先询问用户通常没有害处。
 - 被拦截后禁止尝试通过改写命令、拆分执行、编码、写入脚本、切换 shell、调用 Python 文件 API 或其他工具绕过。
 - 询问用户时必须说明：准备执行的完整命令、执行原因、可能影响、目标路径或资源，以及可用的更安全替代方案。
@@ -842,52 +939,52 @@ pytest tests/  # 又 3 分钟
    - 并发安全：`threading.Lock` 保护，单进程部署下无竞态
    - 调试入口：`GET /config` 看 `command_guard.token_ttl_seconds`，缓存 TTL 跟随此值
 2. **令牌不绑定 user/session + HTTP 明文传输**：
-   - 设计：LocalAgent 是个人单用户系统，令牌（`approval_token`）不绑定 user/session 标识
+   - 设计：Parcae 是个人单用户系统，令牌（`approval_token`）不绑定 user/session 标识
    - HTTP 明文（无 TLS）：理论上可被本机窃听，但令牌 120s 过期 + 一次性消费 + 指纹绑定三重防御下，窃听者只能执行用户已批准的同一操作（无法伪造新操作）
    - 不修原因：单用户场景下加 TLS / user 绑定收益有限，且引入证书管理复杂度
    - 调试入口：`server/http_guard.py:_tokens_http` / `server/command_guard.py:_tokens`（纯内存 dict，重启即吊销所有未消费令牌）
 
-**遇到任务时，优先使用 MCP 工具，而不是自己写 Python 脚本。** 后端只暴露一小组直接 MCP 工具（白名单真源见 `server/mcp_whitelist.py`），另有高级工具网关（`localagent_advanced_tool` / `localagent_list_tools`）和模板网关（`localagent_template_tool` / `localagent_list_templates`），覆盖大部分常见操作：
+**遇到任务时，优先使用 MCP 工具，而不是自己写 Python 脚本。** 后端只暴露一小组直接 MCP 工具（白名单真源见 `server/mcp_whitelist.py`），另有高级工具网关（`parcae_advanced_tool` / `parcae_list_tools`）和模板网关（`parcae_template_tool` / `parcae_list_templates`），覆盖大部分常见操作：
 
 | 需求 | 正确做法 | 错误做法 |
 |------|---------|---------|
-| 接到任务不知怎么做 | `mcp_localagent_agent_guide(task='...')` 获取指导 + 候选清单 | 读 _index.md 逐个扫描 skill |
-| 识别图片文字 | `mcp_localagent_ocr_*` | 自己写 PaddleOCR 脚本 |
-| 识别 UI 元素 | `mcp_localagent_understand_image`（布局/状态描述）+ `mcp_localagent_vision_locate`（坐标兜底） | 自己写 OmniParser 脚本 |
-| 截图（仅看尺寸） | `mcp_localagent_capture_screen` (format=base64, 只取 width/height) | 自己写 pyautogui 脚本 |
-| 截图给多模态LLM看 | `mcp_localagent_capture_screen` (format="inline") | 用 capture_screen(format=base64) 撑爆上下文 |
-| 截图特征分析（无 base64） | `mcp_localagent_screen_analyze` | 用 capture_screen(format=base64) 撑爆上下文 |
-| 快速了解桌面状态 | `mcp_localagent_screen_snapshot` | 逐个调 list_windows+screen_status |
-| 等待画面条件满足 | `mcp_localagent_screen_wait_for` | 手写截图+OCR+重试循环 |
-| 多步键鼠操作 | `mcp_localagent_batch_actions` | 多次调 execute_action |
-| 激活窗口到前台 | `mcp_localagent_focus_window` | 自己写 SetForegroundWindow 脚本 |
-| 点击/输入 | `mcp_localagent_execute_action` | 自己写 pyautogui 脚本 |
-| 执行代码 | `mcp_localagent_exec_python`（万能回退 ⚠️ 禁用于发 HTTP 调本地 API，见下方决策树） | 自己起 Python 进程 |
-| 修改源码/应用补丁 | `mcp_localagent_exec_apply_patch`（UTF-8、dry-run、失败回滚） | PowerShell here-string / `.bat %*` 传多行补丁 |
-| LLM 对话/评分 | `mcp_localagent_agent_chat` / `agent_score` | 自己调 OpenAI API |
-| 浏览器操作（基础） | `mcp_localagent_browser_*`（status/tabs/navigate/close/screenshot/console_logs） | 自己写 CDP 脚本 |
-| 浏览器点击元素 | `mcp_localagent_browser_action`（action=click, target={css/text/...}） | exec_python 写 Playwright |
-| 浏览器填表单 | `mcp_localagent_browser_action`（action=fill/press_sequentially, target={css/text/...}） | exec_python 写 Playwright |
-| 浏览器等加载 | `mcp_localagent_browser_wait_for`（wait_type=load/domcontentloaded/networkidle/...） | exec_python 写 Playwright |
-| 浏览器提取文本 | `mcp_localagent_browser_evaluate`（document.body.innerText 等 read-only 表达式） | 截图+OCR（准确度低） |
-| 浏览器元素截图 | `mcp_localagent_browser_screenshot`（shot_type=element, selector=...） | 全页截图再裁剪 |
-| 查询窗口 | `mcp_localagent_list_windows` | 自己写 win32 脚本 |
-| 读写记忆 | `mcp_localagent_memory_*` | 自己写文件读写脚本 |
-| 查询到期任务/WIP | `mcp_localagent_todos_due` / `mcp_localagent_wip_list`（summary=true 只看摘要）/ `mcp_localagent_wip_get`（单个详情） | 自己写 SQL 查询 |
-| 查看 Loop 任务状态 | `mcp_localagent_loop_list_tasks` / `loop_status` | 自己读 data/loops/tasks.json |
-| 手动触发/暂停 Loop | `mcp_localagent_loop_run_task` / `loop_pause_task` / `loop_resume_task` | 自己写 HTTP 脚本 |
-| 查看收件箱 | `mcp_localagent_inbox_list` / `inbox_get` | 自己写 SQL 查询 inbox.db |
-| 处理收件箱条目 | `mcp_localagent_inbox_update` / `inbox_delete` | exec_python 写 SQL |
-| 调用非直连 REST 端点（读详情/写/运维） | `mcp_localagent_localagent_advanced_tool` | exec_python 发 HTTP |
-| 常见工作流（截图+OCR等） | `mcp_localagent_localagent_template_tool` | exec_python 写重复代码 |
+| 接到任务不知怎么做 | `mcp_parcae_agent_guide(task='...')` 获取指导 + 候选清单 | 读 _index.md 逐个扫描 skill |
+| 识别图片文字 | `mcp_parcae_ocr_*` | 自己写 PaddleOCR 脚本 |
+| 识别 UI 元素 | `mcp_parcae_understand_image`（布局/状态描述）+ `mcp_parcae_vision_locate`（坐标兜底） | 自己写 OmniParser 脚本 |
+| 截图（仅看尺寸） | `mcp_parcae_capture_screen` (format=base64, 只取 width/height) | 自己写 pyautogui 脚本 |
+| 截图给多模态LLM看 | `mcp_parcae_capture_screen` (format="inline") | 用 capture_screen(format=base64) 撑爆上下文 |
+| 截图特征分析（无 base64） | `mcp_parcae_screen_analyze` | 用 capture_screen(format=base64) 撑爆上下文 |
+| 快速了解桌面状态 | `mcp_parcae_screen_snapshot` | 逐个调 list_windows+screen_status |
+| 等待画面条件满足 | `mcp_parcae_screen_wait_for` | 手写截图+OCR+重试循环 |
+| 多步键鼠操作 | `mcp_parcae_batch_actions` | 多次调 execute_action |
+| 激活窗口到前台 | `mcp_parcae_focus_window` | 自己写 SetForegroundWindow 脚本 |
+| 点击/输入 | `mcp_parcae_execute_action` | 自己写 pyautogui 脚本 |
+| 执行代码 | `mcp_parcae_exec_python`（万能回退 ⚠️ 禁用于发 HTTP 调本地 API，见下方决策树） | 自己起 Python 进程 |
+| 修改源码/应用补丁 | `mcp_parcae_exec_apply_patch`（UTF-8、dry-run、失败回滚） | PowerShell here-string / `.bat %*` 传多行补丁 |
+| LLM 对话/评分 | `mcp_parcae_agent_chat` / `agent_score` | 自己调 OpenAI API |
+| 浏览器操作（基础） | `mcp_parcae_browser_*`（status/tabs/navigate/close/screenshot/console_logs） | 自己写 CDP 脚本 |
+| 浏览器点击元素 | `mcp_parcae_browser_action`（action=click, target={css/text/...}） | exec_python 写 Playwright |
+| 浏览器填表单 | `mcp_parcae_browser_action`（action=fill/press_sequentially, target={css/text/...}） | exec_python 写 Playwright |
+| 浏览器等加载 | `mcp_parcae_browser_wait_for`（wait_type=load/domcontentloaded/networkidle/...） | exec_python 写 Playwright |
+| 浏览器提取文本 | `mcp_parcae_browser_evaluate`（document.body.innerText 等 read-only 表达式） | 截图+OCR（准确度低） |
+| 浏览器元素截图 | `mcp_parcae_browser_screenshot`（shot_type=element, selector=...） | 全页截图再裁剪 |
+| 查询窗口 | `mcp_parcae_list_windows` | 自己写 win32 脚本 |
+| 读写记忆 | `mcp_parcae_memory_*` | 自己写文件读写脚本 |
+| 查询到期任务/WIP | `mcp_parcae_todos_due` / `mcp_parcae_wip_list`（summary=true 只看摘要）/ `mcp_parcae_wip_get`（单个详情） | 自己写 SQL 查询 |
+| 查看 Loop 任务状态 | `mcp_parcae_loop_list_tasks` / `loop_status` | 自己读 data/loops/tasks.json |
+| 手动触发/暂停 Loop | `mcp_parcae_loop_run_task` / `loop_pause_task` / `loop_resume_task` | 自己写 HTTP 脚本 |
+| 查看收件箱 | `mcp_parcae_inbox_list` / `inbox_get` | 自己写 SQL 查询 inbox.db |
+| 处理收件箱条目 | `mcp_parcae_inbox_update` / `inbox_delete` | exec_python 写 SQL |
+| 调用非直连 REST 端点（读详情/写/运维） | `mcp_parcae_parcae_advanced_tool` | exec_python 发 HTTP |
+| 常见工作流（截图+OCR等） | `mcp_parcae_parcae_template_tool` | exec_python 写重复代码 |
 
 **只有当 MCP 工具无法满足需求时，才写自定义脚本，且必须写到 `temp/` 目录。**
 
 ### 工具选择决策树（遇到任何"要调后端能力"的需求时按此顺序）
 
-1. **直连 MCP 工具（白名单）** → 直接用。查白名单：`localagent_list_tools()` 或看上方表格
-2. **`localagent_advanced_tool` 网关** → 适用于**所有非直连的 REST 端点**（含只读详情如 `todos_get`/`memory_search`/`apikey_history`，以及 CRUD/运维）。调用：`localagent_advanced_tool(tool=<operation_id>, params={...})`
-3. **`localagent_template_tool`** → 适用于预定义工作流（截图+OCR、浏览器导航+等待等）
+1. **直连 MCP 工具（白名单）** → 直接用。查白名单：`parcae_list_tools()` 或看上方表格
+2. **`parcae_advanced_tool` 网关** → 适用于**所有非直连的 REST 端点**（含只读详情如 `todos_get`/`memory_search`/`apikey_history`，以及 CRUD/运维）。调用：`parcae_advanced_tool(tool=<operation_id>, params={...})`
+3. **`parcae_template_tool`** → 适用于预定义工作流（截图+OCR、浏览器导航+等待等）
 4. **`exec_python`** → 仅用于**真正需要运行代码**的场景：运行项目脚本、复杂数据处理、import 项目模块、截图+OCR 一步完成（避免 base64 撑爆上下文）
 
 **关键事实**：`advanced_tool` 调 GET 类端点**免审批**（safety 绑定到目标 operation，GET=read_only）；`exec_python` 是 approval_required，**预审不通过会触发用户审批**。
@@ -900,7 +997,7 @@ MCP 网关层有 **50KB 硬上限 size guard**：单个 TextContent 超阈值时
 
 | 端点 | 精简参数 | 说明 |
 |------|---------|------|
-| `localagent_list_tools` | 默认精简（无 parameters） | 需要参数 schema 时显式传 `verbose=true` |
+| `parcae_list_tools` | 默认精简（无 parameters） | 需要参数 schema 时显式传 `verbose=true` |
 | `llm_pool_status` | `summary=true` | 省略 keys 详情数组，只返回聚合统计 |
 | `wip_list` | `summary=true` | 只返回 id/title/status/priority/progress |
 | `memory_search` | `top_k=10`（默认） | 最大 100，按需调 |
@@ -908,13 +1005,13 @@ MCP 网关层有 **50KB 硬上限 size guard**：单个 TextContent 超阈值时
 
 ### 新增 REST 端点与 MCP 暴露策略（防膨胀）
 
-**加端点前必须先判断是否要进 MCP，避免工具列表无限膨胀。** MCP 工具列表过长会让 agent 选择困难、上下文污染、`localagent_list_tools` 返回变慢。
+**加端点前必须先判断是否要进 MCP，避免工具列表无限膨胀。** MCP 工具列表过长会让 agent 选择困难、上下文污染、`parcae_list_tools` 返回变慢。
 
 判断流程（按顺序）：
 
 1. **agent 日常会用吗？** → 进 `DIRECT_TOOLS` 白名单（第一层，直连 MCP 工具）
    - 例：`inbox_list` / `inbox_get`（agent 查询待审查条目）
-2. **agent 偶尔会用、但属于通用能力？** → 不进白名单，自动收进 `localagent_advanced_tool` 网关（第二层）
+2. **agent 偶尔会用、但属于通用能力？** → 不进白名单，自动收进 `parcae_advanced_tool` 网关（第二层）
    - 例：`todos_get` / `wip_create` / `memory_search`
 3. **只给监控面板/脚本/GUI 用，agent 不该调？** → 加入 `GATEWAY_EXCLUDE`（从 MCP 网关排除，REST 仍可用）
    - 例：`inbox_batch`（监控面板批量管理）、`user_message_*`（GUI 管理）、`activity_daily_*`（日报系统）
@@ -939,16 +1036,16 @@ shutdown/health/config/llm_pool_*/activity_daily_*/user_message_*/inbox_batch/�
 
 | 错误做法 | 正确做法 |
 |---------|---------|
-| `exec_python` 写 urllib 调 `GET /wip/{id}` | `mcp_localagent_wip_get(task_id="wip_xxx")`（直连，免审批） |
-| `exec_python` 写 urllib 调 `GET /todos/{id}` | `localagent_advanced_tool(tool="todos_get", params={"todo_id": "todo_xxx"})` |
-| `exec_python` 写 urllib 调 `POST /memory/search` | `localagent_advanced_tool(tool="memory_search", params={...})` |
-| `exec_python` 写 urllib 调 `GET /apikey/history` | `localagent_advanced_tool(tool="apikey_history", params={...})` |
+| `exec_python` 写 urllib 调 `GET /wip/{id}` | `mcp_parcae_wip_get(task_id="wip_xxx")`（直连，免审批） |
+| `exec_python` 写 urllib 调 `GET /todos/{id}` | `parcae_advanced_tool(tool="todos_get", params={"todo_id": "todo_xxx"})` |
+| `exec_python` 写 urllib 调 `POST /memory/search` | `parcae_advanced_tool(tool="memory_search", params={...})` |
+| `exec_python` 写 urllib 调 `GET /apikey/history` | `parcae_advanced_tool(tool="apikey_history", params={...})` |
 
 ### Windows UTF-8 与项目环境规则
 
 - 禁止通过 PowerShell here-string、管道或 `.bat %*` 向 `apply_patch`、Python、Node 传递包含中文的源码或测试代码。
 - 修改源码优先使用 `exec_apply_patch(patch, cwd, dry_run)`；它直接调用 Codex 补丁入口，支持中文、多文件拆分、dry-run、修改文件清单和失败回滚。
-- `exec_python` 默认使用 LocalAgent 自身 Python。执行其他项目代码时必须传 `cwd` + `environment="workspace_venv"`，或显式传 `python_path`；返回值会显示实际解释器和工作目录。
+- `exec_python` 默认使用 Parcae 自身 Python。执行其他项目代码时必须传 `cwd` + `environment="workspace_venv"`，或显式传 `python_path`；返回值会显示实际解释器和工作目录。
 - `exec_python` 把代码写入 `temp/exec_<uuid>.py`，由 `server/_exec_runner.py` 在终端会话中执行（支持 top-level await；已替代旧的 stdin 管道方式），并把 `cwd` 插入 `sys.path`，无需 PowerShell 转义。⚠️ 子进程内 `__file__` 指向那个 **temp 脚本**而不是项目根——依赖 `__file__` 推路径的代码会把根算成 `temp/`；要跑仓库内脚本请改用 `exec_cmd` 执行 `python tools/xxx.py`，或用 `exec_apply_patch` 把代码写到具体位置。
 - 请求 `shell="powershell"` 时优先使用 PowerShell 7 (`pwsh.exe`)，不可用才回退 Windows PowerShell；响应会返回实际 shell 路径、家族和版本。
 - Windows PowerShell 5.1 不支持 `&&`；必须使用 `$LASTEXITCODE` 显式判断，或改用 PowerShell 7。
@@ -967,7 +1064,7 @@ shutdown/health/config/llm_pool_*/activity_daily_*/user_message_*/inbox_batch/�
 ```json
 {
   "mcpServers": {
-    "localagent": {
+    "parcae": {
       "type": "streamableHttp",
       "url": "http://127.0.0.1:8766/mcp"
     }
@@ -1001,7 +1098,7 @@ ChatGPT 配置：
 | **启动命令** | `node` |
 | **参数** | `tools/mcp_bridge.js` |
 | **工作目录** | 项目根目录（如 `<project_root>`） |
-| 环境变量 | （可选）`LOCALAGENT_MCP_URL=http://127.0.0.1:8766/mcp`，自定义端点时使用 |
+| 环境变量 | （可选）`PARCAE_MCP_URL=http://127.0.0.1:8766/mcp`，自定义端点时使用 |
 
 桥接脚本会自动按以下优先级查找 mcp-remote：
 1. `npm root -g` 返回路径

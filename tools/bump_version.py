@@ -3,9 +3,14 @@
 版本号同步脚本：统一更新项目中所有 VERSION 常量引用。
 
 更新位置：
-  1. server/main.py          — VERSION = "x.y.z"
-  2. server/core/health.py   — VERSION = "x.y.z"
-  3. pyproject.toml          — [project] 段 version = "x.y.z"（不碰依赖版本号）
+  1. server/version.py       — VERSION = "x.y.z"（**唯一真源**：/health 与 FastAPI app 都取它）
+  2. pyproject.toml          — [project] 段 version = "x.y.z"（不碰依赖版本号）
+
+⛔ 不要再把 `server/main.py` / `server/core/health.py` 加回目标列表：两者现在都是
+   `from server.version import VERSION`，文件里**没有任何** `VERSION = "x.y.z"` 可匹配。
+   2026-10-24 之前本脚本还照着旧架构改那两处，实跑结果是一个都匹配不到、只有 pyproject
+   被改 ⇒ **运行期版本号不动**（/health 报旧版），且末尾 exit 1 留下"只同步一半"的中间态。
+   架构说明见 `server/version.py` 顶部「为什么单独拆一个模块」。
 
 用法:
   uv run python tools/bump_version.py 0.32.1
@@ -36,16 +41,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # (相对路径, 正则模式, 替换模板, 说明)
 TARGETS = [
     (
-        "server/main.py",
+        "server/version.py",
         re.compile(r'^VERSION\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"', re.MULTILINE),
         'VERSION = "{version}"',
-        "后端主入口 VERSION 常量",
-    ),
-    (
-        "server/core/health.py",
-        re.compile(r'^VERSION\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"', re.MULTILINE),
-        'VERSION = "{version}"',
-        "/health 端点 VERSION 常量",
+        "版本号唯一真源（/health 与 FastAPI app 都取它）",
     ),
     (
         "pyproject.toml",

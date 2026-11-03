@@ -25,7 +25,7 @@ from .state import TabSession
 if TYPE_CHECKING:
     from patchright.async_api import Browser, BrowserContext, Page, Playwright
 
-logger = logging.getLogger("localagent.browser_session")
+logger = logging.getLogger("parcae.browser_session")
 
 # dialog 超时兜底秒数：5 分钟内未被 handle_dialog 处理则自动 dismiss
 # （兼顾 LLM 推理时间：agent 收到 blocked_by_dialog 反馈 → 决策 → 调 handle_dialog）
@@ -184,12 +184,24 @@ class SessionManager:
         """创建或复用一个 TabSession。
 
         优先级：
-        1. url_pattern：找现有 page（url 包含 pattern），命中则复用（显式接管已有 tab）。
+        1. url_pattern：找现有 page（url 包含 pattern），命中则复用。
            2026-10-02 归属权：若命中的 page 已被其他 agent 持有（owner 非匿名且 ≠ 本次
-           caller 且非 gui），必须 force=True 才允许接管，否则抛 TAB_OWNED（含 owner 信息）。
+           caller 且非 gui），须显式 force=True 才放行，否则抛 TAB_OWNED（含 owner 信息）。
         2. url：新建 page 并 goto url
         3. 都不传：新建专用空白 tab（2026-09-03 起不复用 pages[0]，避免
            session 意外绑定用户真实 tab/扩展窗口页）
+
+        ★ force 的真实语义 = **加入共享**，不是「夺走」（2026-11-02 正名，行为未变）：
+        - 目标 tab 与对方的 session 都原样保留，对方不会被踢、不会收到通知；
+        - 两个 session 从此指向同一个物理 page：DOM / 登录态 / 表单状态只有一份，
+          点击与输入互相可见（并发写由 page_guard 页级锁 + STALE_NODE 兜住）；
+        - 关闭自己的 session 只解绑，不会关掉这个 tab（page_refs 引用计数）。
+        参数名 `force` 是 2026-10-02 的历史叫法，读作 join 即可。
+
+        ★ 2026-10-23 导航节流：分支 2（新建 tab 并 goto）算「初始连接」，受同域
+        30s/域 限制（server/browser/nav_guard.py），撞限流抛 NavRateLimited
+        （ValueError 子类）。**同一网站优先用 url_pattern 复用已有 tab**——
+        既省一次冷启动，也不占节流额度。返回体的 reuse_hint 会提示可复用的同域 tab。
 
         2026-10-02 归属权/额度（多 agent 不打架）：
         - owner 记入 TabSession.owner，后续 close 校验归属
@@ -267,12 +279,21 @@ class SessionManager:
                     and not force
                 ):
                     raise ValueError(
-                        f"TAB_OWNED: url_pattern 命中的 tab 正被 owner={holder.owner} 持有 "
+                        f"TAB_OWNED: url_pattern 命中的 tab 正被 owner={holder.owner} 使用 "
                         f"(session {holder.session_id}, url={holder.url})。"
-                        f"如确要接管请带 force=true（对方不会收到通知，请先协调）。"
+                        f"要与它共享这个 tab 请带 force=true —— 该参数语义是「加入共享」"
+                        f"而不是「夺走」：对方 session 保留、不会收到通知，你们会同时操作"
+                        f"同一份 DOM，改动互相可见。不想共享就改用 url= 新开一个 tab。"
                     )
         # 2) url 新建
         if page is None and url:
+            # 2026-10-23 同域导航节流：新开 tab 的首次 goto 也算"初始连接"，
+            # 与 reload 共用 30s/域 的窗口。撞限流抛 NavRateLimited（ValueError 子类），
+            # 端点转 429 并给出 retry_after。
+            from ..nav_guard import enforce_nav
+
+            # 归因：把 owner 记进节流状态，被拒的其他 agent 才知道"额度是谁占的"。
+            enforce_nav(url, "goto", caller=owner)
             page = await self._new_page_with_retry(context)
             await page.goto(url, wait_until="domcontentloaded")
         # 3) 都不传：一律新建专用空白 tab。
@@ -388,6 +409,10 @@ class SessionManager:
         # pyright stub 将 "close" 事件 handler 标注为 (Page) -> Awaitable[None] | None，
         # 用 *args 兼容（运行时无论传不传参都不会 TypeError）。
         def _on_close(*_args: object) -> None:
+            # 2026-11-01：page 真被关掉（外部/最后一个 holder 关闭）时同步解绑，
+            # 避免引用表里留下指向已关闭页面的死条目。
+            from ..page_refs import get_page_refs
+            get_page_refs().detach(page, session_id)
             self._sessions.pop(session_id, None)
             logger.debug("BrowserSession: page 关闭，session %s 已清理", session_id)
         page.on("close", _on_close)
@@ -515,8 +540,67 @@ class SessionManager:
         page.on("download", _on_download)
 
         self._sessions[session_id] = session
+        # 2026-11-01 页级引用表（server/browser/page_refs.py）：url_pattern 复用 /
+        # force=true 加入共享会让多个 session 指向同一个 page。记下来，close 时才知道
+        # "关掉 page 会不会把别人一起带走"（实测 E5 就是这么发生的）。
+        from ..page_refs import get_page_refs, page_label
+
+        _page_ref_count = get_page_refs().attach(page, session_id)
+        if _page_ref_count > 1:
+            logger.warning(
+                "BrowserSession: session %s 与另外 %d 个 session 共享同一 page %s "
+                "（DOM/登录态/表单状态互通；关闭时不会连坐关页）",
+                session_id, _page_ref_count - 1, page_label(page),
+            )
+        # 2026-11-01 来源登记（server/browser/tab_origins.py）：主动认领，别等下一次
+        # 观测。否则"建会话到关闭之间没人查过 tabs"的 tab 在表里不存在，关闭后会被
+        # 当成外来脚本页，冷路径于是拒绝操作后端自己开的页面（实测复现）。
+        from ..tab_origins import get_tab_origins
+
+        get_tab_origins().claim(
+            tab_id or getattr(page, "_la_tab_id", "") or "",
+            session_id, owner,
+            url=page.url, title=title,
+        )
         # 启动清理任务（如未启动）
         self._ensure_cleanup_task()
+        # 2026-10-23：复用提示。若同域还有其他已打开的 tab，把「下次直接复用」写进响应——
+        # agent 不读文档也会看到，比写在规范里更有效。
+        reuse_hint: str | None = None
+        try:
+            from urllib.parse import urlparse as _urlparse
+
+            from ..nav_guard import registrable_domain as _reg_domain
+
+            _host = _reg_domain(_urlparse(page.url).hostname or "")
+            if _host:
+                _others: list[str] = []
+                for _p in context.pages:
+                    if _p is page or _p.is_closed():
+                        continue
+                    if _reg_domain(_urlparse(_p.url or "").hostname or "") == _host:
+                        _others.append(_p.url)
+                if _others:
+                    _sample = _others[0]
+                    if len(_sample) > 100:
+                        _sample = _sample[:100] + "…"
+                    reuse_hint = (
+                        f"该域名下已有 {len(_others)} 个打开的 tab（如 {_sample}）。"
+                        f"下次直接 browser_session_create(url_pattern='{_host}') 复用已有 tab，"
+                        f"不要新开：省一次冷启动，也不占用同域导航节流额度（30s/域）。"
+                    )
+        except Exception as e:
+            logger.debug("BrowserSession: reuse hint 计算失败 %s", e)
+
+        # 2026-11-02 正名：force=true 得到的是「共享页」而不是「独占页」。数字字段
+        # （page_ref_count/page_shared_with）容易被忽略，给一句人能读懂的话。
+        _shared_with = sorted(get_page_refs().others(page, session_id)) if _page_ref_count > 1 else []
+        _share_note = (
+            f"你正在与另外 {_page_ref_count - 1} 个 session 共享这个 tab"
+            f"（{', '.join(s[:8] for s in _shared_with)}）：DOM / 登录态 / 表单状态只有一份，"
+            f"双方的点击与输入互相可见；关闭你的 session 只解绑，不会关掉这个 tab。"
+            if _page_ref_count > 1 else None
+        )
         return {
             "session_id": session_id,
             "tab_id": tab_id,
@@ -526,6 +610,13 @@ class SessionManager:
             "created": True,
             "site_lessons": site_lessons,
             "site_lessons_hint": build_site_lessons_hint(site_lessons),
+            "reuse_hint": reuse_hint,
+            # 2026-11-01：本 page 上现在共挂着几个 session（>1 表示被别人共享）。
+            # 调用方据此知道「我操作的可能不是只有我在看的页面」，也解释为什么
+            # 关闭自己的 session 后别人的 tab 还开着（反之亦然）。
+            "page_ref_count": _page_ref_count,
+            "page_shared_with": _shared_with,
+            "note": _share_note,
         }
 
     def get_session(self, session_id: str) -> TabSession | None:
@@ -638,6 +729,8 @@ class SessionManager:
             return None
         # 探活：page 是否已关闭
         if s.page.is_closed():
+            from ..page_refs import get_page_refs
+            get_page_refs().detach(s.page, session_id)
             self._sessions.pop(session_id, None)
             self._record_closed(s, "page_closed_external")
             return None
@@ -646,6 +739,9 @@ class SessionManager:
 
     def list_sessions(self) -> list[dict]:
         """列出所有活跃 session。"""
+        from ..page_refs import get_page_refs
+
+        refs = get_page_refs()
         now = time.time()
         return [
             {
@@ -660,6 +756,11 @@ class SessionManager:
                 "console_logs_buffered": len(s.console_logs),
                 "site_lessons_count": len(s.site_lessons),
                 "site_lessons_domains": [lesson.get("domain", "") for lesson in s.site_lessons],
+                # 2026-11-01：同一个物理 page 上可能挂着多个 session（url_pattern
+                # 复用 / force=true 加入共享）。>1 意味着 DOM 与登录态是共用的，
+                # 操作会互相影响，任何一方都不该按独占来理解。
+                "page_ref_count": refs.count(s.page),
+                "page_shared_with": sorted(refs.others(s.page, s.session_id)),
             }
             for s in self._sessions.values()
         ]
@@ -693,13 +794,20 @@ class SessionManager:
             return None
         return contexts[0]
 
-    def _record_closed(self, s: TabSession, reason: str) -> None:
-        """写关闭墓碑（FIFO 上限 200），供后续操作报 SESSION_CLOSED 明确错误。"""
+    def _record_closed(
+        self, s: TabSession, reason: str, extra: dict | None = None
+    ) -> None:
+        """写关闭墓碑（FIFO 上限 200），供后续操作报 SESSION_CLOSED 明确错误。
+
+        `extra` 用于补充关闭时的现场（如 `page_kept_by`：因为还有这些 session
+        挂着，page 被保留没关）。
+        """
         self._closed_log[s.session_id] = {
             "reason": reason,
             "closed_at": time.time(),
             "owner": s.owner,
             "url": s.url,
+            **(extra or {}),
         }
         if len(self._closed_log) > 200:
             for k in list(self._closed_log.keys())[: len(self._closed_log) - 200]:
@@ -724,7 +832,25 @@ class SessionManager:
         s = self._sessions.pop(session_id, None)
         if s is None:
             return False
-        self._record_closed(s, closed_reason)
+        # 2026-11-01 引用计数（G3）：先算「除我之外还有谁挂着这个 page」，
+        # 有人就不许关 page——否则一人收工把同 tab 的所有会话一起带走
+        # （实测 E5：A close 之后 B 用自己的 session 也报"已失效"）。
+        from ..page_refs import get_page_refs, page_label
+
+        _refs = get_page_refs()
+        _others = _refs.others(s.page, session_id)
+        _refs.detach(s.page, session_id)
+        _page_kept = False
+        _record_extra: dict = {}
+        if close_page and _others and not s.page.is_closed():
+            _page_kept = True
+            _record_extra["page_kept_by"] = sorted(_others)
+            logger.info(
+                "BrowserSession: session %s 关闭时保留 page %s —— 还有 %d 个 session "
+                "挂在上面（%s）。避免连坐关闭其他人的 tab。",
+                session_id, page_label(s.page), len(_others), sorted(_others),
+            )
+        self._record_closed(s, closed_reason, extra=_record_extra or None)
         # 取消未完成的 dialog 超时兜底 task，避免 asyncio task 泄漏
         for task in list(s._dialog_timeout_tasks):
             task.cancel()
@@ -738,15 +864,22 @@ class SessionManager:
             except Exception:
                 pass  # 下载已完成/已被保存，cancel 失败属正常
             s.last_download_obj = None
-        if close_page and not s.page.is_closed():
+        if close_page and not _page_kept and not s.page.is_closed():
             try:
                 await s.page.close()
             except Exception as e:
                 logger.debug("BrowserSession: 关闭 page 失败 %s", e)
         # 2026-09-03 popup 归属修复：连坐关闭本 session 页面 spawn 的 popup
         # （window.open 的子页若不关会成为孤儿 tab，每轮 e2e 泄漏 4-5 个）
+        # 2026-11-01：同样按引用计数——别的 session 若也复用了该 popup，不能关。
         if close_page:
             for popup_page in list(s.popup_pages):
+                if _refs.others(popup_page, session_id):
+                    logger.info(
+                        "BrowserSession: popup %s 仍被其他 session 持有，保留不关",
+                        page_label(popup_page),
+                    )
+                    continue
                 try:
                     if not popup_page.is_closed():
                         await popup_page.close()

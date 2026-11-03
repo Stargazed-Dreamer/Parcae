@@ -26,9 +26,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-from client.core.agent.event_store import EventStore  # noqa: E402
-from client.core.agent.runner import SessionRunner  # noqa: E402
-from client.core.agent.types import (  # noqa: E402
+from lib.agent_runtime.event_store import EventStore  # noqa: E402
+from lib.agent_runtime.runner import SessionRunner  # noqa: E402
+from lib.agent_runtime.types import (  # noqa: E402
     Message,
     RunnerConfig,
     RunnerDeps,
